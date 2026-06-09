@@ -8,18 +8,14 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde::Deserialize;
 
-use super::{ManifestParser, dep, utf8};
+use super::{ManifestParser, dep, from_json, from_toml, utf8};
 use crate::dependency_analysis::types::{Ecosystem, ParseError, Parsed};
 
 pub struct PypiParser;
 
 impl ManifestParser for PypiParser {
     fn parse(&self, path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
+        let name = super::file_name_lower(path);
         match name.as_str() {
             "pipfile.lock" => parse_pipfile_lock(path, bytes),
             "poetry.lock" | "uv.lock" | "pdm.lock" => parse_toml_lock(path, bytes),
@@ -49,8 +45,7 @@ struct PipEntry {
 }
 
 fn parse_pipfile_lock(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-    let doc: PipfileLock = serde_json::from_slice(bytes)
-        .map_err(|e| ParseError::malformed(path, format!("Pipfile.lock decode: {e}")))?;
+    let doc: PipfileLock = from_json(path, bytes, "Pipfile.lock")?;
     let mut parsed = Parsed::default();
     for (name, entry) in doc.default.into_iter().chain(doc.develop) {
         let version = entry
@@ -77,8 +72,7 @@ struct TomlLockPkg {
 
 fn parse_toml_lock(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
     let text = utf8(path, bytes)?;
-    let lock: TomlLock = toml::from_str(text)
-        .map_err(|e| ParseError::malformed(path, format!("TOML lock decode: {e}")))?;
+    let lock: TomlLock = from_toml(path, text, "TOML lock")?;
     let mut parsed = Parsed::default();
     for pkg in lock.package {
         parsed
@@ -92,8 +86,7 @@ fn parse_toml_lock(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
 
 fn parse_pyproject(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
     let text = utf8(path, bytes)?;
-    let doc: toml::Value = toml::from_str(text)
-        .map_err(|e| ParseError::malformed(path, format!("pyproject decode: {e}")))?;
+    let doc: toml::Value = from_toml(path, text, "pyproject")?;
     let mut parsed = Parsed::default();
     parsed.warnings.push(format!(
         "{}: pyproject.toml holds constraints; prefer a lockfile",
@@ -128,14 +121,7 @@ fn parse_pyproject(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
             if name == "python" {
                 continue;
             }
-            let version = match val {
-                toml::Value::String(s) => Some(strip_constraint(s)),
-                toml::Value::Table(t) => t
-                    .get("version")
-                    .and_then(|x| x.as_str())
-                    .map(strip_constraint),
-                _ => None,
-            };
+            let version = super::toml_version(val).map(|s| strip_constraint(&s));
             let mut d = dep(name.clone(), version, Ecosystem::PyPI, path);
             d.direct = true;
             parsed.deps.push(d);

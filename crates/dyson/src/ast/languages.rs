@@ -79,44 +79,39 @@ static JAVASCRIPT: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     definitions_are_calls: false,
 });
 
+// TypeScript and TSX share identical node-type sets; only the grammar and
+// display name differ.  Factor the slices so adding a node type touches one
+// place.
+const TS_IDENT_TYPES: &[&str] = &[
+    "identifier",
+    "property_identifier",
+    "shorthand_property_identifier",
+    "type_identifier",
+];
+const TS_DEF_TYPES: &[&str] = &[
+    "function_declaration",
+    "class_declaration",
+    "lexical_declaration",
+    "interface_declaration",
+    "type_alias_declaration",
+    "enum_declaration",
+];
+const TS_CALL_TYPES: &[&str] = &["call_expression", "new_expression"];
+
 static TYPESCRIPT: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-    identifier_types: &[
-        "identifier",
-        "property_identifier",
-        "shorthand_property_identifier",
-        "type_identifier",
-    ],
-    definition_types: &[
-        "function_declaration",
-        "class_declaration",
-        "lexical_declaration",
-        "interface_declaration",
-        "type_alias_declaration",
-        "enum_declaration",
-    ],
-    call_types: &["call_expression", "new_expression"],
+    identifier_types: TS_IDENT_TYPES,
+    definition_types: TS_DEF_TYPES,
+    call_types: TS_CALL_TYPES,
     display_name: "TypeScript",
     definitions_are_calls: false,
 });
 
 static TSX: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     language: tree_sitter_typescript::LANGUAGE_TSX.into(),
-    identifier_types: &[
-        "identifier",
-        "property_identifier",
-        "shorthand_property_identifier",
-        "type_identifier",
-    ],
-    definition_types: &[
-        "function_declaration",
-        "class_declaration",
-        "lexical_declaration",
-        "interface_declaration",
-        "type_alias_declaration",
-        "enum_declaration",
-    ],
-    call_types: &["call_expression", "new_expression"],
+    identifier_types: TS_IDENT_TYPES,
+    definition_types: TS_DEF_TYPES,
+    call_types: TS_CALL_TYPES,
     display_name: "TSX",
     definitions_are_calls: false,
 });
@@ -408,10 +403,27 @@ pub fn try_parse_file(
 
 /// Create a directory walker with standard settings (.gitignore, etc.).
 pub fn walk_dir(dir: &std::path::Path) -> ignore::Walk {
+    walk_dir_filtered(dir, None)
+}
+
+/// Like [`walk_dir`], but restricts the walk to files matching `include_glob`
+/// when one is supplied (e.g. `"*.rs"`).  An unparseable glob is ignored and
+/// the walk proceeds unfiltered, matching the prior per-tool behavior.
+pub fn walk_dir_filtered(dir: &std::path::Path, include_glob: Option<&str>) -> ignore::Walk {
     let mut builder = ignore::WalkBuilder::new(dir);
     builder.hidden(false);
     builder.git_ignore(true);
     builder.git_global(true);
+
+    if let Some(glob) = include_glob {
+        let mut types_builder = ignore::types::TypesBuilder::new();
+        types_builder.add("filter", glob).ok();
+        types_builder.select("filter");
+        if let Ok(types) = types_builder.build() {
+            builder.types(types);
+        }
+    }
+
     builder.build()
 }
 
@@ -426,6 +438,34 @@ pub fn walk_dir(dir: &std::path::Path) -> ignore::Walk {
 /// extensions (`"rs"`, `"py"`).  Case-insensitive.
 ///
 /// Returns `None` for unrecognized names.
+/// Canonical lowercase names of every language the AST tools support, in a
+/// stable order.  Used to build the "Supported: …" portion of unknown-language
+/// errors so the list can't drift from `config_for_language_name`.
+pub fn supported_language_names() -> &'static [&'static str] {
+    &[
+        "rust",
+        "python",
+        "javascript",
+        "typescript",
+        "tsx",
+        "go",
+        "java",
+        "c",
+        "cpp",
+        "csharp",
+        "ruby",
+        "kotlin",
+        "swift",
+        "zig",
+        "elixir",
+        "erlang",
+        "ocaml",
+        "haskell",
+        "nix",
+        "json",
+    ]
+}
+
 pub fn config_for_language_name(name: &str) -> Option<&'static LanguageConfig> {
     match name.to_ascii_lowercase().as_str() {
         "rust" | "rs" => Some(&RUST),
@@ -474,29 +514,10 @@ pub fn config_for_glob(glob: &str) -> Option<&'static LanguageConfig> {
 }
 
 pub fn config_for_extension(ext: &str) -> Option<&'static LanguageConfig> {
-    match ext {
-        "rs" => Some(&RUST),
-        "py" | "pyi" => Some(&PYTHON),
-        "js" | "mjs" | "cjs" | "jsx" => Some(&JAVASCRIPT),
-        "ts" | "mts" | "cts" => Some(&TYPESCRIPT),
-        "tsx" => Some(&TSX),
-        "go" => Some(&GO),
-        "java" => Some(&JAVA),
-        "c" | "h" => Some(&C),
-        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => Some(&CPP),
-        "cs" => Some(&CSHARP),
-        "rb" => Some(&RUBY),
-        "kt" | "kts" => Some(&KOTLIN),
-        "swift" => Some(&SWIFT),
-        "zig" => Some(&ZIG),
-        "ex" | "exs" => Some(&ELIXIR),
-        "erl" | "hrl" => Some(&ERLANG),
-        "ml" | "mli" => Some(&OCAML),
-        "hs" => Some(&HASKELL),
-        "nix" => Some(&NIX),
-        "json" => Some(&JSON),
-        _ => None,
-    }
+    // Every file extension is also a valid name key in
+    // `config_for_language_name`, so delegate rather than maintain a second
+    // parallel table that can drift when a grammar is added or removed.
+    config_for_language_name(ext)
 }
 
 #[cfg(test)]
@@ -514,6 +535,18 @@ mod tests {
             assert!(
                 config_for_extension(ext).is_some(),
                 "expected config for extension '.{ext}'"
+            );
+        }
+    }
+
+    #[test]
+    fn every_supported_name_resolves() {
+        // Guards the hand-ordered `supported_language_names` list against
+        // drift from `config_for_language_name`.
+        for name in super::supported_language_names() {
+            assert!(
+                config_for_language_name(name).is_some(),
+                "supported_language_names lists '{name}' but it doesn't resolve"
             );
         }
     }

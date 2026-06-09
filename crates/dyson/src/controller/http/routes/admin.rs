@@ -35,7 +35,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use hyper::body::Bytes;
 use hyper::{Request, Response, StatusCode};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
@@ -43,7 +43,9 @@ use tokio::sync::RwLock;
 
 use crate::config::Settings;
 
-use super::super::responses::{Resp, bad_request, boxed, json_ok, read_json_capped, unauthorized};
+use super::super::responses::{
+    Resp, bad_request, boxed, json_ok, json_status, open_workspace, read_json_capped, unauthorized,
+};
 use super::super::state::HttpState;
 
 /// Cap for the configure body.  Generous for very long task prompts
@@ -434,17 +436,6 @@ fn configure_verify_cache_key(
     }
 }
 
-fn json_status<T: Serialize>(status: StatusCode, v: &T) -> Resp {
-    match serde_json::to_vec(v) {
-        Ok(bytes) => Response::builder()
-            .status(status)
-            .header("Content-Type", "application/json")
-            .body(boxed(Bytes::from(bytes)))
-            .expect("status + content-type are valid"),
-        Err(e) => bad_request(&format!("serialize: {e}")),
-    }
-}
-
 pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
     // Pull the configure secret BEFORE consuming the body — the
     // header check runs first so an unauthenticated caller can't
@@ -474,9 +465,9 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         || body.instance_id.is_some()
         || body.identity_doc.is_some()
     {
-        let mut ws = match crate::workspace::create_workspace(&snapshot.workspace) {
+        let mut ws = match open_workspace(&snapshot) {
             Ok(w) => w,
-            Err(e) => return bad_request(&format!("workspace open failed: {e}")),
+            Err(resp) => return resp,
         };
         if let Some(identity_doc) = body.identity_doc.as_deref() {
             if !looks_like_full_identity_doc(identity_doc) {
@@ -932,9 +923,9 @@ pub(super) async fn post_skill_install(
         Err(e) => return bad_request(&e),
     };
     let snapshot = state.settings_snapshot();
-    let workspace = match crate::workspace::create_workspace(&snapshot.workspace) {
+    let workspace = match open_workspace(&snapshot) {
         Ok(w) => Arc::new(RwLock::new(w)),
-        Err(e) => return bad_request(&format!("workspace open failed: {e}")),
+        Err(resp) => return resp,
     };
     match crate::tool::skill_marketplace::install_skill_package_to_workspace(
         &workspace,
@@ -971,9 +962,9 @@ pub(super) async fn delete_skill(
         return resp;
     }
     let snapshot = state.settings_snapshot();
-    let workspace = match crate::workspace::create_workspace(&snapshot.workspace) {
+    let workspace = match open_workspace(&snapshot) {
         Ok(w) => Arc::new(RwLock::new(w)),
-        Err(e) => return bad_request(&format!("workspace open failed: {e}")),
+        Err(resp) => return resp,
     };
     match crate::tool::skill_marketplace::remove_skill_from_workspace(&workspace, skill.trim())
         .await

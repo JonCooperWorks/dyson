@@ -32,8 +32,10 @@ pub const STATE_SYNC_TOKEN_PREFIX: &str = "st_";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BadToken {
-    /// Empty or too short for the prefix.
+    /// Empty or too short for the prefix, or a body shorter than 32 chars.
     TooShort,
+    /// Body longer than 32 chars.
+    TooLong,
     /// Wrong prefix for the kind being parsed.
     WrongPrefix,
     /// Body has the right length but is not 32 hex chars.
@@ -44,6 +46,7 @@ impl std::fmt::Display for BadToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::TooShort => "token too short",
+            Self::TooLong => "token too long",
             Self::WrongPrefix => "token has wrong kind prefix",
             Self::BadBody => "token body is not 32 hex chars",
         })
@@ -59,8 +62,12 @@ fn validate(token: &str, prefix: &str) -> Result<(), BadToken> {
     let Some(rest) = token.strip_prefix(prefix) else {
         return Err(BadToken::WrongPrefix);
     };
-    if rest.len() != TOKEN_BODY_HEX_LEN {
-        return Err(BadToken::TooShort);
+    // Report the length error with explicit direction — an over-length body
+    // returning "too short" is a contradictory diagnostic.
+    match rest.len().cmp(&TOKEN_BODY_HEX_LEN) {
+        std::cmp::Ordering::Less => return Err(BadToken::TooShort),
+        std::cmp::Ordering::Greater => return Err(BadToken::TooLong),
+        std::cmp::Ordering::Equal => {}
     }
     if !rest.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(BadToken::BadBody);
@@ -198,5 +205,12 @@ mod tests {
     fn too_short_input_is_rejected() {
         assert_eq!(ProxyToken::parse("pt_short"), Err(BadToken::TooShort));
         assert_eq!(ProxyToken::parse(""), Err(BadToken::TooShort));
+    }
+
+    #[test]
+    fn over_length_body_is_too_long_not_too_short() {
+        // A 33-hex body must not report "too short".
+        let s = format!("pt_{}", "a".repeat(TOKEN_BODY_HEX_LEN + 1));
+        assert_eq!(ProxyToken::parse(s), Err(BadToken::TooLong));
     }
 }

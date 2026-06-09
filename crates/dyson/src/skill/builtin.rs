@@ -4,9 +4,10 @@
 // LEARNING OVERVIEW
 //
 // What this file does:
-//   Wraps Dyson's built-in tools (bash, and future read_file/write_file/
-//   edit_file) into a Skill implementation.  This is the default skill
-//   that's always loaded unless explicitly disabled.
+//   Wraps Dyson's built-in tools (bash, read_file, write_file, edit_file,
+//   bulk_edit, list_files, search_files, and more — see `BuiltinSkill::new`)
+//   into a Skill implementation.  This is the default skill that's always
+//   loaded unless explicitly disabled.
 //
 // Why wrap tools in a skill?
 //   The agent loop only interacts with skills — it doesn't know about

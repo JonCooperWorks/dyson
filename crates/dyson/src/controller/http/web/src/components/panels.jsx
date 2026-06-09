@@ -770,15 +770,15 @@ function SecurityHarnessPanel({ body, exit, running, summary, errorText }) {
   );
 }
 
-function ReadPanel({ path, lines, highlight }) {
+function ReadPanel({ path, lines }) {
   return (
     <div className="p-body flush" style={{background:'var(--bg)'}}>
       <div style={{padding:'8px 12px', borderBottom:'1px solid var(--line)', fontFamily:'var(--font-mono)', fontSize:11, color:'var(--mute)'}}>{path}</div>
       <div style={{fontFamily:'var(--font-mono)', fontSize:11.5, lineHeight:1.6, padding:'8px 0'}}>
         {lines.map((l, i) => (
-          <div key={i} style={{display:'flex', background: i+1===highlight ? 'var(--accent-dim)' : 'transparent', padding:'0 12px 0 0'}}>
+          <div key={i} style={{display:'flex', padding:'0 12px 0 0'}}>
             <span style={{color:'var(--mute)', width:32, textAlign:'right', paddingRight:10, flex:'0 0 auto', userSelect:'none'}}>{i+1}</span>
-            <span style={{color: i+1===highlight ? 'var(--fg)' : 'var(--fg-dim)', whiteSpace:'pre'}}>{l || ' '}</span>
+            <span style={{color:'var(--fg-dim)', whiteSpace:'pre'}}>{l || ' '}</span>
           </div>
         ))}
       </div>
@@ -862,7 +862,7 @@ function ToolBody({ tool }) {
     case 'diff':     return <DiffPanel files={tool.body?.files || []}/>;
     case 'sbom':     return <SbomPanel rows={tool.body?.rows || []} counts={tool.body?.counts || {}}/>;
     case 'taint':    return <TaintPanel flow={tool.body?.flow || []}/>;
-    case 'read':     return <ReadPanel path={tool.body?.path} lines={tool.body?.lines || []} highlight={tool.body?.highlight}/>;
+    case 'read':     return <ReadPanel path={tool.body?.path} lines={tool.body?.lines || []}/>;
     case 'thinking': return <ThinkingPanel text={tool.body?.text || ''} running={running}/>;
     case 'image':    return <ImagePanel url={tool.body?.url} name={tool.body?.name} prompt={tool.body?.prompt || tool.prompt}/>;
     case 'subagent': return <SubagentPanel children={tool.body?.children} summary={tool.body?.summary} running={running}/>;

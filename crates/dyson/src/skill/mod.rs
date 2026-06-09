@@ -157,7 +157,6 @@ pub trait Skill: Send + Sync {
 ///
 /// Skills that fail to load are logged and skipped — the agent continues
 /// without them.
-/// Create skills from settings and (optionally) workspace discovery.
 ///
 /// Uses **two-phase construction** for subagent support:
 ///

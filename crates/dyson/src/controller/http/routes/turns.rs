@@ -36,7 +36,7 @@ use super::super::{AgentMode, ClientRegistry, build_agent};
 use super::conversations::bump_to_front;
 
 const PLACEHOLDER_TITLE: &str = "New conversation";
-const WARMUP_PLACEHOLDER: &str = "warmup-placeholder";
+use crate::controller::WARMUP_PLACEHOLDER;
 
 #[derive(Clone)]
 struct ReadyTurnConfig {

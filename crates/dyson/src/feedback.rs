@@ -51,6 +51,53 @@ impl FeedbackRating {
             Self::Excellent => 3,
         }
     }
+
+    /// Map a reaction emoji to a rating, returning `None` for unrecognized
+    /// emojis.  Shared by every controller (Telegram reactions, the web UI's
+    /// emoji buttons) so the mapping never drifts between input surfaces.
+    pub fn from_emoji(emoji: &str) -> Option<Self> {
+        match emoji {
+            "💩" | "😡" | "🤮" => Some(Self::Terrible),
+            "👎" => Some(Self::Bad),
+            "😢" | "😐" => Some(Self::NotGood),
+            "👍" | "👏" => Some(Self::Good),
+            "🔥" | "🎉" | "😂" => Some(Self::VeryGood),
+            "❤️" | "❤" | "🤯" | "💯" | "⚡" => Some(Self::Excellent),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod rating_tests {
+    use super::FeedbackRating;
+
+    #[test]
+    fn from_emoji_maps_every_known_reaction() {
+        let cases: &[(&str, FeedbackRating)] = &[
+            ("💩", FeedbackRating::Terrible),
+            ("😡", FeedbackRating::Terrible),
+            ("🤮", FeedbackRating::Terrible),
+            ("👎", FeedbackRating::Bad),
+            ("😢", FeedbackRating::NotGood),
+            ("😐", FeedbackRating::NotGood),
+            ("👍", FeedbackRating::Good),
+            ("👏", FeedbackRating::Good),
+            ("🔥", FeedbackRating::VeryGood),
+            ("🎉", FeedbackRating::VeryGood),
+            ("😂", FeedbackRating::VeryGood),
+            ("❤️", FeedbackRating::Excellent),
+            ("❤", FeedbackRating::Excellent),
+            ("🤯", FeedbackRating::Excellent),
+            ("💯", FeedbackRating::Excellent),
+            ("⚡", FeedbackRating::Excellent),
+        ];
+        for (e, want) in cases {
+            assert_eq!(FeedbackRating::from_emoji(e), Some(*want), "emoji {e}");
+        }
+        assert_eq!(FeedbackRating::from_emoji("🦀"), None);
+        assert_eq!(FeedbackRating::from_emoji(""), None);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -76,8 +123,10 @@ pub struct FeedbackEntry {
 
 /// Disk-backed per-chat feedback store.
 ///
-/// Stores feedback entries as `{chat_id}_feedback.json` in the same
-/// directory as chat history files.
+/// Stores feedback entries as `{dir}/{chat_id}/feedback.json`, alongside
+/// the chat's history (see `feedback_path`).  Legacy flat
+/// `{chat_id}_feedback.json` files are migrated into this layout on startup
+/// by `chat_history::migrate`.
 pub struct FeedbackStore {
     dir: PathBuf,
 }

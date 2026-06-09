@@ -27,12 +27,8 @@ pub enum ToolView {
     },
     /// File diff — `edit_file` / `write_file` / `bulk_edit`.
     Diff { files: Vec<DiffFile> },
-    /// File contents with optional line highlight — `read_file`.
-    Read {
-        path: String,
-        lines: Vec<String>,
-        highlight: Option<usize>,
-    },
+    /// File contents — `read_file`.
+    Read { path: String, lines: Vec<String> },
     /// SBOM + vulnerabilities — `dependency_scan`.
     Sbom {
         rows: Vec<SbomRow>,

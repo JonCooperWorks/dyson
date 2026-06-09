@@ -50,7 +50,6 @@
 // ===========================================================================
 
 mod api;
-pub mod feedback;
 mod formatting;
 pub mod output;
 pub mod types;
@@ -77,7 +76,7 @@ use self::output::TelegramOutput;
 // Constants
 // ---------------------------------------------------------------------------
 
-const WARMUP_PLACEHOLDER: &str = "warmup-placeholder";
+use crate::controller::WARMUP_PLACEHOLDER;
 
 /// Per-chat agent state, tracking the active provider and model
 /// so within-provider model switching works.
@@ -1157,7 +1156,7 @@ async fn handle_reaction(
     };
 
     // Convert emoji → rating at the Telegram boundary.
-    let Some(rating) = feedback::emoji_to_rating(emoji) else {
+    let Some(rating) = crate::feedback::FeedbackRating::from_emoji(emoji) else {
         tracing::debug!(chat_id, emoji, "unknown emoji reaction — ignoring");
         return;
     };

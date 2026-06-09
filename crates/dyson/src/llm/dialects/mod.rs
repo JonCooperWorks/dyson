@@ -71,6 +71,47 @@ pub trait TextToolHandler: Send + Sync {
     fn extract_tool_calls(&self, text: &str) -> Option<(String, Vec<ExtractedToolCall>)>;
 }
 
+/// Append a per-tool parameter table to `prompt`: a `## {name}` heading,
+/// the description, then a `  - {name}: {type}{(required|optional)} — {desc}`
+/// line per property.  Shared by the text dialects (Gemma, Qwen) whose
+/// prompt preambles differ but whose parameter tables are identical.
+pub(crate) fn write_tool_param_table(prompt: &mut String, tools: &[ToolDefinition]) {
+    use std::fmt::Write;
+    for tool in tools {
+        writeln!(prompt, "\n## {}", tool.name).unwrap();
+        writeln!(prompt, "{}", tool.description).unwrap();
+
+        if let Some(props) = tool.input_schema.get("properties")
+            && let Some(obj) = props.as_object()
+        {
+            let required: Vec<&str> = tool
+                .input_schema
+                .get("required")
+                .and_then(|r| r.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+
+            prompt.push_str("Parameters:\n");
+            for (name, schema) in obj {
+                let typ = schema
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("string");
+                let desc = schema
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("");
+                let req = if required.contains(&name.as_str()) {
+                    " (required)"
+                } else {
+                    " (optional)"
+                };
+                writeln!(prompt, "  - {name}: {typ}{req} — {desc}").unwrap();
+            }
+        }
+    }
+}
+
 /// Return the appropriate [`TextToolHandler`] for a model, or `None` if the
 /// model supports standard structured tool calls.
 ///

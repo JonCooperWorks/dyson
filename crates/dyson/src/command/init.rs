@@ -312,29 +312,33 @@ fn install_systemd_service(
         // via npm into ~/.local/bin or ~/.nvm/...) are found in the service
         // environment.  Without this, systemd's minimal PATH won't include
         // npm global directories and claude-code provider will fail to spawn.
-        let unit = format!(
-            "[Unit]\n\
-             Description=Dyson AI Agent\n\
-             After=network.target\n\
-             \n\
-             [Service]\n\
-             Type=simple\n\
-             ExecStart={dyson_bin} listen --config {config_path}{extra_listen_args}\n\
-             Restart=on-failure\n\
-             RestartSec=5\n\
-             WorkingDirectory={home}\n\
-             Environment=HOME={home}\n\
-             Environment=PATH={path}\n\
-             {extra_env}\
-             \n\
-             [Install]\n\
-             WantedBy=default.target\n",
-            dyson_bin = dyson_bin.display(),
-            config_path = config_path.display(),
-            home = home,
-            path = path,
-            extra_env = extra_env,
-        );
+        //
+        // The user and system units differ only by the `User=` line and the
+        // `WantedBy=` target, so one builder covers both.
+        let build_unit = |user_line: &str, wanted_by: &str| {
+            format!(
+                "[Unit]\n\
+                 Description=Dyson AI Agent\n\
+                 After=network.target\n\
+                 \n\
+                 [Service]\n\
+                 Type=simple\n\
+                 {user_line}ExecStart={dyson_bin} listen --config {config_path}{extra_listen_args}\n\
+                 Restart=on-failure\n\
+                 RestartSec=5\n\
+                 WorkingDirectory={home}\n\
+                 Environment=HOME={home}\n\
+                 Environment=PATH={path}\n\
+                 {extra_env}\
+                 \n\
+                 [Install]\n\
+                 WantedBy={wanted_by}\n",
+                dyson_bin = dyson_bin.display(),
+                config_path = config_path.display(),
+            )
+        };
+
+        let unit = build_unit("", "default.target");
 
         // Try user service first (no sudo needed).
         let user_service_dir = PathBuf::from(&home).join(".config/systemd/user");
@@ -347,24 +351,7 @@ fn install_systemd_service(
             eprintln!("  created {}", user_service_path.display());
 
             // Enable and start — warn on failure rather than silently ignoring.
-            let mut systemd_ok = true;
-            for args in [
-                &["--user", "daemon-reload"][..],
-                &["--user", "enable", "dyson"],
-                &["--user", "start", "dyson"],
-            ] {
-                match std::process::Command::new("systemctl").args(args).status() {
-                    Ok(s) if s.success() => {}
-                    Ok(s) => {
-                        eprintln!("  warning: systemctl {} exited with {s}", args.join(" "));
-                        systemd_ok = false;
-                    }
-                    Err(e) => {
-                        eprintln!("  warning: failed to run systemctl {}: {e}", args.join(" "));
-                        systemd_ok = false;
-                    }
-                }
-            }
+            let systemd_ok = run_systemctl("systemctl", &["--user"]);
 
             if systemd_ok {
                 eprintln!("  enabled and started (user service)");
@@ -381,31 +368,7 @@ fn install_systemd_service(
             eprintln!("  user service dir not available, using system service (needs sudo)");
 
             let system_path = PathBuf::from("/etc/systemd/system/dyson.service");
-            let unit_system = format!(
-                "[Unit]\n\
-                 Description=Dyson AI Agent\n\
-                 After=network.target\n\
-                 \n\
-                 [Service]\n\
-                 Type=simple\n\
-                 User={user}\n\
-                 ExecStart={dyson_bin} listen --config {config_path}{extra_listen_args}\n\
-                 Restart=on-failure\n\
-                 RestartSec=5\n\
-                 WorkingDirectory={home}\n\
-                 Environment=HOME={home}\n\
-                 Environment=PATH={path}\n\
-                 {extra_env}\
-                 \n\
-                 [Install]\n\
-                 WantedBy=multi-user.target\n",
-                user = user,
-                dyson_bin = dyson_bin.display(),
-                config_path = config_path.display(),
-                home = home,
-                path = path,
-                extra_env = extra_env,
-            );
+            let unit_system = build_unit(&format!("User={user}\n"), "multi-user.target");
 
             // Write via sudo tee.
             let mut child = std::process::Command::new("sudo")
@@ -422,24 +385,7 @@ fn install_systemd_service(
 
             eprintln!("  created {}", system_path.display());
 
-            let mut systemd_ok = true;
-            for args in [
-                &["systemctl", "daemon-reload"][..],
-                &["systemctl", "enable", "dyson"],
-                &["systemctl", "start", "dyson"],
-            ] {
-                match std::process::Command::new("sudo").args(args).status() {
-                    Ok(s) if s.success() => {}
-                    Ok(s) => {
-                        eprintln!("  warning: sudo {} exited with {s}", args.join(" "));
-                        systemd_ok = false;
-                    }
-                    Err(e) => {
-                        eprintln!("  warning: failed to run sudo {}: {e}", args.join(" "));
-                        systemd_ok = false;
-                    }
-                }
-            }
+            let systemd_ok = run_systemctl("sudo", &["systemctl"]);
 
             if systemd_ok {
                 eprintln!("  enabled and started (system service)");
@@ -455,4 +401,33 @@ fn install_systemd_service(
 
         Ok(())
     }
+}
+
+/// Run the `daemon-reload` → `enable dyson` → `start dyson` systemctl steps,
+/// prefixing each invocation with `program` + `prefix_args` (e.g.
+/// `systemctl --user …` for the user service, `sudo systemctl …` for the
+/// system service).  Warns on failure rather than aborting; returns whether
+/// every step succeeded.
+#[cfg(target_os = "linux")]
+fn run_systemctl(program: &str, prefix_args: &[&str]) -> bool {
+    let mut ok = true;
+    for step in [
+        &["daemon-reload"][..],
+        &["enable", "dyson"],
+        &["start", "dyson"],
+    ] {
+        let args: Vec<&str> = prefix_args.iter().chain(step.iter()).copied().collect();
+        match std::process::Command::new(program).args(&args).status() {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                eprintln!("  warning: {program} {} exited with {s}", args.join(" "));
+                ok = false;
+            }
+            Err(e) => {
+                eprintln!("  warning: failed to run {program} {}: {e}", args.join(" "));
+                ok = false;
+            }
+        }
+    }
+    ok
 }

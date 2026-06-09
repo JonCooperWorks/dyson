@@ -49,9 +49,7 @@ pub fn rename_symbol(
     new_name: &str,
     dry_run: bool,
 ) -> Result<ToolOutput> {
-    let working_dir_canon = working_dir
-        .canonicalize()
-        .unwrap_or_else(|_| working_dir.to_path_buf());
+    let working_dir_canon = crate::tool::canonical_or_self(working_dir);
 
     let mut files: Vec<(String, usize, Method)> = Vec::new();
     let mut total = 0usize;

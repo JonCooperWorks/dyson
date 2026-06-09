@@ -691,13 +691,10 @@ async fn finalize_cost_metadata(mut metadata: MessageCostMetadata) -> MessageCos
     metadata
 }
 
-/// Exponential backoff with up-to-half jitter: 1s * 2^attempt + rand(0..base/2+1).
-/// Shared between the stream-error and empty-response retry paths so both
-/// always have the same shape and the constants live in one place.
+/// Exponential backoff with up-to-half jitter, starting at 1s.  Shared between
+/// the stream-error and empty-response retry paths via [`backoff_with_jitter`].
 fn compute_backoff_ms(attempt: usize) -> u64 {
-    let base_ms = 1000u64.saturating_mul(2u64.saturating_pow(attempt as u32));
-    let jitter_ms = rand::random::<u64>() % (base_ms / 2 + 1);
-    base_ms + jitter_ms
+    crate::util::backoff_with_jitter(1000, attempt)
 }
 
 #[cfg(test)]

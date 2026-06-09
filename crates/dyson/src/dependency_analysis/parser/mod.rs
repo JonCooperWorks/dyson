@@ -26,9 +26,66 @@ pub trait ManifestParser: Send + Sync {
     fn parse(&self, path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError>;
 }
 
+/// Pull the raw version string from a TOML dependency value: either the
+/// bare `version = "1.2"` string or the `{ version = "1.2", … }` table form.
+/// Callers apply their own post-processing (e.g. stripping `^`/`==`).
+pub(crate) fn toml_version(v: &toml::Value) -> Option<String> {
+    match v {
+        toml::Value::String(s) => Some(s.clone()),
+        toml::Value::Table(t) => t
+            .get("version")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+/// Lowercased file name of `path` (empty string when there is none).
+/// Manifest parsers branch on this to pick a flavor; the value is owned
+/// because `to_ascii_lowercase` allocates.
+pub(crate) fn file_name_lower(path: &Path) -> String {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
 /// Decode `bytes` as UTF-8 or surface a consistent `ParseError`.
 pub(crate) fn utf8<'a>(path: &Path, bytes: &'a [u8]) -> Result<&'a str, ParseError> {
     std::str::from_utf8(bytes).map_err(|e| ParseError::malformed(path, format!("not UTF-8: {e}")))
+}
+
+/// Decode JSON `bytes` into `T`, mapping a decode failure to a
+/// `{label} decode: {e}` `ParseError` for consistent diagnostics.
+pub(crate) fn from_json<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    bytes: &[u8],
+    label: &str,
+) -> Result<T, ParseError> {
+    serde_json::from_slice(bytes)
+        .map_err(|e| ParseError::malformed(path, format!("{label} decode: {e}")))
+}
+
+/// Decode YAML `bytes` into `T`, mapping a decode failure to a
+/// `{label} decode: {e}` `ParseError`.
+pub(crate) fn from_yaml<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    bytes: &[u8],
+    label: &str,
+) -> Result<T, ParseError> {
+    serde_yaml_ng::from_slice(bytes)
+        .map_err(|e| ParseError::malformed(path, format!("{label} decode: {e}")))
+}
+
+/// Decode TOML `text` into `T`, mapping a decode failure to a
+/// `{label} decode: {e}` `ParseError`.
+pub(crate) fn from_toml<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    text: &str,
+    label: &str,
+) -> Result<T, ParseError> {
+    toml::from_str(text)
+        .map_err(|e| ParseError::malformed(path, format!("{label} decode: {e}")))
 }
 
 /// Shared constructor for the ubiquitous `Dependency { … }` block.

@@ -64,6 +64,13 @@ pub use activity::{
     truncate_note,
 };
 
+/// Sentinel model/key value a freshly-provisioned instance carries before
+/// its first real `/llm` call swaps in operator-supplied credentials.  The
+/// readiness checks treat its presence as "not warmed up yet"; the swarm
+/// provisioning path and the slash-command warmup both stamp it.  One
+/// definition so a typo can't silently break readiness on one side.
+pub const WARMUP_PLACEHOLDER: &str = "warmup-placeholder";
+
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;

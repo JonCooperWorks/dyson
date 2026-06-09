@@ -1169,13 +1169,6 @@ fn parse_controllers(
     }
 }
 
-/// Walk a JSON value and resolve any secret references in-place.
-///
-/// A secret reference is a JSON object with exactly `"resolver"` and
-/// `"name"` keys.  When found, it's replaced with the resolved string
-/// value.  This lets controllers receive fully-resolved config without
-/// knowing about the secret system.
-///
 /// Parse a `JsonToolPolicy` into a `ToolPolicyConfig`.
 ///
 /// File access fields can be either a simple string ("allow"/"deny")
@@ -1209,6 +1202,13 @@ fn parse_tool_policy(jp: JsonToolPolicy) -> crate::sandbox::policy::ToolPolicyCo
     }
 }
 
+/// Walk a JSON value and resolve any secret references in-place.
+///
+/// A secret reference is a JSON object with exactly `"resolver"` and
+/// `"name"` keys.  When found, it's replaced with the resolved string
+/// value.  This lets controllers receive fully-resolved config without
+/// knowing about the secret system.
+///
 /// ```json
 /// // Before:
 /// { "bot_token": { "resolver": "insecure_env", "name": "MY_TOKEN" } }

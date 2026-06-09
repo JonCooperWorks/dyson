@@ -86,10 +86,6 @@ pub(crate) struct FileEntry {
 impl FileStore {
     const MAX_FILES: usize = 64;
 
-    pub(crate) fn put(&mut self, id: String, entry: FileEntry) {
-        self.inner.put(id, entry);
-    }
-
     /// Read a persisted file from disk.  Returns `None` if the entry
     /// is missing or unreadable.  Called by `get_file` when the
     /// in-memory cache has evicted the id.
@@ -208,10 +204,6 @@ pub(crate) struct ArtefactEntry {
 
 impl ArtefactStore {
     pub(crate) const MAX_ARTEFACTS: usize = 32;
-
-    pub(crate) fn put(&mut self, id: String, entry: ArtefactEntry) {
-        self.inner.put(id, entry);
-    }
 
     /// Per-chat artefact dir: `{data_dir}/{chat_id}/artefacts/`.
     /// The migration in `chat_history::migrate` fans the legacy shared

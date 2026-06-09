@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 
-use crate::error::{DysonError, Result};
+use crate::error::Result;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 pub struct SendFileTool;
@@ -47,9 +47,7 @@ impl Tool for SendFileTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let file_path = input["file_path"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("send_file", "missing or invalid 'file_path'"))?;
+        let file_path = crate::tool::required_str(input, "file_path", "send_file")?;
 
         let path = match ctx.resolve_path(file_path) {
             Ok(p) => p,

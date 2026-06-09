@@ -60,6 +60,27 @@ impl OpenAiCompatClient {
             inner: OpenAiClient::with_base_url(auth, base_url),
         }
     }
+
+    /// OpenRouter (https://openrouter.ai): OpenAI-compatible with bearer auth
+    /// plus `HTTP-Referer`/`X-Title` app-attribution headers.
+    pub fn openrouter(api_key: &str) -> Self {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "HTTP-Referer".to_string(),
+            "https://github.com/joncooperworks/dyson".to_string(),
+        );
+        headers.insert("X-Title".to_string(), "Dyson".to_string());
+        let auth: Box<dyn Auth> = Box::new(crate::auth::CompositeAuth::new(vec![
+            Box::new(crate::auth::BearerTokenAuth::new(api_key.to_string())),
+            Box::new(crate::auth::StaticHeadersAuth::new(headers)),
+        ]));
+        Self::with_auth(auth, "https://openrouter.ai/api")
+    }
+
+    /// Ollama Cloud (https://ollama.com): OpenAI-compatible with bearer auth.
+    pub fn ollama_cloud(api_key: &str) -> Self {
+        Self::new(api_key, "https://ollama.com")
+    }
 }
 
 #[async_trait]

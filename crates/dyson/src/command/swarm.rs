@@ -135,12 +135,12 @@ pub async fn run() -> Result<()> {
     // request's env (swarm refuses the create otherwise — see the
     // orchestrator's instance.rs).
     let api_key = if proxy_token.is_empty() {
-        "warmup-placeholder".to_string()
+        dyson::controller::WARMUP_PLACEHOLDER.to_string()
     } else {
         proxy_token
     };
     let model_id = if model.is_empty() {
-        "warmup-placeholder".to_string()
+        dyson::controller::WARMUP_PLACEHOLDER.to_string()
     } else {
         model
     };
@@ -493,8 +493,8 @@ mod tests {
         let cfg = build_swarm_config(SwarmConfigInputs {
             bind: "0.0.0.0:80",
             proxy_url: "",
-            api_key: "warmup-placeholder",
-            model_id: "warmup-placeholder",
+            api_key: dyson::controller::WARMUP_PLACEHOLDER,
+            model_id: dyson::controller::WARMUP_PLACEHOLDER,
             workspace_str: "/var/lib/dyson/workspace",
             chats_str: "/var/lib/dyson/chats",
             instance_id: "",

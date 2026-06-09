@@ -315,14 +315,13 @@ impl Tool for OrchestratorTool {
             .await;
         }
 
-        let settings = AgentSettings {
-            model: self.model.clone(),
-            max_iterations: self.config.max_iterations,
-            max_tokens: self.config.max_tokens,
+        let settings = AgentSettings::for_child(
+            self.model.clone(),
+            self.provider.clone(),
+            self.config.max_iterations,
+            self.config.max_tokens,
             system_prompt,
-            provider: self.provider.clone(),
-            ..AgentSettings::default()
-        };
+        );
 
         let started_at = std::time::SystemTime::now();
         let started_epoch = unix_seconds(started_at);

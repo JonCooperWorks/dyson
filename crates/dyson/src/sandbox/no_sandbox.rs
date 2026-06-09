@@ -80,8 +80,6 @@ impl Sandbox for DangerousNoSandbox {
     fn sandbox_bypass(&self) -> Option<&SandboxBypassGuard> {
         Some(&self.bypass)
     }
-
-    // `after()` uses the default no-op from the trait.
 }
 
 // ===========================================================================

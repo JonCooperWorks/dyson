@@ -17,10 +17,7 @@ pub struct MavenParser;
 impl ManifestParser for MavenParser {
     fn parse(&self, path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
         let text = utf8(path, bytes)?;
-        if path
-            .file_name()
-            .is_some_and(|n| n.eq_ignore_ascii_case("gradle.lockfile"))
-        {
+        if super::file_name_lower(path) == "gradle.lockfile" {
             parse_gradle_lock(path, text)
         } else {
             parse_pom(path, text)

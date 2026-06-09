@@ -420,7 +420,7 @@ mod tests {
             sandbox_bypass: Some(crate::sandbox::SandboxBypassGuard::for_test()),
             ..Default::default()
         };
-        settings.agent.model = "warmup-placeholder".into();
+        settings.agent.model = crate::controller::WARMUP_PLACEHOLDER.into();
         settings.workspace.connection_string =
             Credential::new(tmp.path().to_string_lossy().to_string());
         let mut output = crate::controller::recording::RecordingOutput::new();

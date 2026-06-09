@@ -366,8 +366,6 @@ pub struct SecurityHarnessReport {
     #[serde(default)]
     pub rejected_candidates: Vec<ValidationDecision>,
     #[serde(default)]
-    pub coverage: Vec<CoverageGap>,
-    #[serde(default)]
     pub gaps: Vec<CoverageGap>,
     #[serde(default)]
     pub dedupe_groups: Vec<DedupeGroup>,
@@ -727,11 +725,6 @@ mod tests {
                 decision: ValidationDecisionKind::Rejected,
                 evidence: "ev".into(),
                 severity: Some("low".into()),
-            }],
-            coverage: vec![CoverageGap {
-                area: "a".into(),
-                reason: "r".into(),
-                risk: "high".into(),
             }],
             gaps: vec![CoverageGap {
                 area: "a".into(),

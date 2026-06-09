@@ -197,10 +197,7 @@ impl Tool for AttackSurfaceAnalyzerTool {
 
         let include_glob = input["include"].as_str().map(String::from);
 
-        let working_dir_canon = ctx
-            .working_dir
-            .canonicalize()
-            .unwrap_or_else(|_| ctx.working_dir.clone());
+        let working_dir_canon = crate::tool::canonical_or_self(&ctx.working_dir);
 
         // CPU-bound: walk + parse + scan.
         let results = tokio::task::spawn_blocking(move || {
@@ -234,21 +231,7 @@ fn scan_attack_surface(
     let mut total_bytes = 0usize;
     let mut file_count = 0usize;
 
-    let mut builder = ignore::WalkBuilder::new(search_dir);
-    builder.hidden(false);
-    builder.git_ignore(true);
-    builder.git_global(true);
-
-    if let Some(glob) = include_glob {
-        let mut types_builder = ignore::types::TypesBuilder::new();
-        types_builder.add("filter", glob).ok();
-        types_builder.select("filter");
-        if let Ok(types) = types_builder.build() {
-            builder.types(types);
-        }
-    }
-
-    for entry in builder.build().flatten() {
+    for entry in ast::walk_dir_filtered(search_dir, include_glob).flatten() {
         if total_entries >= MAX_ENTRIES
             || total_bytes >= MAX_OUTPUT_BYTES
             || file_count >= ast::MAX_FILES

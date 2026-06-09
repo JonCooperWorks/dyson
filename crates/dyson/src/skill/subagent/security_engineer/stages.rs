@@ -19,9 +19,7 @@ use super::parse::{
     parse_report_output, parse_stage_json, parse_validate_output_shape, validate_decisions_semantic,
 };
 use super::report::{report_checkpoint_for_prompt, report_from_checkpoint};
-use super::runtime::{
-    SecurityHarnessRuntime, merge_stage_tool_output, spawn_stage, spawn_stage_with_checkpoint,
-};
+use super::runtime::{SecurityHarnessRuntime, merge_stage_tool_output, spawn_stage};
 use super::stack::{StackSpecialist, prune_inapplicable_class_tasks, stack_specialists};
 use super::taxonomy::{
     build_class_coverage, canonical_vulnerability_class, canonicalize_findings, canonicalize_tasks,
@@ -277,7 +275,7 @@ pub(super) async fn dispatch_hunts(
         // instead of stalling the whole `buffer_unordered` wave forever.  The
         // timeout maps to the same `Err` channel a real child error uses, so
         // `fold_hunt_wave` folds it as a coverage gap.
-        let fut = spawn_stage_with_checkpoint(
+        let fut = spawn_stage(
             rt,
             SecurityHarnessStage::Hunt,
             &d.stage_prompt,

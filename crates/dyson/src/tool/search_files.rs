@@ -78,9 +78,7 @@ impl Tool for SearchFilesTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let pattern_str = input["pattern"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("search_files", "missing or invalid 'pattern'"))?;
+        let pattern_str = crate::tool::required_str(input, "pattern", "search_files")?;
         let ast_mode = input["ast"].as_bool().unwrap_or(false);
 
         // AST mode treats `pattern` as a literal identifier name and demands
@@ -116,27 +114,10 @@ impl Tool for SearchFilesTool {
 
         let include_glob = input["include"].as_str();
 
-        // Build the directory walker using the `ignore` crate,
-        // which respects .gitignore automatically.
-        let mut builder = ignore::WalkBuilder::new(&search_dir);
-        builder.hidden(false); // search hidden files too
-        builder.git_ignore(true);
-        builder.git_global(true);
+        // Build the directory walker (respects .gitignore, optional glob).
+        let walker = ast::walk_dir_filtered(&search_dir, include_glob);
 
-        if let Some(glob) = include_glob {
-            // Add a file type glob filter.
-            let mut types_builder = ignore::types::TypesBuilder::new();
-            types_builder.add("filter", glob).ok();
-            types_builder.select("filter");
-            if let Ok(types) = types_builder.build() {
-                builder.types(types);
-            }
-        }
-
-        let working_dir_canon = ctx
-            .working_dir
-            .canonicalize()
-            .unwrap_or_else(|_| ctx.working_dir.clone());
+        let working_dir_canon = crate::tool::canonical_or_self(&ctx.working_dir);
 
         let pattern_owned = pattern_str.to_string();
         // Walk and search — this is CPU-bound, so run in a blocking task.
@@ -144,7 +125,7 @@ impl Tool for SearchFilesTool {
             let mut matches = Vec::new();
             let mut total_bytes = 0usize;
 
-            for entry in builder.build().flatten() {
+            for entry in walker.flatten() {
                 if matches.len() >= MAX_MATCHES || total_bytes >= MAX_OUTPUT_BYTES {
                     break;
                 }

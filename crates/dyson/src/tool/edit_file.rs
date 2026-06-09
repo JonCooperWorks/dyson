@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 
-use crate::error::{DysonError, Result};
+use crate::error::Result;
 use crate::tool::{Tool, ToolContext, ToolOutput, path_err};
 
 /// Maximum file size we'll load into memory for editing (10 MB).
@@ -50,15 +50,9 @@ impl Tool for EditFileTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let file_path = input["file_path"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("edit_file", "missing or invalid 'file_path'"))?;
-        let old_string = input["old_string"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("edit_file", "missing or invalid 'old_string'"))?;
-        let new_string = input["new_string"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("edit_file", "missing or invalid 'new_string'"))?;
+        let file_path = crate::tool::required_str(input, "file_path", "edit_file")?;
+        let old_string = crate::tool::required_str(input, "old_string", "edit_file")?;
+        let new_string = crate::tool::required_str(input, "new_string", "edit_file")?;
 
         if old_string.is_empty() {
             return Ok(ToolOutput::error("old_string must not be empty"));

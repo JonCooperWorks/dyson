@@ -7,18 +7,14 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde::Deserialize;
 
-use super::{ManifestParser, dep, utf8};
+use super::{ManifestParser, dep, from_json, utf8};
 use crate::dependency_analysis::types::{Ecosystem, ParseError, Parsed};
 
 pub struct NugetParser;
 
 impl ManifestParser for NugetParser {
     fn parse(&self, path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
+        let name = super::file_name_lower(path);
         if name == "packages.lock.json" {
             parse_lock(path, bytes)
         } else if name == "packages.config" {
@@ -42,8 +38,7 @@ struct LockEntry {
 }
 
 fn parse_lock(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-    let doc: NugetLock = serde_json::from_slice(bytes)
-        .map_err(|e| ParseError::malformed(path, format!("packages.lock decode: {e}")))?;
+    let doc: NugetLock = from_json(path, bytes, "packages.lock")?;
     let mut parsed = Parsed::default();
     for (_tfm, pkgs) in doc.dependencies {
         for (name, entry) in pkgs {

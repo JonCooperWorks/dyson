@@ -78,9 +78,7 @@ impl Tool for ReadFileTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let file_path = input["file_path"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("read_file", "missing or invalid 'file_path'"))?;
+        let file_path = crate::tool::required_str(input, "file_path", "read_file")?;
 
         let path = match ctx.resolve_path(file_path) {
             Ok(p) => p,
@@ -201,7 +199,6 @@ impl Tool for ReadFileTool {
         let view = crate::tool::view::ToolView::Read {
             path: path.display().to_string(),
             lines: raw_lines,
-            highlight: None,
         };
         Ok(ToolOutput::success(output).with_view(view))
     }
@@ -217,9 +214,7 @@ fn extract_symbol(
     name: &str,
     kind: Option<&str>,
 ) -> Result<ToolOutput> {
-    let working_dir_canon = working_dir
-        .canonicalize()
-        .unwrap_or_else(|_| working_dir.to_path_buf());
+    let working_dir_canon = crate::tool::canonical_or_self(working_dir);
 
     let parsed = match ast::try_parse_file(path, &working_dir_canon, false)? {
         Some(pair) => pair,

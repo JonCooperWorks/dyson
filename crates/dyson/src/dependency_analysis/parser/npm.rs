@@ -7,18 +7,14 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde::Deserialize;
 
-use super::{ManifestParser, dep, utf8};
+use super::{ManifestParser, dep, from_json, from_yaml, utf8};
 use crate::dependency_analysis::types::{Ecosystem, ParseError, Parsed};
 
 pub struct NpmParser;
 
 impl ManifestParser for NpmParser {
     fn parse(&self, path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
+        let name = super::file_name_lower(path);
         match name.as_str() {
             "package-lock.json" | "npm-shrinkwrap.json" => parse_package_lock(path, bytes),
             "pnpm-lock.yaml" => parse_pnpm(path, bytes),
@@ -56,8 +52,7 @@ struct DepEntry {
 }
 
 fn parse_package_lock(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-    let doc: PackageLock = serde_json::from_slice(bytes)
-        .map_err(|e| ParseError::malformed(path, format!("package-lock decode: {e}")))?;
+    let doc: PackageLock = from_json(path, bytes, "package-lock")?;
     let mut parsed = Parsed::default();
     // v2/v3: `packages` keyed by install path ("" = root).
     for (key, entry) in doc.packages {
@@ -106,8 +101,7 @@ struct PackageJson {
 }
 
 fn parse_package_json(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-    let doc: PackageJson = serde_json::from_slice(bytes)
-        .map_err(|e| ParseError::malformed(path, format!("package.json decode: {e}")))?;
+    let doc: PackageJson = from_json(path, bytes, "package.json")?;
     let mut parsed = Parsed::default();
     parsed.warnings.push(format!(
         "{}: package.json holds ranges; prefer package-lock.json",
@@ -142,8 +136,7 @@ struct PnpmLock {
 }
 
 fn parse_pnpm(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-    let doc: PnpmLock = serde_yaml_ng::from_slice(bytes)
-        .map_err(|e| ParseError::malformed(path, format!("pnpm-lock decode: {e}")))?;
+    let doc: PnpmLock = from_yaml(path, bytes, "pnpm-lock")?;
     let mut parsed = Parsed::default();
     for key in doc.packages.keys() {
         if let Some((name, ver)) = split_pnpm_key(key) {
@@ -220,8 +213,7 @@ struct YarnV2Entry {
 }
 
 fn parse_yarn_v2(path: &Path, text: &str) -> Result<Parsed, ParseError> {
-    let doc: YarnV2 = serde_yaml_ng::from_str(text)
-        .map_err(|e| ParseError::malformed(path, format!("yarn v2 lock decode: {e}")))?;
+    let doc: YarnV2 = from_yaml(path, text.as_bytes(), "yarn v2 lock")?;
     let mut parsed = Parsed::default();
     for (key, entry) in doc.entries {
         if key == "__metadata" {

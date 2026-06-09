@@ -254,11 +254,7 @@ impl LlmClient for CodexClient {
         }
 
         // -- Build the command --
-        let full_system = if system_suffix.is_empty() {
-            system.to_string()
-        } else {
-            format!("{system}\n\n{system_suffix}")
-        };
+        let full_system = super::concat_system_prompt(system, system_suffix);
         let args = self.build_args(
             &config.model,
             &full_system,

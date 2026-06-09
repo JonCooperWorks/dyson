@@ -105,8 +105,11 @@ pub async fn lookup_runtime_display_metadata(
     Ok(metadata_from_cost_call(call, Some(now_secs())))
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct SwarmCostCall {
+/// The cost fields shared verbatim by every swarm cost-row DTO.  Flattened
+/// into [`SwarmCostCall`] and [`SwarmAuditCall`] so a field rename can't drift
+/// between them; the wire shape is unchanged (the keys serialize flat).
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+pub struct CostCore {
     pub audit_id: i64,
     pub provider: String,
     pub model: Option<String>,
@@ -115,6 +118,12 @@ pub struct SwarmCostCall {
     pub output_tokens: Option<i64>,
     pub cost_usd: Option<f64>,
     pub cost_source: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SwarmCostCall {
+    #[serde(flatten)]
+    pub core: CostCore,
 }
 
 pub async fn fetch_cost_call(
@@ -142,17 +151,11 @@ pub async fn fetch_cost_call(
 /// canonical fields (tok/s, latency, generation id, reconciliation).
 #[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct SwarmAuditCall {
-    pub audit_id: i64,
-    pub provider: String,
-    pub model: Option<String>,
-    pub key_source: String,
+    #[serde(flatten)]
+    pub core: CostCore,
     pub status_code: i64,
     pub occurred_at: i64,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
-    pub cost_usd: Option<f64>,
-    pub cost_source: String,
     #[serde(default)]
     pub ttft_ms: Option<i64>,
     #[serde(default)]
@@ -195,20 +198,21 @@ pub fn metadata_from_cost_call(
     call: SwarmCostCall,
     finalized_at: Option<i64>,
 ) -> Option<MessageCostMetadata> {
-    let cost = call.cost_usd?;
+    let core = call.core;
+    let cost = core.cost_usd?;
     if !cost.is_finite() {
         return None;
     }
     Some(MessageCostMetadata {
-        swarm_llm_audit_id: Some(call.audit_id),
+        swarm_llm_audit_id: Some(core.audit_id),
         display_cost_usd: Some(cost),
-        cost_source: Some(call.cost_source),
+        cost_source: Some(core.cost_source),
         cost_finalized_at: finalized_at,
-        provider: Some(call.provider),
-        model: call.model,
-        input_tokens: call.input_tokens,
-        output_tokens: call.output_tokens,
-        key_source: Some(call.key_source),
+        provider: Some(core.provider),
+        model: core.model,
+        input_tokens: core.input_tokens,
+        output_tokens: core.output_tokens,
+        key_source: Some(core.key_source),
     })
 }
 
@@ -274,15 +278,39 @@ mod tests {
     #[test]
     fn metadata_requires_real_cost() {
         let call = SwarmCostCall {
-            audit_id: 7,
-            provider: "openrouter".into(),
-            model: Some("anthropic/claude".into()),
-            key_source: "platform".into(),
-            input_tokens: Some(10),
-            output_tokens: Some(20),
-            cost_usd: None,
-            cost_source: "missing".into(),
+            core: CostCore {
+                audit_id: 7,
+                provider: "openrouter".into(),
+                model: Some("anthropic/claude".into()),
+                key_source: "platform".into(),
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                cost_usd: None,
+                cost_source: "missing".into(),
+            },
         };
         assert!(metadata_from_cost_call(call, Some(1)).is_none());
+    }
+
+    #[test]
+    fn cost_call_deserializes_flat_wire_shape() {
+        // The flattened `CostCore` must keep the swarm wire keys at the top
+        // level — they aren't nested under a `core` object.
+        let json = r#"{"audit_id":42,"provider":"openrouter","model":"x","key_source":"platform","input_tokens":1,"output_tokens":2,"cost_usd":0.5,"cost_source":"reported"}"#;
+        let call: SwarmCostCall = serde_json::from_str(json).unwrap();
+        let meta = metadata_from_cost_call(call, Some(99)).unwrap();
+        assert_eq!(meta.swarm_llm_audit_id, Some(42));
+        assert_eq!(meta.display_cost_usd, Some(0.5));
+    }
+
+    #[test]
+    fn audit_call_serializes_flat_wire_shape() {
+        let json = r#"{"audit_id":1,"provider":"p","model":null,"key_source":"k","status_code":200,"occurred_at":123,"input_tokens":null,"output_tokens":null,"total_tokens":null,"cost_usd":null,"cost_source":"s"}"#;
+        let call: SwarmAuditCall = serde_json::from_str(json).unwrap();
+        let out = serde_json::to_value(&call).unwrap();
+        // Keys stay flat (frontend reads `r.audit_id`, `r.status_code`, …).
+        assert_eq!(out["audit_id"], 1);
+        assert_eq!(out["status_code"], 200);
+        assert!(out.get("core").is_none(), "core must not nest on the wire");
     }
 }

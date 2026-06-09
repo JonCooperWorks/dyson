@@ -5,8 +5,6 @@
 // articles).  Supports scoping to raw/, wiki/, or all KB files.
 // ===========================================================================
 
-use std::fmt::Write;
-
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -68,19 +66,10 @@ impl Tool for KbSearchTool {
             .filter(|(key, _)| key.starts_with(prefix))
             .collect();
 
-        if filtered.is_empty() {
-            return Ok(ToolOutput::success(
-                "No results found in the knowledge base.",
-            ));
-        }
-
-        let mut output = String::new();
-        for (key, snippet) in &filtered {
-            writeln!(&mut output, "### {key}\n{snippet}\n").unwrap();
-        }
-        write!(&mut output, "({} result(s))", filtered.len()).unwrap();
-
-        Ok(ToolOutput::success(output))
+        Ok(ToolOutput::success(crate::tool::format_search_results(
+            &filtered,
+            "No results found in the knowledge base.",
+        )))
     }
 }
 

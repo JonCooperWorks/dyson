@@ -115,10 +115,8 @@ impl Tool for AstDescribeTool {
                     Some(c) => c,
                     None => {
                         return Ok(ToolOutput::error(format!(
-                            "unknown language '{lang}'.  Supported: rust, python, \
-                             javascript, typescript, tsx, go, java, c, cpp, csharp, \
-                             ruby, kotlin, swift, zig, elixir, erlang, ocaml, haskell, \
-                             nix, json"
+                            "unknown language '{lang}'.  Supported: {}",
+                            ast::supported_language_names().join(", ")
                         )));
                     }
                 };

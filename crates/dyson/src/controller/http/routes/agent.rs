@@ -10,15 +10,15 @@
 // change pushed from the swarm UI.
 // ===========================================================================
 
-use super::super::responses::{Resp, bad_request, json_ok};
+use super::super::responses::{Resp, json_ok, open_workspace};
 use super::super::state::HttpState;
 use crate::config::{McpTransportConfig, Settings, SkillConfig};
 
 pub(super) async fn get(state: &HttpState) -> Resp {
     let snapshot = state.settings_snapshot();
-    let ws = match crate::workspace::create_workspace(&snapshot.workspace) {
+    let ws = match open_workspace(&snapshot) {
         Ok(w) => w,
-        Err(e) => return bad_request(&format!("workspace open failed: {e}")),
+        Err(resp) => return resp,
     };
     let name = ws
         .get("IDENTITY.md")

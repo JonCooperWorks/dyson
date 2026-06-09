@@ -167,9 +167,7 @@ pub struct ClientConfig<'a> {
 /// One entry per `LlmProvider` variant.  The unit test
 /// `registry_covers_all_variants` ensures nothing is missing.
 pub fn registry() -> &'static [ProviderEntry] {
-    use super::{
-        anthropic, claude_code, codex, gemini, ollama_cloud, openai, openai_compat, openrouter,
-    };
+    use super::{anthropic, claude_code, codex, gemini, openai, openai_compat};
 
     static ENTRIES: std::sync::LazyLock<Vec<ProviderEntry>> = std::sync::LazyLock::new(|| {
         vec![
@@ -200,7 +198,7 @@ pub fn registry() -> &'static [ProviderEntry] {
                 aliases: &["openrouter", "open-router", "open_router"],
                 env_var: Some("OPENROUTER_API_KEY"),
                 requires_api_key: true,
-                create_client: |c| Box::new(openrouter::OpenRouterClient::new(c.api_key)),
+                create_client: |c| Box::new(openai_compat::OpenAiCompatClient::openrouter(c.api_key)),
             },
             ProviderEntry {
                 provider: LlmProvider::ClaudeCode,
@@ -236,7 +234,9 @@ pub fn registry() -> &'static [ProviderEntry] {
                 aliases: &["ollama-cloud", "ollama_cloud", "ollama"],
                 env_var: Some("OLLAMA_API_KEY"),
                 requires_api_key: true,
-                create_client: |c| Box::new(ollama_cloud::OllamaCloudClient::new(c.api_key)),
+                create_client: |c| {
+                    Box::new(openai_compat::OpenAiCompatClient::ollama_cloud(c.api_key))
+                },
             },
             ProviderEntry {
                 provider: LlmProvider::Gemini,

@@ -91,6 +91,22 @@ pub fn resolve_tilde(path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
+/// Largest exponent applied to `base_ms` in [`backoff_with_jitter`].  Caps the
+/// exponential term at `base_ms * 64` so a long retry streak can't overflow or
+/// produce an absurd sleep.
+const MAX_BACKOFF_SHIFT: u32 = 6;
+
+/// Exponential backoff with up-to-half jitter: `base_ms * 2^min(attempt, 6)`
+/// plus a random `0..=(exp/2)` jitter term.  Shared by the LLM retry decorator
+/// and the agent loop's stream/empty-response retries so the shape and shift
+/// cap live in one place.
+pub fn backoff_with_jitter(base_ms: u64, attempt: usize) -> u64 {
+    let shift = (attempt as u32).min(MAX_BACKOFF_SHIFT);
+    let exp_ms = base_ms.saturating_mul(1u64 << shift);
+    let jitter_ms = rand::random::<u64>() % (exp_ms / 2 + 1);
+    exp_ms.saturating_add(jitter_ms)
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================

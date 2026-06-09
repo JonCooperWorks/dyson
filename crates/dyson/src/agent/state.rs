@@ -9,6 +9,16 @@ use crate::tool::Tool;
 
 use super::token_budget::TokenBudget;
 
+/// Estimate the token cost of a single tool definition as sent to the LLM:
+/// word counts for the name and description, the schema's estimated JSON
+/// tokens, plus a small constant for per-tool JSON framing overhead.
+fn estimate_tool_def_tokens(name: &str, description: &str, input_schema: &serde_json::Value) -> usize {
+    name.split_whitespace().count()
+        + description.split_whitespace().count()
+        + crate::message::estimate_json_tokens(input_schema)
+        + 10
+}
+
 /// Immutable tool registry — built once at construction from all skills' tools.
 ///
 /// Provides O(1) tool lookup by name, reverse mapping to owning skill,
@@ -76,12 +86,7 @@ impl ToolRegistry {
 
         let cached_tokens: usize = definitions
             .iter()
-            .map(|t| {
-                t.name.split_whitespace().count()
-                    + t.description.split_whitespace().count()
-                    + crate::message::estimate_json_tokens(&t.input_schema)
-                    + 10 // per-tool JSON framing overhead
-            })
+            .map(|t| estimate_tool_def_tokens(&t.name, &t.description, &t.input_schema))
             .sum();
 
         tracing::info!(tool_count = tools.len(), "tool registry built");
@@ -117,10 +122,7 @@ impl ToolRegistry {
     /// Register an extra tool not owned by any skill (e.g., advisor tool).
     pub(super) fn register_extra_tool(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
-        let tokens = name.split_whitespace().count()
-            + tool.description().split_whitespace().count()
-            + crate::message::estimate_json_tokens(&tool.input_schema())
-            + 10;
+        let tokens = estimate_tool_def_tokens(&name, tool.description(), &tool.input_schema());
         self.definitions.push(ToolDefinition {
             name: name.clone(),
             description: tool.description().to_string(),

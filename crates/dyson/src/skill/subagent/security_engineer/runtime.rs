@@ -48,16 +48,6 @@ pub(super) async fn spawn_stage(
     checkpoint: &SecurityCheckpoint,
     max_iterations: usize,
 ) -> std::result::Result<(String, ToolOutput), String> {
-    spawn_stage_with_checkpoint(rt, stage, prompt, checkpoint, max_iterations).await
-}
-
-pub(super) async fn spawn_stage_with_checkpoint(
-    rt: &SecurityHarnessRuntime,
-    stage: SecurityHarnessStage,
-    prompt: &str,
-    checkpoint: &SecurityCheckpoint,
-    max_iterations: usize,
-) -> std::result::Result<(String, ToolOutput), String> {
     let checkpoint_json = serde_json::to_string_pretty(checkpoint)
         .map_err(|e| format!("serialize checkpoint for {stage}: {e}"))?;
     let system_prompt = format!("{}\n\n{}", rt.system_prompt, prompt);
@@ -65,14 +55,13 @@ pub(super) async fn spawn_stage_with_checkpoint(
         "Parent request:\n{}\n\nCurrent durable checkpoint JSON:\n```json\n{}\n```\n",
         rt.user_message, checkpoint_json
     );
-    let settings = AgentSettings {
-        model: rt.model.clone(),
+    let settings = AgentSettings::for_child(
+        rt.model.clone(),
+        rt.provider.clone(),
         max_iterations,
-        max_tokens: rt.max_tokens,
+        rt.max_tokens,
         system_prompt,
-        provider: rt.provider.clone(),
-        ..AgentSettings::default()
-    };
+    );
     let out = spawn_child(ChildSpawn {
         name: stage.as_str(),
         settings,

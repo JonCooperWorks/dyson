@@ -40,10 +40,8 @@ pub(crate) mod cli_subprocess;
 pub mod codex;
 pub mod dialects;
 pub mod gemini;
-pub mod ollama_cloud;
 pub mod openai;
 pub mod openai_compat;
-pub mod openrouter;
 pub mod pricing;
 pub mod registry;
 pub(crate) mod sse_parser;
@@ -548,6 +546,27 @@ pub(crate) fn provider_http_error(
     }
 }
 
+/// Extract a human-readable message from a provider error body.
+///
+/// OpenAI, Anthropic, and Gemini all wrap errors as
+/// `{ "error": { "message": "…" } }`; pull that message out, falling back
+/// to the raw body when it's missing or the body isn't JSON.
+pub(crate) fn parse_provider_error_body(body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(err) = v.get("error")
+    {
+        let message = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(m) = message {
+            return m.to_string();
+        }
+    }
+    body.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Retry decorator — transparent exponential backoff for every LlmClient.
 //
@@ -629,9 +648,7 @@ impl LlmClient for RetryingLlmClient {
                         | DysonError::LlmOverloaded { retry_after, .. } => *retry_after,
                         _ => None,
                     };
-                    let exp_ms = self.base_delay_ms.saturating_mul(1u64 << attempt.min(6));
-                    let jitter_ms = rand::random::<u64>() % (exp_ms / 2 + 1);
-                    let backoff_ms = exp_ms + jitter_ms;
+                    let backoff_ms = crate::util::backoff_with_jitter(self.base_delay_ms, attempt);
                     const MAX_HINT_MS: u64 = 90_000;
                     let delay_ms = match hint {
                         Some(d) => (d.as_millis() as u64).min(MAX_HINT_MS).max(backoff_ms),
@@ -1378,6 +1395,61 @@ mod tests {
             }
             other => panic!("expected Llm, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_provider_error_body_strips_openrouter_402_envelope() {
+        // OpenRouter credit-exhaustion body — sibling fields like `metadata`
+        // and `user_id` must not leak.
+        let body = r#"{"error":{"message":"Prompt tokens limit exceeded: 163586 > 132288. To increase, visit https://openrouter.ai/settings/credits and add more credits","code":402,"metadata":{"provider_name":null}},"user_id":"user_3BGgMlV4QdIpRqJBHJukfpbymrP"}"#;
+        let msg = parse_provider_error_body(body);
+        assert_eq!(
+            msg,
+            "Prompt tokens limit exceeded: 163586 > 132288. To increase, visit https://openrouter.ai/settings/credits and add more credits"
+        );
+        assert!(!msg.contains("user_id"));
+        assert!(!msg.contains('{'));
+    }
+
+    #[test]
+    fn parse_provider_error_body_strips_openai_insufficient_quota_envelope() {
+        let body = r#"{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","param":null,"code":"insufficient_quota"}}"#;
+        assert_eq!(
+            parse_provider_error_body(body),
+            "You exceeded your current quota, please check your plan and billing details."
+        );
+    }
+
+    #[test]
+    fn parse_provider_error_body_strips_anthropic_overloaded_envelope() {
+        let body = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        let msg = parse_provider_error_body(body);
+        assert_eq!(msg, "Overloaded");
+        assert!(!msg.contains("overloaded_error"));
+        assert!(!msg.contains('{'));
+    }
+
+    #[test]
+    fn parse_provider_error_body_strips_gemini_resource_exhausted_envelope() {
+        let body = r#"{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaMetric":"generativelanguage.googleapis.com/generate_content_free_tier_requests"}]}]}}"#;
+        let msg = parse_provider_error_body(body);
+        assert_eq!(msg, "Resource has been exhausted (e.g. check quota).");
+        assert!(!msg.contains("RESOURCE_EXHAUSTED"));
+        assert!(!msg.contains("QuotaFailure"));
+    }
+
+    #[test]
+    fn parse_provider_error_body_falls_back_to_raw_for_non_json() {
+        assert_eq!(
+            parse_provider_error_body("upstream connect timeout"),
+            "upstream connect timeout"
+        );
+    }
+
+    #[test]
+    fn parse_provider_error_body_falls_back_when_message_missing() {
+        let body = r#"{"error":{"type":"unknown"}}"#;
+        assert_eq!(parse_provider_error_body(body), body);
     }
 
     #[test]

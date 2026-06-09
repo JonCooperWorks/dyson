@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 
-use crate::error::{DysonError, Result};
+use crate::error::Result;
 use crate::tool::{Tool, ToolContext, ToolOutput, path_err};
 
 pub struct WriteFileTool;
@@ -42,12 +42,8 @@ impl Tool for WriteFileTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let file_path = input["file_path"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("write_file", "missing or invalid 'file_path'"))?;
-        let content = input["content"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("write_file", "missing or invalid 'content'"))?;
+        let file_path = crate::tool::required_str(input, "file_path", "write_file")?;
+        let content = crate::tool::required_str(input, "content", "write_file")?;
 
         let path = match ctx.resolve_path(file_path) {
             Ok(p) => p,

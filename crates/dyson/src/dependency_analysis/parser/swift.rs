@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::{ManifestParser, dep};
+use super::{ManifestParser, dep, from_json};
 use crate::dependency_analysis::types::{Ecosystem, ParseError, Parsed};
 
 pub struct SwiftParser;
@@ -43,8 +43,7 @@ struct PinState {
 
 impl ManifestParser for SwiftParser {
     fn parse(&self, path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-        let doc: Resolved = serde_json::from_slice(bytes)
-            .map_err(|e| ParseError::malformed(path, format!("Package.resolved decode: {e}")))?;
+        let doc: Resolved = from_json(path, bytes, "Package.resolved")?;
         let pins = if !doc.pins.is_empty() {
             doc.pins
         } else {

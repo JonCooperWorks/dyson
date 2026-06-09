@@ -6,8 +6,6 @@
 // FTS5 returns no results.
 // ===========================================================================
 
-use std::fmt::Write;
-
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -51,17 +49,10 @@ impl Tool for MemorySearchTool {
 
         let results = ws.read().await.memory_search(&query);
 
-        if results.is_empty() {
-            return Ok(ToolOutput::success("No results found."));
-        }
-
-        let mut output = String::new();
-        for (key, snippet) in &results {
-            writeln!(&mut output, "### {key}\n{snippet}\n").unwrap();
-        }
-        write!(&mut output, "({} result(s))", results.len()).unwrap();
-
-        Ok(ToolOutput::success(output))
+        Ok(ToolOutput::success(crate::tool::format_search_results(
+            &results,
+            "No results found.",
+        )))
     }
 }
 

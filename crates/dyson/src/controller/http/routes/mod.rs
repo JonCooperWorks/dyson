@@ -42,7 +42,7 @@ mod sse;
 mod static_assets;
 mod turns;
 
-const WARMUP_PLACEHOLDER: &str = "warmup-placeholder";
+use crate::controller::WARMUP_PLACEHOLDER;
 
 pub(super) async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) -> Resp {
     // Gzip the response if the client asked for it and the content-type

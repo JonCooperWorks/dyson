@@ -4,15 +4,15 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::{ManifestParser, dep, utf8};
+use super::{ManifestParser, dep, from_json, utf8};
 use crate::dependency_analysis::types::{Ecosystem, ParseError, Parsed};
 
 pub struct CranParser;
 
 impl ManifestParser for CranParser {
     fn parse(&self, path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if name.eq_ignore_ascii_case("renv.lock") {
+        let name = super::file_name_lower(path);
+        if name == "renv.lock" {
             parse_renv(path, bytes)
         } else {
             parse_description(path, bytes)
@@ -37,8 +37,7 @@ struct RenvPackage {
 }
 
 fn parse_renv(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-    let doc: RenvLock = serde_json::from_slice(bytes)
-        .map_err(|e| ParseError::malformed(path, format!("renv.lock decode: {e}")))?;
+    let doc: RenvLock = from_json(path, bytes, "renv.lock")?;
     let mut parsed = Parsed::default();
     for (_, pkg) in doc.packages {
         let eco = if pkg.source.eq_ignore_ascii_case("Bioconductor") {

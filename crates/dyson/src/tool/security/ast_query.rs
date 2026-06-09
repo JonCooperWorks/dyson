@@ -91,9 +91,7 @@ impl Tool for AstQueryTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let query_str = input["query"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("ast_query", "missing or invalid 'query'"))?;
+        let query_str = crate::tool::required_str(input, "query", "ast_query")?;
 
         let include_glob = input["include"].as_str().map(String::from);
 
@@ -105,9 +103,8 @@ impl Tool for AstQueryTool {
                 Some(c) => c,
                 None => {
                     return Ok(ToolOutput::error(format!(
-                        "unknown language '{name}'.  Supported: rust, python, javascript, \
-                     typescript, tsx, go, java, c, cpp, csharp, ruby, kotlin, swift, zig, \
-                     elixir, erlang, ocaml, haskell, nix, json"
+                        "unknown language '{name}'.  Supported: {}",
+                        ast::supported_language_names().join(", ")
                     )));
                 }
             },
@@ -170,10 +167,7 @@ impl Tool for AstQueryTool {
             )));
         }
 
-        let working_dir_canon = ctx
-            .working_dir
-            .canonicalize()
-            .unwrap_or_else(|_| ctx.working_dir.clone());
+        let working_dir_canon = crate::tool::canonical_or_self(&ctx.working_dir);
 
         // CPU-bound: compile query + walk AST.
         let results = tokio::task::spawn_blocking(move || {
@@ -220,9 +214,7 @@ pub fn execute_query_string(
     if query.capture_names().is_empty() {
         return Err("query has no captures".to_string());
     }
-    let working_dir_canon = search_dir
-        .canonicalize()
-        .unwrap_or_else(|_| search_dir.to_path_buf());
+    let working_dir_canon = crate::tool::canonical_or_self(search_dir);
     Ok(run_query(
         &query,
         config,
@@ -244,23 +236,9 @@ fn run_query(
     let mut total_bytes = 0usize;
     let mut file_count = 0usize;
 
-    let mut builder = ignore::WalkBuilder::new(search_dir);
-    builder.hidden(false);
-    builder.git_ignore(true);
-    builder.git_global(true);
-
-    if let Some(glob) = include_glob {
-        let mut types_builder = ignore::types::TypesBuilder::new();
-        types_builder.add("filter", glob).ok();
-        types_builder.select("filter");
-        if let Ok(types) = types_builder.build() {
-            builder.types(types);
-        }
-    }
-
     let capture_names: Vec<&str> = query.capture_names().to_vec();
 
-    for entry in builder.build().flatten() {
+    for entry in ast::walk_dir_filtered(search_dir, include_glob).flatten() {
         if results.len() >= MAX_MATCHES
             || total_bytes >= MAX_OUTPUT_BYTES
             || file_count >= ast::MAX_FILES

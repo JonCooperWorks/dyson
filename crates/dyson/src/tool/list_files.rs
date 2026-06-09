@@ -6,7 +6,7 @@ use std::fmt::Write;
 
 use async_trait::async_trait;
 
-use crate::error::{DysonError, Result};
+use crate::error::Result;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Maximum number of results to return.
@@ -47,9 +47,7 @@ impl Tool for ListFilesTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let pattern = input["pattern"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("list_files", "missing or invalid 'pattern'"))?;
+        let pattern = crate::tool::required_str(input, "pattern", "list_files")?;
 
         let base_dir = match input["path"].as_str() {
             Some(sub) => match ctx.resolve_path(sub) {
@@ -77,10 +75,7 @@ impl Tool for ListFilesTool {
             }
         };
 
-        let working_dir_canon = ctx
-            .working_dir
-            .canonicalize()
-            .unwrap_or_else(|_| ctx.working_dir.clone());
+        let working_dir_canon = crate::tool::canonical_or_self(&ctx.working_dir);
 
         let mut results = Vec::with_capacity(64);
         for entry in entries {

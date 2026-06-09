@@ -384,6 +384,11 @@ impl DreamHandle {
                             summary_len = summary.len(),
                             "conversation summarised for dreams"
                         );
+                        // The single `DreamRequest` → `DreamContext` conversion
+                        // point: the shared `client`/`config`/`tool_context`/
+                        // `turn_count` fields move across unchanged; only the
+                        // raw `messages`/`feedback_entries` collapse into the
+                        // derived `conversation_summary` here.
                         runner.fire(&req.event, || DreamContext {
                             client: req.client.clone(),
                             config: req.config.clone(),

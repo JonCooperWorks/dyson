@@ -139,9 +139,7 @@ impl Tool for BashTool {
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let started = std::time::Instant::now();
         // -- Extract the command string --
-        let command = input["command"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("bash", "missing or invalid 'command' field"))?;
+        let command = crate::tool::required_str(input, "command", "bash")?;
 
         let log_command = redact_secrets(command);
         tracing::info!(command = %log_command, working_dir = %ctx.working_dir.display(), "executing bash command");

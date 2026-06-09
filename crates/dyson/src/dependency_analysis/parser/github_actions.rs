@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::{ManifestParser, dep};
+use super::{ManifestParser, dep, from_yaml};
 use crate::dependency_analysis::types::{Ecosystem, ParseError, Parsed};
 
 pub struct GithubActionsParser;
@@ -32,8 +32,7 @@ struct Step {
 
 impl ManifestParser for GithubActionsParser {
     fn parse(&self, path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-        let doc: Workflow = serde_yaml_ng::from_slice(bytes)
-            .map_err(|e| ParseError::malformed(path, format!("workflow decode: {e}")))?;
+        let doc: Workflow = from_yaml(path, bytes, "workflow")?;
         let mut parsed = Parsed::default();
         for (_jobname, job) in doc.jobs {
             if let Some(uses) = &job.uses {

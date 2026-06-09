@@ -209,26 +209,27 @@ impl OsvClient {
         body: &B,
     ) -> Result<R, OsvError> {
         let url = format!("{}{}", self.base, path);
-        for attempt in 0..2 {
-            let resp = self.http.post(&url).json(body).send().await?;
-            let status = resp.status();
-            if status.is_success() {
-                return Ok(resp.json().await?);
-            }
-            if attempt == 0 && is_retryable(status) {
-                tokio::time::sleep(RETRY_DELAY).await;
-                continue;
-            }
-            return Err(OsvError::Unexpected(format!(
-                "POST {path} returned {status}"
-            )));
-        }
-        unreachable!("loop always returns")
+        let resp = self
+            .send_with_retry(|| self.http.post(&url).json(body), &format!("POST {path}"))
+            .await?;
+        Ok(resp.json().await?)
     }
 
     async fn get_with_retry(&self, url: &str) -> Result<reqwest::Response, OsvError> {
+        self.send_with_retry(|| self.http.get(url), &format!("GET {url}"))
+            .await
+    }
+
+    /// Send a request built by `make_request`, retrying once after
+    /// `RETRY_DELAY` on a retryable status (429 / 5xx).  Returns the
+    /// successful `Response`; callers decode the body themselves.
+    async fn send_with_retry(
+        &self,
+        mut make_request: impl FnMut() -> reqwest::RequestBuilder,
+        label: &str,
+    ) -> Result<reqwest::Response, OsvError> {
         for attempt in 0..2 {
-            let resp = self.http.get(url).send().await?;
+            let resp = make_request().send().await?;
             let status = resp.status();
             if status.is_success() {
                 return Ok(resp);
@@ -237,7 +238,7 @@ impl OsvClient {
                 tokio::time::sleep(RETRY_DELAY).await;
                 continue;
             }
-            return Err(OsvError::Unexpected(format!("GET {url} returned {status}")));
+            return Err(OsvError::Unexpected(format!("{label} returned {status}")));
         }
         unreachable!("loop always returns")
     }

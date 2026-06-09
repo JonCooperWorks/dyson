@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::{ManifestParser, dep};
+use super::{ManifestParser, dep, from_json};
 use crate::dependency_analysis::types::{Dependency, Ecosystem, ParseError, Parsed};
 
 pub struct SbomParser;
@@ -54,8 +54,7 @@ struct CdxComponent {
 }
 
 fn parse_cyclonedx(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-    let doc: CycloneDx = serde_json::from_slice(bytes)
-        .map_err(|e| ParseError::malformed(path, format!("CycloneDX decode: {e}")))?;
+    let doc: CycloneDx = from_json(path, bytes, "CycloneDX")?;
     let mut parsed = Parsed::default();
     for c in doc.components {
         push_purl(&mut parsed, path, c.name, c.version, c.purl);
@@ -88,8 +87,7 @@ struct SpdxExternalRef {
 }
 
 fn parse_spdx(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-    let doc: Spdx = serde_json::from_slice(bytes)
-        .map_err(|e| ParseError::malformed(path, format!("SPDX decode: {e}")))?;
+    let doc: Spdx = from_json(path, bytes, "SPDX")?;
     let mut parsed = Parsed::default();
     for p in doc.packages {
         let purl = p

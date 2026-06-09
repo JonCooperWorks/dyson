@@ -264,33 +264,51 @@ pub(crate) fn json_ok<T: Serialize>(v: &T) -> Resp {
     }
 }
 
-/// 500 helper.  Symmetric with `bad_request` / `not_found` — a single
-/// place to build the JSON body so callers stay one-liners.
-pub(crate) fn internal_error(msg: &str) -> Resp {
+/// Open the workspace described by a settings snapshot, returning a ready
+/// `bad_request` response on failure so route handlers can `?`-propagate.
+pub(crate) fn open_workspace(
+    snapshot: &crate::config::Settings,
+) -> std::result::Result<Box<dyn crate::workspace::Workspace>, Resp> {
+    crate::workspace::create_workspace(&snapshot.workspace)
+        .map_err(|e| bad_request(&format!("workspace open failed: {e}")))
+}
+
+/// Build a JSON response with the given status from any serializable value.
+/// On serialization failure, falls back to a 400 with the serde error so a
+/// silent empty body never reaches the client.
+pub(crate) fn json_status<T: Serialize>(status: StatusCode, v: &T) -> Resp {
+    match serde_json::to_vec(v) {
+        Ok(bytes) => Response::builder()
+            .status(status)
+            .header("Content-Type", "application/json")
+            .body(boxed(Bytes::from(bytes)))
+            .expect("status + content-type are valid"),
+        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("serialize: {e}")),
+    }
+}
+
+/// Build a `{ "error": msg }` JSON response with the given status.
+pub(crate) fn json_error(status: StatusCode, msg: &str) -> Resp {
     let body = serde_json::json!({ "error": msg }).to_string();
     Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .status(status)
         .header("Content-Type", "application/json")
         .body(boxed(Bytes::from(body)))
         .expect("status + content-type are valid")
 }
 
+/// 500 helper.  Symmetric with `bad_request` / `not_found` — a single
+/// place to build the JSON body so callers stay one-liners.
+pub(crate) fn internal_error(msg: &str) -> Resp {
+    json_error(StatusCode::INTERNAL_SERVER_ERROR, msg)
+}
+
 pub(crate) fn bad_request(msg: &str) -> Resp {
-    let body = serde_json::json!({ "error": msg }).to_string();
-    Response::builder()
-        .status(StatusCode::BAD_REQUEST)
-        .header("Content-Type", "application/json")
-        .body(boxed(Bytes::from(body)))
-        .unwrap()
+    json_error(StatusCode::BAD_REQUEST, msg)
 }
 
 pub(crate) fn service_unavailable(msg: &str) -> Resp {
-    let body = serde_json::json!({ "error": msg }).to_string();
-    Response::builder()
-        .status(StatusCode::SERVICE_UNAVAILABLE)
-        .header("Content-Type", "application/json")
-        .body(boxed(Bytes::from(body)))
-        .unwrap()
+    json_error(StatusCode::SERVICE_UNAVAILABLE, msg)
 }
 
 pub(crate) fn not_found() -> Resp {

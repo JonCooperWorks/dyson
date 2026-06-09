@@ -16,7 +16,7 @@ static GO_MOD_REQUIRE: OnceLock<Regex> = OnceLock::new();
 impl ManifestParser for GoParser {
     fn parse(&self, path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
         let text = utf8(path, bytes)?;
-        if path.file_name().is_some_and(|n| n == "go.sum") {
+        if super::file_name_lower(path) == "go.sum" {
             parse_go_sum(path, text)
         } else {
             parse_go_mod(path, text)

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::{ManifestParser, dep};
+use super::{ManifestParser, dep, from_json};
 use crate::dependency_analysis::types::{Ecosystem, ParseError, Parsed};
 
 pub struct ConanParser;
@@ -19,8 +19,7 @@ struct ConanLock {
 
 impl ManifestParser for ConanParser {
     fn parse(&self, path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-        let doc: ConanLock = serde_json::from_slice(bytes)
-            .map_err(|e| ParseError::malformed(path, format!("conan.lock decode: {e}")))?;
+        let doc: ConanLock = from_json(path, bytes, "conan.lock")?;
         let mut parsed = Parsed::default();
         for (entry, direct) in doc
             .requires

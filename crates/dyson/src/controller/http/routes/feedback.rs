@@ -10,21 +10,6 @@ use super::super::responses::{Resp, bad_request, json_ok, read_json_capped};
 use super::super::state::HttpState;
 use super::super::wire::{FeedbackBody, MAX_SMALL_BODY};
 
-pub(crate) fn emoji_to_rating(emoji: &str) -> Option<FeedbackRating> {
-    // Mirror crate::controller::telegram::feedback so behaviour matches
-    // Telegram exactly.  Kept inline (not re-exported from the telegram
-    // module) so the http controller doesn't depend on telegram's wiring.
-    match emoji {
-        "💩" | "😡" | "🤮" => Some(FeedbackRating::Terrible),
-        "👎" => Some(FeedbackRating::Bad),
-        "😢" | "😐" => Some(FeedbackRating::NotGood),
-        "👍" | "👏" => Some(FeedbackRating::Good),
-        "🔥" | "🎉" | "😂" => Some(FeedbackRating::VeryGood),
-        "❤️" | "❤" | "🤯" | "💯" | "⚡" => Some(FeedbackRating::Excellent),
-        _ => None,
-    }
-}
-
 pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
     let entries = match state.feedback.as_ref() {
         Some(fb) => fb.load(id).unwrap_or_default(),
@@ -44,7 +29,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState,
     };
     match body.emoji.as_deref().filter(|s| !s.is_empty()) {
         Some(emoji) => {
-            let rating = match emoji_to_rating(emoji) {
+            let rating = match FeedbackRating::from_emoji(emoji) {
                 Some(r) => r,
                 None => return bad_request(&format!("unknown emoji: {emoji}")),
             };
@@ -72,36 +57,3 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState,
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn emoji_to_rating_matches_telegram() {
-        // Every emoji the Telegram controller honours must round-trip
-        // here too — chats started in Telegram are read by the web UI.
-        let cases: &[(&str, FeedbackRating)] = &[
-            ("💩", FeedbackRating::Terrible),
-            ("😡", FeedbackRating::Terrible),
-            ("🤮", FeedbackRating::Terrible),
-            ("👎", FeedbackRating::Bad),
-            ("😢", FeedbackRating::NotGood),
-            ("😐", FeedbackRating::NotGood),
-            ("👍", FeedbackRating::Good),
-            ("👏", FeedbackRating::Good),
-            ("🔥", FeedbackRating::VeryGood),
-            ("🎉", FeedbackRating::VeryGood),
-            ("😂", FeedbackRating::VeryGood),
-            ("❤️", FeedbackRating::Excellent),
-            ("❤", FeedbackRating::Excellent),
-            ("🤯", FeedbackRating::Excellent),
-            ("💯", FeedbackRating::Excellent),
-            ("⚡", FeedbackRating::Excellent),
-        ];
-        for (e, want) in cases {
-            assert_eq!(emoji_to_rating(e), Some(*want), "emoji {e} should map");
-        }
-        assert_eq!(emoji_to_rating("🦀"), None);
-        assert_eq!(emoji_to_rating(""), None);
-    }
-}

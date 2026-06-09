@@ -996,6 +996,31 @@ impl Default for AgentSettings {
     }
 }
 
+impl AgentSettings {
+    /// Build settings for a spawned child/subagent.  Only the model,
+    /// provider, iteration/token budgets, and system prompt differ from the
+    /// defaults; everything else (retries, concurrency, api_key — the child
+    /// uses a pre-authenticated client handle) is inherited.  Subagent spawn
+    /// sites share this so a newly-added required field can't be missed in
+    /// one of them.
+    pub fn for_child(
+        model: String,
+        provider: LlmProvider,
+        max_iterations: usize,
+        max_tokens: u32,
+        system_prompt: String,
+    ) -> Self {
+        Self {
+            model,
+            max_iterations,
+            max_tokens,
+            system_prompt,
+            provider,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {

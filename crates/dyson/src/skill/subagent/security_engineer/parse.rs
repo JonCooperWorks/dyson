@@ -563,7 +563,6 @@ mod extract_json_tests {
             scope: "scope".into(),
             findings: vec![],
             rejected_candidates: vec![],
-            coverage: vec![],
             gaps: vec![],
             dedupe_groups: vec![DedupeGroup {
                 id: "dedupe-001".into(),
@@ -599,7 +598,6 @@ mod extract_json_tests {
             scope: "scope".into(),
             findings: vec![],
             rejected_candidates: vec![],
-            coverage: vec![],
             gaps: vec![],
             dedupe_groups: vec![DedupeGroup {
                 id: "dedupe-001".into(),
@@ -642,7 +640,6 @@ mod extract_json_tests {
             scope: "scope".into(),
             findings: vec![f.clone(), f],
             rejected_candidates: vec![],
-            coverage: vec![],
             gaps: vec![],
             dedupe_groups: vec![],
             trace_evidence: vec![],
@@ -672,7 +669,6 @@ mod extract_json_tests {
             scope: "scope".into(),
             findings: vec![f],
             rejected_candidates: vec![],
-            coverage: vec![],
             gaps: vec![],
             dedupe_groups: vec![],
             trace_evidence: vec![],

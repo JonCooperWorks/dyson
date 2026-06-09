@@ -124,14 +124,13 @@ impl Tool for CoderTool {
             )));
         }
 
-        let settings = AgentSettings {
-            model: self.model.clone(),
-            max_iterations: 30,
-            max_tokens: 8192,
-            system_prompt: CODER_SYSTEM_PROMPT.to_string(),
-            provider: self.provider.clone(),
-            ..AgentSettings::default()
-        };
+        let settings = AgentSettings::for_child(
+            self.model.clone(),
+            self.provider.clone(),
+            30,
+            8192,
+            CODER_SYSTEM_PROMPT.to_string(),
+        );
 
         let user_message = format!(
             "Your working directory has been set to the scoped path.  \

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::{ManifestParser, dep};
+use super::{ManifestParser, dep, from_yaml};
 use crate::dependency_analysis::types::{Ecosystem, ParseError, Parsed};
 
 pub struct PubParser;
@@ -27,8 +27,7 @@ struct PubEntry {
 
 impl ManifestParser for PubParser {
     fn parse(&self, path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-        let doc: PubLock = serde_yaml_ng::from_slice(bytes)
-            .map_err(|e| ParseError::malformed(path, format!("pubspec.lock decode: {e}")))?;
+        let doc: PubLock = from_yaml(path, bytes, "pubspec.lock")?;
         let mut parsed = Parsed::default();
         for (name, entry) in doc.packages {
             if entry.source != "hosted" && !entry.source.is_empty() {

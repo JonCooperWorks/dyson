@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::error::{DysonError, Result};
+use crate::error::Result;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::truncate_output;
 
@@ -121,9 +121,7 @@ impl Tool for ArtefactsTool {
                 Ok(ToolOutput::success(render_list(chat_id, &artefacts)))
             }
             "read" => {
-                let id = input["id"]
-                    .as_str()
-                    .ok_or_else(|| DysonError::tool("artifacts", "missing or invalid 'id'"))?;
+                let id = crate::tool::required_str(input, "id", "artifacts")?;
                 if !safe_store_id(id) {
                     return Ok(ToolOutput::error("invalid artifact id"));
                 }

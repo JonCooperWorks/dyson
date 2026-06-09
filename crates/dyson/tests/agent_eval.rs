@@ -678,7 +678,7 @@ async fn redirect_to_unknown_tool_is_handled_gracefully() {
                 content, is_error, ..
             } = block
             {
-                *is_error && content.contains("unknown tool")
+                *is_error && content.to_lowercase().contains("unknown tool")
             } else {
                 false
             }

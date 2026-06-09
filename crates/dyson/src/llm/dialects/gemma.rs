@@ -16,7 +16,6 @@
 // ===========================================================================
 
 use regex::Regex;
-use std::fmt::Write;
 use std::sync::LazyLock;
 
 use super::{ExtractedToolCall, TextToolHandler};
@@ -69,39 +68,7 @@ fn format_tools_for_prompt(tools: &[ToolDefinition]) -> String {
          Tools:\n",
     );
 
-    for tool in tools {
-        writeln!(&mut prompt, "\n## {}", tool.name).unwrap();
-        writeln!(&mut prompt, "{}", tool.description).unwrap();
-
-        if let Some(props) = tool.input_schema.get("properties")
-            && let Some(obj) = props.as_object()
-        {
-            let required: Vec<&str> = tool
-                .input_schema
-                .get("required")
-                .and_then(|r| r.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-                .unwrap_or_default();
-
-            prompt.push_str("Parameters:\n");
-            for (name, schema) in obj {
-                let typ = schema
-                    .get("type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("string");
-                let desc = schema
-                    .get("description")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or("");
-                let req = if required.contains(&name.as_str()) {
-                    " (required)"
-                } else {
-                    " (optional)"
-                };
-                writeln!(&mut prompt, "  - {name}: {typ}{req} — {desc}").unwrap();
-            }
-        }
-    }
+    super::write_tool_param_table(&mut prompt, tools);
 
     prompt
 }

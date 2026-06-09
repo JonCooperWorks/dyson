@@ -460,15 +460,14 @@ impl Tool for SubagentTool {
             .clone()
             .unwrap_or_else(|| self.parent_model.clone());
 
-        let settings = AgentSettings {
+        // api_key/base_url are unused — the client handle is pre-authenticated.
+        let settings = AgentSettings::for_child(
             model,
-            max_iterations: self.config.max_iterations.unwrap_or(10),
-            max_tokens: self.config.max_tokens.unwrap_or(4096),
-            system_prompt: self.config.system_prompt.clone(),
-            provider: self.provider.clone(),
-            // api_key/base_url are unused — the client handle is pre-authenticated.
-            ..AgentSettings::default()
-        };
+            self.provider.clone(),
+            self.config.max_iterations.unwrap_or(10),
+            self.config.max_tokens.unwrap_or(4096),
+            self.config.system_prompt.clone(),
+        );
 
         // Activity tab registration — UI-only side channel.  `None`
         // on non-HTTP controllers.  See `ToolContext::activity` for

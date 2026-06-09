@@ -16,7 +16,7 @@ use crate::error::{DysonError, Result};
 use crate::llm::ToolDefinition;
 use crate::message::Message;
 use crate::sandbox::SandboxDecision;
-use crate::tool::ToolOutput;
+use crate::tool::{ToolContext, ToolOutput};
 
 use super::Agent;
 use super::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
@@ -351,33 +351,7 @@ impl Agent {
         };
 
         match decision {
-            SandboxDecision::Allow { input } => {
-                // Look up the tool.
-                let Some(tool) = self.tool_registry.get(&call.name) else {
-                    tracing::warn!(tool = call.name, "unknown tool");
-                    return Ok(ToolOutput::error(format!("Unknown tool '{}'", call.name)));
-                };
-
-                // Execute the tool.
-                let mut tool_output = match tool.run(&input, &ctx).await {
-                    Ok(out) => out,
-                    Err(e) => ToolOutput::error(e.to_string()),
-                };
-
-                // Post-process through the sandbox.
-                if let Err(e) = self
-                    .sandbox
-                    .after(&call.name, &input, &mut tool_output)
-                    .await
-                {
-                    tracing::warn!(tool = call.name, error = %e, "sandbox after-hook failed");
-                }
-
-                // Notify the owning skill.
-                self.notify_after_tool(&call.name, &tool_output).await;
-
-                Ok(tool_output)
-            }
+            SandboxDecision::Allow { input } => self.run_named_tool(&call.name, &input, &ctx).await,
 
             SandboxDecision::Deny { reason } => {
                 tracing::info!(
@@ -395,37 +369,38 @@ impl Agent {
                     redirected = tool_name,
                     "tool call redirected by sandbox"
                 );
-
-                // Look up the redirected tool.
-                let Some(tool) = self.tool_registry.get(&tool_name) else {
-                    tracing::warn!(tool = tool_name, "sandbox redirected to unknown tool");
-                    return Ok(ToolOutput::error(format!(
-                        "Sandbox redirected to unknown tool '{tool_name}'"
-                    )));
-                };
-
-                // Execute the redirected tool.  The redirected call
-                // keeps the original `tool_use_id` — the sandbox didn't
-                // change which message id the LLM is waiting on.
-                let mut tool_output = match tool.run(&input, &ctx).await {
-                    Ok(out) => out,
-                    Err(e) => ToolOutput::error(e.to_string()),
-                };
-
-                // Post-process.
-                if let Err(e) = self
-                    .sandbox
-                    .after(&tool_name, &input, &mut tool_output)
-                    .await
-                {
-                    tracing::warn!(tool = tool_name, error = %e, "sandbox after-hook failed");
-                }
-
-                // Notify the owning skill (using the redirected tool name).
-                self.notify_after_tool(&tool_name, &tool_output).await;
-
-                Ok(tool_output)
+                // The redirected call keeps the original `tool_use_id` — the
+                // sandbox didn't change which message id the LLM is waiting on.
+                self.run_named_tool(&tool_name, &input, &ctx).await
             }
         }
+    }
+
+    /// Look up `name`, run it with `input`, post-process through
+    /// `sandbox.after`, and notify the owning skill.  Shared by the
+    /// Allow and Redirect sandbox arms so post-processing stays identical.
+    async fn run_named_tool(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput> {
+        let Some(tool) = self.tool_registry.get(name) else {
+            tracing::warn!(tool = name, "unknown tool");
+            return Ok(ToolOutput::error(format!("Unknown tool '{name}'")));
+        };
+
+        let mut tool_output = match tool.run(input, ctx).await {
+            Ok(out) => out,
+            Err(e) => ToolOutput::error(e.to_string()),
+        };
+
+        if let Err(e) = self.sandbox.after(name, input, &mut tool_output).await {
+            tracing::warn!(tool = name, error = %e, "sandbox after-hook failed");
+        }
+
+        self.notify_after_tool(name, &tool_output).await;
+
+        Ok(tool_output)
     }
 }

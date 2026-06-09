@@ -24,9 +24,7 @@ use crate::ast::{self, LanguageConfig, MAX_FILES};
 ///
 /// Returns a JSON object with a `definitions` array.
 pub fn list_definitions(resolved_path: &Path, working_dir: &Path) -> Result<ToolOutput> {
-    let working_dir_canon = working_dir
-        .canonicalize()
-        .unwrap_or_else(|_| working_dir.to_path_buf());
+    let working_dir_canon = crate::tool::canonical_or_self(working_dir);
 
     let mut all_defs: Vec<serde_json::Value> = Vec::new();
     let mut files_scanned = 0usize;

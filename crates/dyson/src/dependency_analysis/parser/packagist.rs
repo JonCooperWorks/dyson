@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::{ManifestParser, dep};
+use super::{ManifestParser, dep, from_json};
 use crate::dependency_analysis::types::{Ecosystem, ParseError, Parsed};
 
 pub struct PackagistParser;
@@ -25,8 +25,7 @@ struct ComposerPkg {
 
 impl ManifestParser for PackagistParser {
     fn parse(&self, path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-        let doc: ComposerLock = serde_json::from_slice(bytes)
-            .map_err(|e| ParseError::malformed(path, format!("composer.lock decode: {e}")))?;
+        let doc: ComposerLock = from_json(path, bytes, "composer.lock")?;
         let mut parsed = Parsed::default();
         for pkg in doc.packages.into_iter().chain(doc.packages_dev) {
             let version = pkg.version.trim_start_matches('v').to_string();

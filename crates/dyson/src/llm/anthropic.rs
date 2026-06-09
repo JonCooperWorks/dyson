@@ -365,7 +365,7 @@ impl LlmClient for AnthropicClient {
                 ));
             }
 
-            let message = parse_error_body(&body);
+            let message = crate::llm::parse_provider_error_body(&body);
             return Err(crate::llm::provider_http_error(
                 "Anthropic",
                 status,
@@ -379,35 +379,6 @@ impl LlmClient for AnthropicClient {
             BaseSseParser::new(AnthropicJsonParser),
         ))
     }
-}
-
-// ---------------------------------------------------------------------------
-// Error body parser — strips Anthropic envelope.
-// ---------------------------------------------------------------------------
-
-/// Pull the human-readable message out of an Anthropic error body.
-///
-/// Anthropic shape: `{"type":"error","error":{"type":"…","message":"…"}}`.
-/// Same `error.message` slot as OpenAI/Gemini once you peel the outer
-/// `type:"error"` discriminator.
-///
-/// Falls back to the raw body when the shape doesn't match — better
-/// than the old behavior of throwing the body away and substituting
-/// canned strings like "Anthropic API rate limited — try again shortly".
-fn parse_error_body(body: &str) -> String {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
-        && let Some(err) = v.get("error")
-    {
-        let message = err
-            .get("message")
-            .and_then(|m| m.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        if let Some(m) = message {
-            return m.to_string();
-        }
-    }
-    body.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -892,26 +863,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parse_error_body_strips_anthropic_overloaded_envelope() {
-        // Real shape Anthropic returns for a 529.
-        let body = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
-        let msg = parse_error_body(body);
-        assert_eq!(msg, "Overloaded");
-        assert!(!msg.contains("overloaded_error"));
-        assert!(!msg.contains('{'));
-    }
-
-    #[test]
-    fn parse_error_body_strips_invalid_request_envelope() {
-        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 200000 tokens > 199999 maximum"}}"#;
-        let msg = parse_error_body(body);
-        assert_eq!(msg, "prompt is too long: 200000 tokens > 199999 maximum");
-    }
-
-    #[test]
-    fn parse_error_body_falls_back_to_raw_for_non_json() {
-        let body = "Service Unavailable";
-        assert_eq!(parse_error_body(body), "Service Unavailable");
-    }
 }

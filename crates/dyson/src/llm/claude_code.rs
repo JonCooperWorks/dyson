@@ -64,9 +64,6 @@
 //
 // Other event types in the stream:
 //
-//   {"type":"system","subtype":"init","model":"...","tools":[...],...}
-//     → Session initialization.  We extract the model name for logging.
-//
 //   {"type":"assistant","message":{"content":[{"type":"text","text":"..."}],...}}
 //     → Complete assistant message (not partial).  We ignore these when
 //       --include-partial-messages is active because we already got the
@@ -75,12 +72,13 @@
 //   {"type":"result","subtype":"success","result":"...","stop_reason":"end_turn",...}
 //     → Final result.  We emit MessageComplete here.
 //
-//   {"type":"rate_limit_event",...}
-//     → Rate limit info.  Logged but not surfaced to the agent.
-//
-//   {"type":"user","message":{"content":[{"type":"tool_result",...}]}}
-//     → Claude Code's internal tool results.  We see these as Claude Code
-//       executes tools in its own agent loop.
+//   Everything else falls through `parse_line`'s `_ => {}` and is ignored —
+//   we don't act on them today:
+//     - {"type":"system","subtype":"init","model":"...","tools":[...],...}
+//       (session init; the model is already known from the request)
+//     - {"type":"rate_limit_event",...}
+//     - {"type":"user","message":{"content":[{"type":"tool_result",...}]}}
+//       (Claude Code's internal tool results from its own agent loop)
 //
 // Why let Claude Code keep its tools?
 //   Claude Code has a full agent loop with Bash, Read, Write, Edit, etc.
@@ -362,11 +360,7 @@ impl LlmClient for ClaudeCodeClient {
         // -- Build the command --
         // Concatenate stable system prompt and ephemeral suffix (Claude Code
         // CLI takes a single --append-system-prompt string, no caching split).
-        let full_system = if system_suffix.is_empty() {
-            system.to_string()
-        } else {
-            format!("{system}\n\n{system_suffix}")
-        };
+        let full_system = super::concat_system_prompt(system, system_suffix);
         let args = self.build_args(&config.model, &full_system, mcp_config_json.as_deref());
 
         let mut cmd = tokio::process::Command::new(&self.claude_path);

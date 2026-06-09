@@ -860,6 +860,16 @@ impl Agent {
         &self.config
     }
 
+    /// Direct access to the token budget for external inspection.
+    pub const fn token_budget(&self) -> &TokenBudget {
+        &self.conversation.token_budget
+    }
+
+    /// Mutable access to the token budget for external configuration.
+    pub const fn token_budget_mut(&mut self) -> &mut TokenBudget {
+        &mut self.conversation.token_budget
+    }
+
     /// Run the agent loop for a single user message.
     ///
     /// Appends the user message to the conversation history, then loops:
@@ -873,16 +883,6 @@ impl Agent {
     /// The final assistant text (the last text content from the last
     /// assistant message without tool calls), or an error if something
     /// went wrong.
-    /// Provide direct access to the token budget for external inspection.
-    pub const fn token_budget(&self) -> &TokenBudget {
-        &self.conversation.token_budget
-    }
-
-    /// Provide mutable access to the token budget for external configuration.
-    pub const fn token_budget_mut(&mut self) -> &mut TokenBudget {
-        &mut self.conversation.token_budget
-    }
-
     pub async fn run(&mut self, user_input: &str, output: &mut dyn Output) -> Result<String> {
         tracing::info!(
             input_len = user_input.len(),

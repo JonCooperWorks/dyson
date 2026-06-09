@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde::Deserialize;
 
-use super::{ManifestParser, dep, utf8};
+use super::{ManifestParser, dep, from_yaml, utf8};
 use crate::dependency_analysis::types::{Ecosystem, ParseError, Parsed};
 
 pub struct HackageParser;
@@ -15,7 +15,7 @@ static FREEZE_LINE: OnceLock<Regex> = OnceLock::new();
 
 impl ManifestParser for HackageParser {
     fn parse(&self, path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-        if path.file_name().is_some_and(|n| n == "stack.yaml.lock") {
+        if super::file_name_lower(path) == "stack.yaml.lock" {
             parse_stack_lock(path, bytes)
         } else {
             parse_freeze(path, bytes)
@@ -57,8 +57,7 @@ struct StackRef {
 }
 
 fn parse_stack_lock(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
-    let doc: StackLock = serde_yaml_ng::from_slice(bytes)
-        .map_err(|e| ParseError::malformed(path, format!("stack.yaml.lock decode: {e}")))?;
+    let doc: StackLock = from_yaml(path, bytes, "stack.yaml.lock")?;
     let mut parsed = Parsed::default();
     for entry in doc.packages {
         let hackage = entry

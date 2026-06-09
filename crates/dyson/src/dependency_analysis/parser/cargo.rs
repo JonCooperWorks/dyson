@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::{ManifestParser, dep, utf8};
+use super::{ManifestParser, dep, from_toml, utf8};
 use crate::dependency_analysis::types::{Ecosystem, ParseError, Parsed};
 
 pub struct CargoParser;
@@ -12,8 +12,8 @@ pub struct CargoParser;
 impl ManifestParser for CargoParser {
     fn parse(&self, path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
         let text = utf8(path, bytes)?;
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if name.eq_ignore_ascii_case("Cargo.lock") {
+        let name = super::file_name_lower(path);
+        if name == "cargo.lock" {
             parse_lock(path, text)
         } else {
             parse_toml(path, text)
@@ -36,8 +36,7 @@ struct LockPackage {
 }
 
 fn parse_lock(path: &Path, text: &str) -> Result<Parsed, ParseError> {
-    let lock: Lock = toml::from_str(text)
-        .map_err(|e| ParseError::malformed(path, format!("Cargo.lock decode: {e}")))?;
+    let lock: Lock = from_toml(path, text, "Cargo.lock")?;
     let mut parsed = Parsed::default();
     for pkg in lock.package {
         // git/path deps have no OSV record under the crates.io ecosystem.
@@ -64,8 +63,7 @@ struct CargoToml {
 }
 
 fn parse_toml(path: &Path, text: &str) -> Result<Parsed, ParseError> {
-    let manifest: CargoToml = toml::from_str(text)
-        .map_err(|e| ParseError::malformed(path, format!("Cargo.toml decode: {e}")))?;
+    let manifest: CargoToml = from_toml(path, text, "Cargo.toml")?;
     let mut parsed = Parsed::default();
     // Whether to warn about the missing lockfile is decided at the
     // scan-orchestrator level in `dependency_analysis::scan` — a
@@ -79,23 +77,12 @@ fn parse_toml(path: &Path, text: &str) -> Result<Parsed, ParseError> {
         (manifest.build_dependencies, false),
     ] {
         for (name, val) in section {
-            let mut d = dep(name, extract_version(&val), Ecosystem::CratesIo, path);
+            let mut d = dep(name, super::toml_version(&val), Ecosystem::CratesIo, path);
             d.direct = direct;
             parsed.deps.push(d);
         }
     }
     Ok(parsed)
-}
-
-fn extract_version(v: &toml::Value) -> Option<String> {
-    match v {
-        toml::Value::String(s) => Some(s.clone()),
-        toml::Value::Table(t) => t
-            .get("version")
-            .and_then(|x| x.as_str())
-            .map(str::to_string),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

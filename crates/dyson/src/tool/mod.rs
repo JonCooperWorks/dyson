@@ -733,6 +733,45 @@ impl ToolOutput {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/// Extract a required string field from a tool's JSON input.
+///
+/// Centralizes the `input[field].as_str().ok_or_else(...)?` pattern so the
+/// "missing or invalid 'x'" wording stays identical across tools.
+pub(crate) fn required_str<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+    tool: &str,
+) -> Result<&'a str> {
+    input[field]
+        .as_str()
+        .ok_or_else(|| DysonError::tool(tool, format!("missing or invalid '{field}'")))
+}
+
+/// Canonicalize `p`, falling back to the path itself when canonicalization
+/// fails (e.g. the path does not exist or permissions deny it).
+pub(crate) fn canonical_or_self(p: &std::path::Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Render `(key, snippet)` search hits as the shared memory/KB search output:
+/// a `### {key}\n{snippet}` block per hit followed by an `(n result(s))`
+/// footer.  Returns `empty_message` when there are no hits.
+pub(crate) fn format_search_results(
+    results: &[(String, String)],
+    empty_message: &str,
+) -> String {
+    use std::fmt::Write;
+    if results.is_empty() {
+        return empty_message.to_string();
+    }
+    let mut output = String::new();
+    for (key, snippet) in results {
+        writeln!(&mut output, "### {key}\n{snippet}\n").unwrap();
+    }
+    write!(&mut output, "({} result(s))", results.len()).unwrap();
+    output
+}
+
 /// Truncate a string to `max_chars`, appending "..." if truncated.
 pub(crate) fn truncate(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {

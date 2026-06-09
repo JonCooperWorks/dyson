@@ -86,12 +86,8 @@ impl Tool for BulkEditTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let operation = input["operation"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("bulk_edit", "missing or invalid 'operation'"))?;
-        let path_str = input["path"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("bulk_edit", "missing or invalid 'path'"))?;
+        let operation = crate::tool::required_str(input, "operation", "bulk_edit")?;
+        let path_str = crate::tool::required_str(input, "path", "bulk_edit")?;
 
         let resolved = match ctx.resolve_path(path_str) {
             Ok(p) => p,

@@ -26,7 +26,7 @@
 //
 // Dual usage — client AND server:
 //   These types are shared between Dyson's MCP client (mod.rs, connecting
-//   to external MCP servers) and Dyson's MCP server (serve.rs, exposing
+//   to external MCP servers) and Dyson's MCP server (serve/mod.rs, exposing
 //   workspace tools to Claude Code).  This is why some types derive both
 //   `Deserialize` and `Serialize`:
 //
@@ -90,7 +90,7 @@ impl JsonRpcNotification {
 /// Used in two contexts:
 /// - **Client side** (mod.rs): Deserialized from MCP server responses
 ///   when Dyson connects to external MCP servers.
-/// - **Server side** (serve.rs): Serialized to produce JSON responses
+/// - **Server side** (serve/mod.rs): Serialized to produce JSON responses
 ///   when Dyson acts as an MCP server for Claude Code.
 ///
 /// Both `Deserialize` and `Serialize` are needed because the same type
@@ -128,7 +128,7 @@ pub struct JsonRpcError {
 /// Used in two contexts:
 /// - **Client side** (mod.rs): Deserialized from external MCP server
 ///   `tools/list` responses to discover remote tools.
-/// - **Server side** (serve.rs): Serialized into the MCP HTTP server's
+/// - **Server side** (serve/mod.rs): Serialized into the MCP HTTP server's
 ///   `tools/list` response to advertise workspace tools to Claude Code.
 ///
 /// The `Serialize` derive was added alongside the MCP HTTP server to
@@ -361,9 +361,11 @@ pub struct McpPromptMessage {
 /// does not implement that primitive.  An empty object (`{}`) means the
 /// server implements the primitive but offers no sub-feature flags.
 ///
-/// We currently only act on `tools`; the others are stored so future
-/// code can short-circuit calls to unimplemented primitives instead of
-/// round-tripping a `-32601 Method not found` error.  Spec reference:
+/// `tools`, `resources`, `prompts`, and `logging` gate real behavior: the
+/// client skips listing/calling a primitive the server didn't advertise,
+/// avoiding a round-trip `-32601 Method not found`.  `completions`,
+/// `tasks`, and `experimental` are parsed but not yet acted on — stored so
+/// future code can branch on them without a schema change.  Spec reference:
 /// <https://spec.modelcontextprotocol.io/specification/basic/lifecycle/>
 #[derive(Debug, Default, Deserialize, Clone)]
 pub struct ServerCapabilities {
