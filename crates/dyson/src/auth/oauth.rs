@@ -11,16 +11,12 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use rand::RngExt;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, oneshot};
 use tokio::task::JoinHandle;
@@ -29,36 +25,39 @@ use super::Auth;
 use super::credential::Credential;
 use crate::error::{DysonError, Result};
 
-// The OAuth wire DTOs are defined once in `dyson-common` so dyson and swarm
-// agree on the shapes. Re-exported here so the flow fns and call sites keep
-// referencing `oauth::AuthMetadata` etc. unchanged.
-//
-// The flow functions below stay dyson-local: they return `crate::Result`
-// (DysonError with per-step context), fold the SSRF guard
-// (`validate_outbound_oauth_url`) directly into each network call, and take
-// dyson-shaped arguments (e.g. `build_auth_url` takes `&[String]` scopes).
-// dyson-common's `oauth::client` fns use a coarser `OAuthError` and a
-// caller-supplied `allow_url` predicate; reconciling that seam would rewrite
-// every call site and the error mapping for no behavior change, so only the
-// DTOs are shared for now.
+// The OAuth wire DTOs *and* the flow transport (URL building, the HTTP calls,
+// status/parse handling) now live once in `dyson-common::oauth::client`, so
+// dyson and swarm sit on the same RFC 8414/7591/6749 implementation. The
+// functions below are thin dyson-local wrappers: they keep the dyson-shaped
+// signatures the MCP skill layer already calls, fold in the async SSRF guard
+// (which the SSRF-agnostic shared transport deliberately does NOT do), and map
+// the shared `OAuthError` into a `DysonError` with per-step context.
 pub use dyson_common::oauth::{AuthMetadata, DcrRequest, DcrResponse, PkceChallenge, TokenResponse};
+use dyson_common::oauth::client;
 
-/// Fetch metadata from `<origin>/.well-known/oauth-authorization-server`.
+pub use client::{generate_pkce, generate_state};
+
+/// Map a shared-transport `OAuthError` into dyson's `DysonError::oauth`.
+///
+/// dyson's redaction anchor is the identity (full URL kept) and it surfaces the
+/// response body — matching the pre-share behavior, where token/discovery
+/// failures logged the URL and HTTP body verbatim. `server` carries the per-step
+/// context (server URL, "dcr", token URL) the call site wants attributed.
+fn map_oauth_err(server: &str) -> impl Fn(client::OAuthError) -> DysonError + '_ {
+    move |e| DysonError::oauth(server, e.redacted(|u| u.to_string(), true))
+}
+
+/// Fetch RFC 8414 authorization-server metadata.
+///
+/// Single-shot: dyson treats the operator-configured server URL as the AS and
+/// asks it directly (no RFC 9728 protected-resource dance). The shared
+/// transport builds a path-aware well-known URL (origin-only URLs are
+/// unchanged from the old appended form).
 pub async fn discover_metadata(server_url: &str, client: &reqwest::Client) -> Result<AuthMetadata> {
-    let url = format!(
-        "{}/.well-known/oauth-authorization-server",
-        server_url.trim_end_matches('/')
-    );
-    validate_outbound_oauth_url(&url, server_url).await?;
-    let resp = client
-        .get(&url)
-        .send()
+    validate_outbound_oauth_url(server_url, "discovery").await?;
+    client::fetch_as_metadata(server_url, client)
         .await
-        .map_err(|e| DysonError::oauth(server_url, format!("discovery failed: {e}")))?;
-    check_status(&resp, server_url, "discovery")?;
-    resp.json()
-        .await
-        .map_err(|e| DysonError::oauth(server_url, format!("bad metadata: {e}")))
+        .map_err(map_oauth_err(server_url))
 }
 
 /// Register a client via Dynamic Client Registration (RFC 7591).
@@ -68,30 +67,15 @@ pub async fn register_client(
     client: &reqwest::Client,
 ) -> Result<DcrResponse> {
     validate_outbound_oauth_url(url, "dcr").await?;
-    let resp = client
-        .post(url)
-        .json(req)
-        .send()
+    client::register_client(url, req, client)
         .await
-        .map_err(|e| DysonError::oauth("dcr", format!("registration failed: {e}")))?;
-    check_status(&resp, "dcr", "registration")?;
-    resp.json()
-        .await
-        .map_err(|e| DysonError::oauth("dcr", format!("bad DCR response: {e}")))
-}
-
-/// Generate PKCE code_verifier (32 random bytes, base64url) + S256 challenge.
-pub fn generate_pkce() -> PkceChallenge {
-    let random_bytes: [u8; 32] = rand::rng().random();
-    let verifier = URL_SAFE_NO_PAD.encode(random_bytes);
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    PkceChallenge {
-        verifier,
-        challenge,
-    }
+        .map_err(map_oauth_err("dcr"))
 }
 
 /// Build the authorization URL with query parameters.
+///
+/// Thin wrapper over the shared builder (which omits `scope` for an empty
+/// slice — some ASes reject `scope=`).
 pub fn build_auth_url(
     authorization_endpoint: &str,
     client_id: &str,
@@ -100,21 +84,15 @@ pub fn build_auth_url(
     code_challenge: &str,
     state: &str,
 ) -> Result<String> {
-    let mut url = reqwest::Url::parse(authorization_endpoint).map_err(|e| {
-        DysonError::oauth(
-            authorization_endpoint,
-            format!("invalid authorization endpoint URL: {e}"),
-        )
-    })?;
-    url.query_pairs_mut()
-        .append_pair("response_type", "code")
-        .append_pair("client_id", client_id)
-        .append_pair("redirect_uri", redirect_uri)
-        .append_pair("scope", &scopes.join(" "))
-        .append_pair("code_challenge", code_challenge)
-        .append_pair("code_challenge_method", "S256")
-        .append_pair("state", state);
-    Ok(url.to_string())
+    client::build_auth_url(
+        authorization_endpoint,
+        client_id,
+        scopes,
+        redirect_uri,
+        code_challenge,
+        state,
+    )
+    .map_err(map_oauth_err(authorization_endpoint))
 }
 
 /// Exchange an authorization code for tokens.
@@ -127,19 +105,18 @@ pub async fn exchange_code(
     redirect_uri: &str,
     client: &reqwest::Client,
 ) -> Result<TokenResponse> {
-    let mut params = vec![
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("client_id", client_id),
-        ("code_verifier", verifier),
-    ];
-    let owned;
-    if let Some(s) = client_secret {
-        owned = s.to_string();
-        params.push(("client_secret", &owned));
-    }
-    post_token_request(token_url, &params, "token exchange", client).await
+    validate_outbound_oauth_url(token_url, "token exchange").await?;
+    client::exchange_code(
+        token_url,
+        code,
+        verifier,
+        client_id,
+        client_secret,
+        redirect_uri,
+        client,
+    )
+    .await
+    .map_err(map_oauth_err(token_url))
 }
 
 /// Refresh an expired access token.
@@ -150,22 +127,10 @@ pub async fn refresh_token(
     client_secret: Option<&str>,
     client: &reqwest::Client,
 ) -> Result<TokenResponse> {
-    let mut params = vec![
-        ("grant_type", "refresh_token"),
-        ("refresh_token", refresh_token),
-        ("client_id", client_id),
-    ];
-    let owned;
-    if let Some(s) = client_secret {
-        owned = s.to_string();
-        params.push(("client_secret", &owned));
-    }
-    post_token_request(token_url, &params, "token refresh", client).await
-}
-
-/// Random state parameter for CSRF protection (base64url, 22 chars).
-pub fn generate_state() -> String {
-    URL_SAFE_NO_PAD.encode(rand::rng().random::<[u8; 16]>())
+    validate_outbound_oauth_url(token_url, "token refresh").await?;
+    client::refresh_token(token_url, refresh_token, client_id, client_secret, client)
+        .await
+        .map_err(map_oauth_err(token_url))
 }
 
 /// Guard every outbound OAuth network call with the same SSRF predicates
@@ -173,47 +138,14 @@ pub fn generate_state() -> String {
 /// CGNAT 100.64/10, and cloud metadata hosts. Operator-supplied MCP
 /// server URLs can carry typos; an unguarded discovery/token call would
 /// happily send a bearer to an internal address.
+///
+/// The shared transport is deliberately SSRF-agnostic, so this stays
+/// dyson-local and runs BEFORE the matching transport call.
 async fn validate_outbound_oauth_url(url: &str, context: &str) -> Result<()> {
     crate::http::validate_url_safe(url)
         .await
         .map(|_| ())
         .map_err(|e| DysonError::oauth(context, format!("refusing unsafe URL: {e}")))
-}
-
-fn check_status(resp: &reqwest::Response, server: &str, context: &str) -> Result<()> {
-    if resp.status().is_success() {
-        return Ok(());
-    }
-    Err(DysonError::oauth(
-        server,
-        format!("{context} returned HTTP {}", resp.status()),
-    ))
-}
-
-async fn post_token_request(
-    token_url: &str,
-    params: &[(&str, &str)],
-    context: &str,
-    client: &reqwest::Client,
-) -> Result<TokenResponse> {
-    validate_outbound_oauth_url(token_url, context).await?;
-    let resp = client
-        .post(token_url)
-        .form(params)
-        .send()
-        .await
-        .map_err(|e| DysonError::oauth(token_url, format!("{context} failed: {e}")))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(DysonError::oauth(
-            token_url,
-            format!("{context}: HTTP {status}: {body}"),
-        ));
-    }
-    resp.json()
-        .await
-        .map_err(|e| DysonError::oauth(token_url, format!("{context}: bad response: {e}")))
 }
 
 // --- Auth trait impl with auto-refresh ---
@@ -554,65 +486,17 @@ fn sanitize_filename(name: &str) -> String {
 mod tests {
     use super::*;
 
+    // PKCE generation, auth-URL shape (incl. empty-scope omission), and state
+    // randomness are now exercised in dyson-common's `oauth::client` tests
+    // (the shared transport owns that logic). dyson keeps only the seam tests
+    // below — the SSRF guard, callback server, and persistence — which are
+    // dyson-local and not covered upstream.
     #[test]
-    fn pkce_verifier_length() {
-        assert_eq!(generate_pkce().verifier.len(), 43);
-    }
-
-    #[test]
-    fn pkce_challenge_is_sha256_of_verifier() {
-        let pkce = generate_pkce();
-        assert_eq!(
-            pkce.challenge,
-            URL_SAFE_NO_PAD.encode(Sha256::digest(pkce.verifier.as_bytes()))
-        );
-    }
-
-    #[test]
-    fn pkce_unique() {
-        assert_ne!(generate_pkce().verifier, generate_pkce().verifier);
-    }
-
-    #[test]
-    fn build_auth_url_encodes_correctly() {
-        let url = build_auth_url(
-            "https://auth.example.com/authorize",
-            "my-client",
-            &["read".into(), "write".into()],
-            "http://127.0.0.1:8080/callback",
-            "challenge",
-            "state",
-        )
-        .unwrap();
-        let parsed = reqwest::Url::parse(&url).unwrap();
-        let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
-        assert_eq!(pairs["response_type"], "code");
-        assert_eq!(pairs["client_id"], "my-client");
-        assert_eq!(pairs["scope"], "read write");
-        assert_eq!(pairs["redirect_uri"], "http://127.0.0.1:8080/callback");
-    }
-
-    #[test]
-    fn build_auth_url_preserves_existing_query() {
-        let url = build_auth_url(
-            "https://auth.example.com/authorize?extra=1",
-            "cid",
-            &[],
-            "http://localhost/cb",
-            "ch",
-            "st",
-        )
-        .unwrap();
-        let parsed = reqwest::Url::parse(&url).unwrap();
-        let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
-        assert_eq!(pairs["extra"], "1");
-        assert_eq!(pairs["response_type"], "code");
-    }
-
-    #[test]
-    fn state_unique() {
+    fn state_is_opaque_and_unique() {
+        // generate_state is now 32 random bytes (base64url, 43 chars); its only
+        // contract is non-empty + unguessable, so just assert it's distinct.
         assert_ne!(generate_state(), generate_state());
-        assert_eq!(generate_state().len(), 22);
+        assert!(!generate_state().is_empty());
     }
 
     // TokenResponse round-trip / optional-field coverage lives in dyson-common
