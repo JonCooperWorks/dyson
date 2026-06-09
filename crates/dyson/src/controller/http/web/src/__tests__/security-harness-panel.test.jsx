@@ -12,6 +12,16 @@ import { parseHarnessState, HARNESS_STAGES, SecurityHarnessPanel } from '../comp
 import { render, screen } from '@testing-library/react';
 import React from 'react';
 
+// Build a `<!-- security-harness-state {...} -->` block exactly the way
+// the backend bakes it: JSON.stringify the payload and escape every `>`
+// so the closing `-->` is unambiguous.  See
+// `security_engineer/mod.rs::bake_panel_state_snapshot` for the
+// authoritative producer this mirrors.
+function snapshotBlock(payload) {
+  const safe = JSON.stringify(payload).replace(/>/g, '\\u003e');
+  return `<!-- security-harness-state ${safe} -->`;
+}
+
 describe('parseHarnessState', () => {
   it('detects each stage as the latest mention', () => {
     const text = [
@@ -310,6 +320,159 @@ describe('parseHarnessState — Phase 2 fields', () => {
     expect(wrappedState.runId).toBe('sec-aaa');
     expect(wrappedState.lastStage).toBe('hunt');
   });
+
+  // ---- Phase 5: structured panel-state snapshot wins on rehydrate -------
+  //
+  // The 2026-06-08 QA observed that after a hard refresh, the panel came
+  // back showing 7 ✓ + 1 ▸ Report, `(no run id yet)`, no findings counter,
+  // and no class grid — even though the persisted tool content carried
+  // all 62 checkpoint events.  The events bake survived rehydrate but the
+  // event-to-state derivation was lossy in a way that depended on the
+  // hydrate / SSE replay / applyToolView ordering.  These tests pin the
+  // contract that the structured snapshot is now the source of truth.
+
+  it('rehydrates the full final panel state from the snapshot block alone', () => {
+    // No event lines at all — only the snapshot.  The panel must still
+    // render run-id, completed=true, findings rollup, and class grid.
+    // This is the regression test for the c-0016 symptom (body.text
+    // had events but lost everything except stage glyphs on refresh):
+    // the same UI now reconstructs from the JSON snapshot directly.
+    const text = [
+      snapshotBlock({
+        run_id: 'sec-1780939724-2',
+        completed: true,
+        failed_at_stage: null,
+        failure_message: null,
+        findings: { critical: 18, high: 19, medium: 15, low: 3 },
+        class_status: {
+          injection_unsafe_execution: { status: 'hunted', count: 5 },
+          secrets_credentials: { status: 'hunted', count: 5 },
+          ssrf_outbound_network: { status: 'cleared', count: 0 },
+          container_sandbox_runtime: { status: 'inapplicable', count: 0 },
+        },
+      }),
+      '',
+      '# Security Review',
+      '## CRITICAL',
+      'finding-001: SQL Injection in login()',
+    ].join('\n');
+    const s = parseHarnessState(text, false, false);
+    expect(s.runId).toBe('sec-1780939724-2');
+    expect(s.completed).toBe(true);
+    expect(s.stageStatus.every(st => st === 'done')).toBe(true);
+    expect(s.findings).toEqual({ critical: 18, high: 19, medium: 15, low: 3 });
+    expect(s.totalFindings).toBe(55);
+    expect(s.classStatus.injection_unsafe_execution).toEqual({ status: 'hunted', count: 5 });
+    expect(s.classStatus.ssrf_outbound_network).toEqual({ status: 'cleared', count: 0 });
+    expect(s.classStatus.container_sandbox_runtime).toEqual({ status: 'inapplicable', count: 0 });
+  });
+
+  it('snapshot wins over inconsistent event lines (the c-0016 reproducer)', () => {
+    // Event stream lost the `findings` and `completed` lines AND the
+    // `created checkpoint sec-...` line (the exact subset that survived
+    // the 2026-06-08 refresh) — but the snapshot carries the truth.
+    // Without this preference, the panel would render mid-pipeline.
+    const text = [
+      snapshotBlock({
+        run_id: 'sec-1780939724-2',
+        completed: true,
+        findings: { critical: 18, high: 19, medium: 15, low: 3 },
+        class_status: { injection_unsafe_execution: { status: 'hunted', count: 5 } },
+      }),
+      '<!-- security-harness-events',
+      'security_engineer: recon',
+      'security_engineer: hunt',
+      'security_engineer: validate',
+      'security_engineer: gapfill',
+      'security_engineer: dedupe',
+      'security_engineer: trace',
+      'security_engineer: feedback',
+      'security_engineer: report',
+      '-->',
+    ].join('\n');
+    // Even with running=true and no `completed` line in the events,
+    // the snapshot forces completed=true and the StageBar fully ticks.
+    const s = parseHarnessState(text, true, false);
+    expect(s.runId).toBe('sec-1780939724-2');
+    expect(s.completed).toBe(true);
+    expect(s.stageStatus.every(st => st === 'done')).toBe(true);
+    expect(s.totalFindings).toBe(55);
+  });
+
+  it('renders an `errored at <stage>` panel from a failure snapshot', () => {
+    const text = snapshotBlock({
+      run_id: 'sec-aaa',
+      completed: false,
+      failed_at_stage: 'validate',
+      failure_message: 'no JSON object found in stage output',
+      findings: { critical: 0, high: 0, medium: 0, low: 0 },
+      class_status: {},
+    });
+    const s = parseHarnessState(text, false, true);
+    expect(s.runId).toBe('sec-aaa');
+    expect(s.completed).toBe(false);
+    expect(s.failedAtStage).toBe('validate');
+    expect(s.failureMessage).toBe('no JSON object found in stage output');
+    expect(s.errored).toBe(true);
+    const validateIdx = HARNESS_STAGES.indexOf('validate');
+    expect(s.stageStatus[validateIdx]).toBe('errored');
+  });
+
+  it('falls back to event parsing when no snapshot block is present (live run)', () => {
+    // A run still in progress hasn't emitted a snapshot — the bake
+    // happens at return time.  The parser must keep working on the
+    // bare event stream so the StageBar advances during the run.
+    const text = [
+      'security_engineer: created checkpoint sec-live-1',
+      'security_engineer: recon',
+      'security_engineer: hunt',
+      'security_engineer: findings critical=2 high=3 medium=1 low=0',
+    ].join('\n');
+    const s = parseHarnessState(text, true, false);
+    expect(s.runId).toBe('sec-live-1');
+    expect(s.lastStage).toBe('hunt');
+    expect(s.totalFindings).toBe(6);
+    expect(s.completed).toBe(false);
+  });
+
+  it('snapshot survives a JSON payload whose failure message contains `>` and `-->`', () => {
+    // The bake escapes every `>` so an attacker-supplied failure
+    // message can't close the host HTML comment early.  This test
+    // pins both the producer-side escaping AND the consumer-side
+    // ability to recover the original string after JSON.parse
+    // un-escapes it.
+    const nasty = 'parse error at `--><script>` (offset 12)';
+    const safe = JSON.stringify({
+      run_id: 'sec-x',
+      completed: false,
+      failed_at_stage: 'validate',
+      failure_message: nasty,
+      findings: { critical: 0, high: 0, medium: 0, low: 0 },
+      class_status: {},
+    }).replace(/>/g, '\\u003e');
+    // Sanity: the embedded JSON must NOT contain a literal `-->` after
+    // escaping — otherwise the closing-comment search would terminate
+    // inside the payload.
+    expect(safe).not.toContain('-->');
+    const text = `<!-- security-harness-state ${safe} -->`;
+    const s = parseHarnessState(text, false, true);
+    expect(s.failedAtStage).toBe('validate');
+    expect(s.failureMessage).toBe(nasty);
+  });
+
+  it('ignores a malformed snapshot block and falls back to event parsing', () => {
+    // A truncated / mangled snapshot must not poison the parse — the
+    // panel should silently degrade to event parsing for live UX
+    // rather than going blank.
+    const text = [
+      '<!-- security-harness-state {"run_id":"sec-bbb",completed:tr -->',
+      'security_engineer: created checkpoint sec-aaa',
+      'security_engineer: hunt',
+    ].join('\n');
+    const s = parseHarnessState(text, true, false);
+    expect(s.runId).toBe('sec-aaa'); // fell back to event-derived id
+    expect(s.lastStage).toBe('hunt');
+  });
 });
 
 describe('SecurityHarnessPanel — UX visual states', () => {
@@ -374,5 +537,40 @@ describe('SecurityHarnessPanel — UX visual states', () => {
     };
     const { container } = render(<SecurityHarnessPanel body={body} running={true}/>);
     expect(container.textContent).toContain('▸ Hunt');
+  });
+
+  it('renders a fully-completed panel from a snapshot block with no event lines', () => {
+    // End-to-end check of the rehydrate fix: the same body shape the
+    // backend bakes for a completed run.  All eight stages must show ✓,
+    // the findings rollup must surface in the header, and the class
+    // grid must populate from the snapshot's `class_status`.
+    const body = {
+      text: snapshotBlock({
+        run_id: 'sec-1780939724-2',
+        completed: true,
+        failed_at_stage: null,
+        failure_message: null,
+        findings: { critical: 18, high: 19, medium: 15, low: 3 },
+        class_status: {
+          injection_unsafe_execution: { status: 'hunted', count: 5 },
+          secrets_credentials: { status: 'hunted', count: 5 },
+          crypto_randomness: { status: 'hunted', count: 2 },
+        },
+      }) + '\n\n# Security Review\n',
+      children: [],
+    };
+    const { container } = render(<SecurityHarnessPanel body={body} running={false}/>);
+    const t = container.textContent || '';
+    // All eight stages tick — the regression behaviour was ▸ Report.
+    for (const label of ['Recon', 'Hunt', 'Validate', 'Gapfill', 'Dedupe', 'Trace', 'Feedback', 'Report']) {
+      expect(t, `${label} should render as done`).toContain(`✓ ${label}`);
+    }
+    expect(t).toContain('sec-1780939724-2');
+    // FindingsCounter renders the rollup row (total + per-severity).
+    expect(t).toContain('55 findings');
+    expect(t).toContain('18');
+    // ClassGrid renders each class chip with the hunted count.
+    expect(t).toContain('injection_unsafe_execution');
+    expect(t).toContain('crypto_randomness');
   });
 });

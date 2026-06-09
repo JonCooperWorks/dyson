@@ -562,13 +562,16 @@ pub(super) async fn post(
         agent.set_activity_handle(state.activity.handle_for(&chat_id));
         // Wire the subagent UI events bus so nested tool calls inside
         // any subagent for this turn surface live in the right rail.
-        // Cloning the chat's broadcast Sender is cheap (it's Arc-y);
-        // the bus does not push into the replay ring (live-only), so
-        // a reconnect mid-subagent shows the panel empty until the
-        // next nested event arrives.  See `SubagentEventBus`.
-        agent.set_subagent_events(super::super::SubagentEventBus::new(
-            chat_handle.events.clone(),
-        ));
+        // Cloning the chat's broadcast Sender is cheap (it's Arc-y).
+        // The bus is also paired with the chat's replay ring: nested
+        // `checkpoint` events get persisted there so a mid-subagent
+        // reload (`/api/conversations/:id/events` with `Last-Event-ID`)
+        // replays the stage / run-id / findings lines the page lost
+        // when the SSE socket dropped.  See `SubagentEventBus::checkpoint`.
+        agent.set_subagent_events(
+            super::super::SubagentEventBus::new(chat_handle.events.clone())
+                .with_replay_ring(Arc::clone(&chat_handle.replay)),
+        );
         // Checkpoint-save the transcript to disk after every message
         // push.  Without this, a process kill during a long subagent
         // run (e.g. security_engineer streams for minutes) loses the

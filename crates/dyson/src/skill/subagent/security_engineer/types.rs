@@ -117,6 +117,38 @@ pub struct SecurityFinding {
     pub fix_recommendation: String,
 }
 
+/// Per-severity counts the SecurityHarnessPanel renders as its findings row.
+/// `info` and `informational` fold into `low` — the panel UI has four
+/// buckets, and operators read both labels as the same low-priority shelf.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SeverityRollup {
+    pub critical: u64,
+    pub high: u64,
+    pub medium: u64,
+    pub low: u64,
+}
+
+impl SeverityRollup {
+    /// Bucket a slice of findings by severity.  Used by the live
+    /// `security_engineer: findings critical=N high=N medium=N low=N`
+    /// checkpoint event and by the panel-state snapshot.  Pinning both
+    /// callers to one function avoids the two implementations drifting
+    /// (the bug class that gave us the 2026-06-08 rehydrate regression).
+    pub(crate) fn from_findings(findings: &[SecurityFinding]) -> Self {
+        let mut r = Self::default();
+        for f in findings {
+            match f.severity.to_ascii_lowercase().as_str() {
+                "critical" => r.critical += 1,
+                "high" => r.high += 1,
+                "medium" => r.medium += 1,
+                "low" | "info" | "informational" => r.low += 1,
+                _ => {}
+            }
+        }
+        r
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationDecisionKind {
@@ -745,6 +777,33 @@ mod tests {
         assert_eq!(
             report, back,
             "round-trip should preserve the report exactly"
+        );
+    }
+
+    #[test]
+    fn severity_rollup_buckets_match_panel_contract() {
+        let f = |sev: &str| SecurityFinding {
+            id: format!("f-{sev}"),
+            severity: sev.into(),
+            ..Default::default()
+        };
+        let r = SeverityRollup::from_findings(&[
+            f("critical"),
+            f("CRITICAL"), // case-insensitive
+            f("high"),
+            f("medium"),
+            f("low"),
+            f("info"),          // folds into low
+            f("informational"), // folds into low
+            f(""),              // unknown / blank: dropped, not bucketed
+            f("nonsense"),      // unknown label: dropped
+        ]);
+        assert_eq!(r.critical, 2, "critical should be case-insensitive");
+        assert_eq!(r.high, 1);
+        assert_eq!(r.medium, 1);
+        assert_eq!(
+            r.low, 3,
+            "low + info + informational all land in the low bucket — the panel only renders four severities"
         );
     }
 }

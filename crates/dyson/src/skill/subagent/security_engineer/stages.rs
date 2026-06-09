@@ -10,6 +10,7 @@
 //! can avoid emitting empty stage outputs.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use crate::tool::{CheckpointEvent, ToolOutput};
 
@@ -29,8 +30,8 @@ use super::taxonomy::{
 };
 use super::types::{
     CoverageGap, HuntStageOutput, ReconStageOutput, ReportValidationState, SecurityCheckpoint,
-    SecurityHarnessReport, SecurityHarnessStage, SecurityTask, TaskStatus, TraceStageOutput,
-    ValidationDecisionKind,
+    SecurityHarnessReport, SecurityHarnessStage, SecurityTask, SeverityRollup, TaskStatus,
+    TraceStageOutput, ValidationDecisionKind,
 };
 use super::{
     HUNT_MAX_ITERATIONS, HUNT_SPECIALIST_BACKSTOP, RECON_MAX_ITERATIONS, TRACE_MAX_ITERATIONS,
@@ -38,6 +39,29 @@ use super::{
 };
 
 const HUNT_CONCURRENCY: usize = 6;
+
+/// Hard wall-clock backstop for a single Hunt specialist child.
+///
+/// This is a COARSE runaway guard, not the primary anti-hang mechanism — that
+/// is the transport read timeout (`http::READ_TIMEOUT`), which makes any
+/// stalled LLM stream error within ~2 min so the child's agent loop retries or
+/// returns instead of blocking forever.  Combined with the per-child iteration
+/// cap (`HUNT_MAX_ITERATIONS`), a healthy specialist always terminates on its
+/// own; this budget only needs to catch a child wedged in a way neither covers
+/// (e.g. a hung non-HTTP tool).  A specialist that blows the budget is folded
+/// as a coverage gap (see [`fold_hunt_degraded`]), never a fatal error.
+///
+/// SIZED GENEROUSLY, and deliberately tied to the iteration cap.  A flat 7-min
+/// value cut EVERY one of the 24 class specialists on a large repo (the vLLM
+/// review — each specialist legitimately needs many ast_query/taint_trace
+/// turns over a big tree, blew 7 min, and degraded its whole class to a
+/// coverage gap; the run "succeeded" with near-zero coverage).  Cutting a
+/// progressing specialist is far costlier than letting a rare wedged child run
+/// longer, so budget a full read-timeout per iteration: a full-depth specialist
+/// finishes within ~`HUNT_MAX_ITERATIONS * READ_TIMEOUT` and never trips this.
+/// Small targets are unaffected (their specialists finish in 1–7 min).
+/// See docs/qa/2026-06-09-hunt-child-timeout-degradation.md.
+const HUNT_CHILD_TIMEOUT: Duration = Duration::from_secs(HUNT_MAX_ITERATIONS as u64 * 120);
 
 pub(super) async fn run_recon_stage(
     rt: &SecurityHarnessRuntime,
@@ -143,16 +167,13 @@ pub(super) async fn run_hunt_stage(
         }
         ran_batch = true;
         total_spawned += dispatches.len();
-        let first_err = fold_hunt_wave(
+        fold_hunt_wave(
             checkpoint,
             &mut aggregate,
             dispatch_hunts(rt, dispatches).await,
         );
         checkpoint.updated_at = unix_seconds(std::time::SystemTime::now());
         store.save(checkpoint).await?;
-        if let Some(e) = first_err {
-            return Err(e);
-        }
     }
 
     // Framework/language specialists: each stack briefing matched by
@@ -182,35 +203,24 @@ pub(super) async fn run_hunt_stage(
                 }
             })
             .collect::<Vec<_>>();
-        let first_err = fold_hunt_wave(
+        fold_hunt_wave(
             checkpoint,
             &mut aggregate,
             dispatch_hunts(rt, dispatches).await,
         );
         checkpoint.updated_at = unix_seconds(std::time::SystemTime::now());
         store.save(checkpoint).await?;
-        if let Some(e) = first_err {
-            return Err(e);
-        }
     }
 
     if ran_batch {
         // Rollup findings-by-severity for the SecurityHarnessPanel
         // counter.  Matches the regex in panels.jsx's parseHarnessState:
         //   `security_engineer: findings critical=N high=N medium=N low=N`
-        let (mut c, mut h, mut m, mut l) = (0usize, 0usize, 0usize, 0usize);
-        for f in &checkpoint.findings_so_far {
-            match f.severity.to_ascii_lowercase().as_str() {
-                "critical" => c += 1,
-                "high" => h += 1,
-                "medium" => m += 1,
-                "low" | "info" | "informational" => l += 1,
-                _ => {}
-            }
-        }
+        let r = SeverityRollup::from_findings(&checkpoint.findings_so_far);
         aggregate.checkpoints.push(CheckpointEvent {
             message: format!(
-                "security_engineer: findings critical={c} high={h} medium={m} low={l}"
+                "security_engineer: findings critical={} high={} medium={} low={}",
+                r.critical, r.high, r.medium, r.low
             ),
             progress: Some(0.45),
         });
@@ -261,14 +271,23 @@ pub(super) async fn dispatch_hunts(
 ) -> Vec<HuntOutcome> {
     use futures_util::stream::StreamExt;
     futures_util::stream::iter(dispatches.into_iter().map(|d| async move {
-        let res = spawn_stage_with_checkpoint(
+        // Bound every child by HUNT_CHILD_TIMEOUT.  Dropping the future on
+        // elapse cancels the in-flight child (and its reqwest stream) at the
+        // next await point, so a wedged specialist frees its concurrency slot
+        // instead of stalling the whole `buffer_unordered` wave forever.  The
+        // timeout maps to the same `Err` channel a real child error uses, so
+        // `fold_hunt_wave` folds it as a coverage gap.
+        let fut = spawn_stage_with_checkpoint(
             rt,
             SecurityHarnessStage::Hunt,
             &d.stage_prompt,
             &d.checkpoint,
             HUNT_MAX_ITERATIONS,
-        )
-        .await;
+        );
+        let res = match tokio::time::timeout(HUNT_CHILD_TIMEOUT, fut).await {
+            Ok(res) => res,
+            Err(_) => Err(hunt_child_timeout_error(&d.label)),
+        };
         (d, res)
     }))
     .buffer_unordered(HUNT_CONCURRENCY)
@@ -276,28 +295,81 @@ pub(super) async fn dispatch_hunts(
     .await
 }
 
-/// Fold a completed wave's results into the checkpoint.  Returns the first
-/// child error (if any) after folding every success, so partial progress is
-/// still checkpointed before the stage fails.
+/// The error string a Hunt specialist gets when it blows [`HUNT_CHILD_TIMEOUT`].
+/// Folded as a coverage gap, never fatal — factored out so the message format
+/// is unit-testable without spawning a real child.
+pub(super) fn hunt_child_timeout_error(label: &str) -> String {
+    format!(
+        "hunt specialist '{label}' exceeded its {}s wall-clock budget",
+        HUNT_CHILD_TIMEOUT.as_secs()
+    )
+}
+
+/// Fold a completed wave's results into the checkpoint.
+///
+/// Every specialist is folded independently and NON-FATALLY: a child that
+/// errored or timed out is folded as a coverage gap (see
+/// [`fold_hunt_degraded`]) exactly like a child that returned unparseable
+/// prose — it had its turn, produced nothing usable, its batch is marked
+/// complete so the class isn't re-dispatched forever, and the harness moves
+/// on.  One flaky upstream call must never deadlock or fail the whole
+/// multi-stage run; the report notes the reduced coverage instead.
 pub(super) fn fold_hunt_wave(
     checkpoint: &mut SecurityCheckpoint,
     aggregate: &mut ToolOutput,
     results: Vec<HuntOutcome>,
-) -> Option<String> {
-    let mut first_err = None;
+) {
     for (d, res) in results {
         match res {
             Ok((raw, stage_out)) => {
-                if let Err(e) = fold_hunt_result(checkpoint, aggregate, &d, raw, stage_out) {
-                    first_err.get_or_insert(e);
-                }
+                fold_hunt_result(checkpoint, aggregate, &d, raw, stage_out);
             }
             Err(e) => {
-                first_err.get_or_insert(e);
+                fold_hunt_degraded(checkpoint, aggregate, &d, &e);
             }
         }
     }
-    first_err
+}
+
+/// Fold a specialist that did not complete — a transport error, a timeout, or
+/// a spawn failure.  Mirrors the prose-fallback path in [`fold_hunt_result`]:
+/// mark the specialist's batch complete (so a still-pending class is not
+/// re-dispatched into an infinite loop), record a coverage gap so the report
+/// surfaces the blind spot honestly, and emit a panel event.  Then the wave
+/// loop continues — the run completes with whatever the other specialists
+/// found.
+pub(super) fn fold_hunt_degraded(
+    checkpoint: &mut SecurityCheckpoint,
+    aggregate: &mut ToolOutput,
+    d: &HuntDispatch,
+    err: &str,
+) {
+    if d.is_class {
+        let ids: BTreeSet<String> = d.batch_ids.iter().cloned().collect();
+        complete_tasks(checkpoint, &ids);
+    }
+    checkpoint.coverage_gaps.push(CoverageGap {
+        area: d.label.clone(),
+        reason: format!("hunt specialist did not complete: {err}"),
+        risk: "unknown".into(),
+    });
+    tracing::warn!(
+        specialist = %d.label,
+        error = %err,
+        "hunt specialist did not complete; folding as coverage gap and continuing"
+    );
+    // Class-scoped panel signal, parallel to the `hunt: class X hunted/cleared`
+    // lines.  Stack specialists aren't class-bound, so (like the success path)
+    // they don't emit a per-class line — only the coverage gap above.
+    if d.is_class {
+        aggregate.checkpoints.push(CheckpointEvent {
+            message: format!(
+                "security_engineer: hunt: class {} degraded (specialist did not complete)",
+                d.label
+            ),
+            progress: Some(0.35),
+        });
+    }
 }
 
 /// Merge one specialist's output into the checkpoint: findings, coverage gaps,
@@ -309,7 +381,7 @@ pub(super) fn fold_hunt_result(
     d: &HuntDispatch,
     raw: String,
     stage_out: ToolOutput,
-) -> std::result::Result<(), String> {
+) {
     merge_stage_tool_output(aggregate, stage_out);
     // Loose at the shape boundary: a specialist that returns prose instead
     // of JSON drops ITS findings, not the whole wave.  The class still gets
@@ -409,7 +481,6 @@ pub(super) fn fold_hunt_result(
             progress: Some(0.35),
         });
     }
-    Ok(())
 }
 
 /// All still-pending tasks sharing `class_id` — the work for one specialist.
@@ -1032,11 +1103,7 @@ mod tests {
         let mut aggregate = ToolOutput::success("");
         let stage_out = ToolOutput::success("");
         let prose = String::from("I will now write the report.\nNo JSON forthcoming.");
-        let result = fold_hunt_result(&mut c, &mut aggregate, &dispatch, prose, stage_out);
-        assert!(
-            result.is_ok(),
-            "loose-shape fold should not return Err on prose"
-        );
+        fold_hunt_result(&mut c, &mut aggregate, &dispatch, prose, stage_out);
         assert_eq!(c.findings_so_far.len(), 0);
         // t1 should be in completed_tasks (its specialist had its turn).
         // t2 (different class) should still be pending.
@@ -1061,7 +1128,7 @@ mod tests {
         let raw = String::from(
             r#"{"completed_task_ids":["t1"],"findings":[{"id":"f-1","title":"hi","vulnerability_class":"auth_authorization"}],"gaps":[],"follow_up_tasks":[]}"#,
         );
-        fold_hunt_result(&mut c, &mut aggregate, &dispatch, raw, stage_out).unwrap();
+        fold_hunt_result(&mut c, &mut aggregate, &dispatch, raw, stage_out);
         assert_eq!(c.findings_so_far.len(), 1);
         assert!(c.completed_tasks.iter().any(|t| t.id == "t1"));
     }
@@ -1096,8 +1163,7 @@ mod tests {
             &dispatch,
             raw,
             ToolOutput::success(""),
-        )
-        .unwrap();
+        );
         let class_line = aggregate
             .checkpoints
             .iter()
@@ -1136,8 +1202,7 @@ mod tests {
             &dispatch,
             raw,
             ToolOutput::success(""),
-        )
-        .unwrap();
+        );
         let class_line = aggregate
             .checkpoints
             .iter()
@@ -1177,14 +1242,178 @@ mod tests {
             &dispatch,
             raw,
             ToolOutput::success(""),
-        )
-        .unwrap();
+        );
         assert!(
             !aggregate
                 .checkpoints
                 .iter()
                 .any(|cp| cp.message.contains("hunt: class")),
             "stack specialists shouldn't emit per-class outcome lines"
+        );
+    }
+
+    // ---- Resilience: a stalled/erroring specialist must not be fatal --------
+
+    #[test]
+    fn fold_hunt_degraded_class_marks_batch_complete_and_records_gap() {
+        // A class specialist that errored (transport stall, timeout, spawn
+        // failure) must: (1) mark its batch complete so the still-pending
+        // class is never re-dispatched into an infinite wave loop, (2) leave
+        // a coverage gap so the report surfaces the blind spot, and (3) emit a
+        // `degraded` panel line — all WITHOUT adding findings or panicking.
+        let mut c = cp();
+        c.pending_tasks.push(pending("t1", "auth_authorization"));
+        c.pending_tasks.push(pending("t2", "ssrf_outbound_network"));
+        let dispatch = HuntDispatch {
+            label: "auth_authorization".into(),
+            stage_prompt: String::new(),
+            checkpoint: c.clone(),
+            batch_ids: vec!["t1".into()],
+            is_class: true,
+        };
+        let mut aggregate = ToolOutput::success("");
+        fold_hunt_degraded(&mut c, &mut aggregate, &dispatch, "upstream stalled");
+        assert_eq!(c.findings_so_far.len(), 0, "degraded fold adds no findings");
+        assert!(
+            c.completed_tasks.iter().any(|t| t.id == "t1"),
+            "the erroring specialist's batch must be marked complete to break the wave loop"
+        );
+        assert!(
+            c.pending_tasks.iter().any(|t| t.id == "t2"),
+            "an unrelated pending class must stay pending"
+        );
+        assert!(
+            c.coverage_gaps
+                .iter()
+                .any(|g| g.area == "auth_authorization" && g.reason.contains("upstream stalled")),
+            "a coverage gap must record the failure: {:?}",
+            c.coverage_gaps
+        );
+        let line = aggregate
+            .checkpoints
+            .iter()
+            .find(|cp| cp.message.contains("hunt: class auth_authorization"))
+            .expect("degraded specialist should emit a per-class panel line");
+        assert!(
+            line.message.contains("degraded"),
+            "per-class line should mark the class degraded: {}",
+            line.message
+        );
+    }
+
+    #[test]
+    fn fold_hunt_degraded_stack_specialist_records_gap_without_class_line() {
+        // Stack specialists aren't class-bound, so a failed one records a
+        // coverage gap but emits no per-class panel line (parity with the
+        // success path).
+        let mut c = cp();
+        let dispatch = HuntDispatch {
+            label: "flask".into(),
+            stage_prompt: String::new(),
+            checkpoint: c.clone(),
+            batch_ids: Vec::new(),
+            is_class: false,
+        };
+        let mut aggregate = ToolOutput::success("");
+        fold_hunt_degraded(&mut c, &mut aggregate, &dispatch, "timed out");
+        assert!(
+            c.coverage_gaps.iter().any(|g| g.area == "flask"),
+            "stack specialist failure should still record a coverage gap"
+        );
+        assert!(
+            !aggregate
+                .checkpoints
+                .iter()
+                .any(|cp| cp.message.contains("hunt: class")),
+            "stack specialists must not emit a per-class line even when degraded"
+        );
+    }
+
+    #[test]
+    fn fold_hunt_wave_is_nonfatal_and_folds_success_and_error_together() {
+        // The whole point of the fix: a wave with one good specialist and one
+        // failed specialist folds BOTH — the good one's findings land, the
+        // failed one becomes a coverage gap + completed batch — and the call
+        // returns `()` (no fatal error bubbles up to kill the run).
+        let mut c = cp();
+        c.pending_tasks.push(pending("t-ok", "auth_authorization"));
+        c.pending_tasks.push(pending("t-bad", "ssrf_outbound_network"));
+        let ok = HuntDispatch {
+            label: "auth_authorization".into(),
+            stage_prompt: String::new(),
+            checkpoint: c.clone(),
+            batch_ids: vec!["t-ok".into()],
+            is_class: true,
+        };
+        let bad = HuntDispatch {
+            label: "ssrf_outbound_network".into(),
+            stage_prompt: String::new(),
+            checkpoint: c.clone(),
+            batch_ids: vec!["t-bad".into()],
+            is_class: true,
+        };
+        let ok_raw = String::from(
+            r#"{"completed_task_ids":["t-ok"],"findings":[{"id":"f-1","title":"x","vulnerability_class":"auth_authorization"}],"gaps":[],"follow_up_tasks":[]}"#,
+        );
+        let results: Vec<HuntOutcome> = vec![
+            (ok, Ok((ok_raw, ToolOutput::success("")))),
+            (bad, Err("HTTP error: error sending request".to_string())),
+        ];
+        let mut aggregate = ToolOutput::success("");
+        // Returns (), never panics: non-fatal by construction.
+        fold_hunt_wave(&mut c, &mut aggregate, results);
+        assert_eq!(
+            c.findings_so_far.len(),
+            1,
+            "the successful specialist's finding must be folded"
+        );
+        assert!(
+            c.completed_tasks.iter().any(|t| t.id == "t-ok")
+                && c.completed_tasks.iter().any(|t| t.id == "t-bad"),
+            "both the successful and the failed specialist's batches must be marked complete"
+        );
+        assert!(
+            c.pending_tasks
+                .iter()
+                .all(|t| t.status != TaskStatus::Pending),
+            "no class should remain pending → the wave loop terminates, no deadlock"
+        );
+        assert!(
+            c.coverage_gaps
+                .iter()
+                .any(|g| g.area == "ssrf_outbound_network"),
+            "the failed specialist must leave a coverage gap"
+        );
+    }
+
+    #[test]
+    fn hunt_child_timeout_error_names_label_and_budget() {
+        let msg = hunt_child_timeout_error("injection_unsafe_execution");
+        assert!(msg.contains("injection_unsafe_execution"), "msg={msg}");
+        assert!(
+            msg.contains(&HUNT_CHILD_TIMEOUT.as_secs().to_string()),
+            "timeout message should name the budget seconds: {msg}"
+        );
+    }
+
+    #[test]
+    fn hunt_child_timeout_is_generous_relative_to_iteration_cap() {
+        // Regression for the vLLM degradation bug: a too-tight per-child budget
+        // (a flat 7 min) cut EVERY one of the 24 class specialists on a large
+        // repo, silently degrading every vulnerability class to a coverage gap
+        // while the run still reported "success".  The wall-clock backstop must
+        // never be tighter than the legitimate worst-case child runtime, which
+        // is bounded by the iteration cap (and the transport read timeout per
+        // call), not by the clock.  Require at least ~90s of headroom per
+        // iteration so a full-depth specialist always finishes inside the bound.
+        // Setting HUNT_CHILD_TIMEOUT back to 420s fails this.
+        assert!(
+            HUNT_CHILD_TIMEOUT.as_secs() >= HUNT_MAX_ITERATIONS as u64 * 90,
+            "HUNT_CHILD_TIMEOUT ({}s) must allow a full-depth specialist \
+             (HUNT_MAX_ITERATIONS={}) to finish; a tighter budget silently \
+             degrades whole vulnerability classes to coverage gaps on large repos",
+            HUNT_CHILD_TIMEOUT.as_secs(),
+            HUNT_MAX_ITERATIONS,
         );
     }
 }

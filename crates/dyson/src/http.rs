@@ -37,7 +37,29 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// Set high because LLM streaming responses can take minutes for long
 /// generations.  The connect timeout above catches unreachable hosts fast.
+///
+/// CAVEAT: reqwest's total `timeout` is NOT enforced on a response body that
+/// the caller drains manually via `Response::bytes_stream()` — which is how
+/// every SSE/LLM stream in this codebase is consumed (`llm::sse_event_stream`).
+/// For those streams only [`READ_TIMEOUT`] below bounds a stall; this total is
+/// effectively a connect+headers deadline for them.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Per-read idle timeout, reset after every successful read.
+///
+/// This is the only timeout that bounds a manually-drained streaming body
+/// (`bytes_stream()`): if the upstream accepts the connection, sends headers,
+/// then goes silent without closing the socket, the total `timeout` above
+/// never fires (it doesn't cover lazily-polled bodies) and `next().await`
+/// blocks forever.  That deadlocked the security harness for >15 min when an
+/// OpenRouter upstream stalled mid-Hunt: the silent stream never produced an
+/// `Err`, so the agent loop's retry never fired and the child never returned.
+///
+/// A healthy LLM stream emits tokens far more often than this, so the bound
+/// only trips on a genuinely dead connection.  When it trips, reqwest yields a
+/// timeout error on the byte stream, which surfaces as a retryable
+/// `DysonError::Http` the agent loop retries with backoff.
+const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Maximum number of HTTP redirects to follow.  Anthropic/OpenAI/Gemini APIs
 /// typically issue zero redirects; public sites rarely chain more than 2–3.
@@ -155,11 +177,23 @@ static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 });
 
 fn configured_client_builder() -> reqwest::ClientBuilder {
+    configured_client_builder_with(CONNECT_TIMEOUT, REQUEST_TIMEOUT, READ_TIMEOUT)
+}
+
+/// Builder with injectable timeouts.  Production uses the module constants via
+/// [`configured_client_builder`]; tests pass short values to exercise the
+/// stalled-stream path (a 120s read timeout is impractical to wait on).
+fn configured_client_builder_with(
+    connect: Duration,
+    total: Duration,
+    read: Duration,
+) -> reqwest::ClientBuilder {
     ensure_crypto_provider();
     let mut builder = reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(connect)
+        .timeout(total)
+        .read_timeout(read)
         .pool_idle_timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(32)
         .redirect(safe_redirect_policy());
@@ -346,4 +380,83 @@ pub async fn validate_url_safe(url: &str) -> Result<ValidatedSafeUrl, UrlSafetyE
         url: parsed,
         resolved_addrs,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Regression for the security-harness deadlock: a streaming body that
+    /// stalls mid-flight (server sent headers, then went silent without
+    /// closing the socket) must surface as a read-timeout error, NOT hang
+    /// forever.  The fix is the `.read_timeout(..)` on the shared client
+    /// builder; reqwest's total `.timeout()` does NOT bound a manually
+    /// drained `bytes_stream()`, which is how every LLM/SSE stream is read.
+    ///
+    /// Without `.read_timeout` wired into `configured_client_builder_with`,
+    /// `stream.next().await` below never resolves and this test hangs until
+    /// the harness test-timeout kills it — i.e. it reproduces the bug.
+    #[tokio::test]
+    async fn read_timeout_aborts_a_stalled_streaming_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Server: accept one connection, read the request, promise a 1 KB body
+        // via Content-Length, send the headers, then stall — never write the
+        // body, never close.  This is the silent-upstream shape that hung the
+        // Hunt stage for >15 min in production.
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\n\
+                          Content-Type: text/event-stream\r\n\
+                          Content-Length: 1024\r\n\r\n",
+                    )
+                    .await;
+                let _ = sock.flush().await;
+                // Hold the connection open with no further bytes.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+
+        // Production builder wiring, but with a short read timeout (the real
+        // 120s is impractical to wait on) and proxy neutralised so the
+        // loopback request is direct regardless of the host's HTTP(S)_PROXY.
+        let client = configured_client_builder_with(
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            Duration::from_millis(300),
+        )
+        .no_proxy()
+        .build()
+        .unwrap();
+
+        let url = format!("http://{addr}/stream");
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .expect("response headers should arrive immediately");
+
+        let mut stream = Box::pin(resp.bytes_stream());
+        let started = std::time::Instant::now();
+        let item = tokio_stream::StreamExt::next(&mut stream).await;
+        let elapsed = started.elapsed();
+
+        let item = item.expect("stalled body should yield a timeout error item, not end the stream");
+        let err = item.expect_err("a stalled body read must surface as Err, not Ok");
+        assert!(
+            err.is_timeout(),
+            "stalled stream should error with a read timeout, got: {err:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "read timeout (300ms) should fire promptly, not hang; took {elapsed:?}"
+        );
+        server.abort();
+    }
 }

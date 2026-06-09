@@ -227,6 +227,99 @@ fn bake_checkpoint_events_into_content(out: &mut ToolOutput) {
     out.content = format!("{header}{}", out.content);
 }
 
+/// Prepend an authoritative panel-state JSON snapshot to `out.content`.
+///
+/// The events bake above is a list of `security_engineer: ...` log lines
+/// the SecurityHarnessPanel has to re-derive state from.  Live runs got
+/// the event stream straight from the SubagentEventBus and rendered fine,
+/// but rehydrate-after-refresh repeatedly produced a degraded panel:
+/// stages survived, run-id / findings counter / class grid did not.
+/// Diagnosed cause: which subset of events ends up in `body.text` after
+/// rehydrate is sensitive to the order of `hydrateTranscript`, SSE
+/// replay, `applyToolView`, and `appendToolText` — multiple paths write
+/// or partially overwrite the same field, and only stage-name lines
+/// consistently survived because they appear in every emission path.
+///
+/// A single JSON snapshot eliminates that fragility.  Every panel field
+/// the user cares about — run id, completed flag, findings rollup, class
+/// status, failure stage — lands in one comment block that downstream
+/// code can't accidentally partially drop.  The frontend prefers this
+/// snapshot when present and falls back to event parsing for live runs
+/// (where the snapshot hasn't been emitted yet) and for historical
+/// content from before snapshots existed.
+fn bake_panel_state_snapshot(
+    out: &mut ToolOutput,
+    checkpoint: &SecurityCheckpoint,
+    failure: Option<(SecurityHarnessStage, &str)>,
+) {
+    let snapshot = panel_state_snapshot(checkpoint, failure);
+    // Defang `-->` inside the JSON payload: any unescaped occurrence
+    // would close the host HTML comment early and truncate the
+    // snapshot.  Replacing every `>` with its `>` escape is a
+    // no-op semantically (serde decodes it back to `>`) but it
+    // structurally forbids the closing-comment sequence.  Cheaper
+    // than scanning for the specific `-->` triple and matches the
+    // approach the frontend extractor uses.
+    let safe = snapshot.replace('>', "\\u003e");
+    out.content = format!("<!-- security-harness-state {safe} -->\n{}", out.content);
+}
+
+/// Build the JSON payload embedded by [`bake_panel_state_snapshot`].
+///
+/// Mirrors what the SecurityHarnessPanel needs to render, NOT the
+/// full SecurityCheckpoint — the snapshot is a UI contract, not a
+/// checkpoint dump.  Adding fields here is cheap; the panel ignores
+/// keys it doesn't know about, so this struct can grow without
+/// breaking older frontends.
+fn panel_state_snapshot(
+    checkpoint: &SecurityCheckpoint,
+    failure: Option<(SecurityHarnessStage, &str)>,
+) -> String {
+    let r = self::types::SeverityRollup::from_findings(&checkpoint.findings_so_far);
+    let mut class_status = serde_json::Map::new();
+    for cov in &checkpoint.class_coverage {
+        if cov.class_id.is_empty() {
+            continue;
+        }
+        // Mirror the live `hunt: class <id> <status>` event vocabulary
+        // the panel already understands.  `hunted` carries a per-class
+        // finding count (counted from findings_so_far rather than from
+        // the cov struct because the panel renders the same way).
+        let (status, count) = if cov.hunted {
+            let n = checkpoint
+                .findings_so_far
+                .iter()
+                .filter(|f| f.vulnerability_class == cov.class_id)
+                .count();
+            ("hunted", n as u64)
+        } else if cov.checked_and_cleared {
+            ("cleared", 0)
+        } else if cov.considered && !cov.applicable {
+            ("inapplicable", 0)
+        } else {
+            continue;
+        };
+        class_status.insert(
+            cov.class_id.clone(),
+            serde_json::json!({ "status": status, "count": count }),
+        );
+    }
+    let payload = serde_json::json!({
+        "run_id": checkpoint.run_id,
+        "completed": checkpoint.completed,
+        "failed_at_stage": failure.map(|(s, _)| s.as_str()),
+        "failure_message": failure.map(|(_, m)| m),
+        "findings": {
+            "critical": r.critical,
+            "high": r.high,
+            "medium": r.medium,
+            "low": r.low,
+        },
+        "class_status": class_status,
+    });
+    serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
+}
+
 /// Whether a run should resume an existing durable checkpoint.
 ///
 /// Resume intent comes *only* from the explicit `resume` flag or a non-empty
@@ -408,6 +501,7 @@ async fn run_security_harness_inner(
                 err_out.checkpoints = out.checkpoints;
                 err_out.artefacts = out.artefacts;
                 err_out.metadata = out.metadata;
+                bake_panel_state_snapshot(&mut err_out, &checkpoint, Some((*stage, e.as_str())));
                 return Ok(err_out);
             }
         }
@@ -479,6 +573,11 @@ async fn run_security_harness_inner(
         out.artefacts
             .push(Artefact::markdown(kind, title, out.content.clone()).with_metadata(metadata));
     }
+
+    // Bake AFTER the artefact captures `out.content` so the persisted
+    // markdown artefact stays clean — only the live tool body carries
+    // the snapshot comment.
+    bake_panel_state_snapshot(&mut out, &checkpoint, None);
 
     Ok(out)
 }
@@ -780,5 +879,208 @@ mod specialist_tests {
             out.content
                 .ends_with("validate failed: no JSON object found in stage output")
         );
+    }
+
+    // ---- Phase 5: structured panel-state snapshot -------------------------
+    //
+    // The events bake above gives the panel a free-form log to reparse on
+    // rehydrate, but the panel-state QA on 2026-06-08 showed that subset
+    // of events survives the hydrate → SSE-replay → applyToolView chain
+    // is fragile: stage glyphs reliably come back, run-id / findings
+    // counter / class grid often don't.  The snapshot below is the
+    // authoritative state — one JSON blob the frontend can consume
+    // without re-deriving anything from the event stream.
+
+    fn fixture_checkpoint() -> SecurityCheckpoint {
+        SecurityCheckpoint::new(
+            "sec-1780939724-2".into(),
+            TargetRef {
+                repo_path: "/tmp/vuln".into(),
+                git_ref: None,
+            },
+            "/tmp/vuln".into(),
+            ModelMetadata {
+                provider: "openrouter".into(),
+                model: "deepseek/deepseek-v4-flash".into(),
+            },
+            0,
+        )
+    }
+
+    fn finding(severity: &str, class: &str) -> SecurityFinding {
+        SecurityFinding {
+            id: format!("finding-{class}-{severity}"),
+            title: format!("{severity} {class}"),
+            severity: severity.into(),
+            vulnerability_class: class.into(),
+            ..Default::default()
+        }
+    }
+
+    fn parse_snapshot(content: &str) -> serde_json::Value {
+        // Extract the JSON payload from `<!-- security-harness-state {...} -->`.
+        // Equivalent to the frontend's regex: every `>` inside the
+        // payload is escaped to `>` by the bake, so the next ` -->`
+        // is unambiguously the closer.
+        let start = content
+            .find("<!-- security-harness-state ")
+            .expect("snapshot comment missing");
+        let after = &content[start + "<!-- security-harness-state ".len()..];
+        let end = after.find(" -->").expect("snapshot closer missing");
+        serde_json::from_str(&after[..end]).expect("snapshot payload should be valid JSON")
+    }
+
+    #[test]
+    fn bake_panel_snapshot_emits_run_id_completed_and_severity_rollup() {
+        let mut cp = fixture_checkpoint();
+        cp.completed = true;
+        cp.findings_so_far = vec![
+            finding("critical", "injection_unsafe_execution"),
+            finding("critical", "secrets_credentials"),
+            finding("high", "auth_authorization"),
+            finding("medium", "crypto_randomness"),
+            finding("low", "audit_observability_forensics"),
+            // "info" / "informational" both fold into low — the panel
+            // doesn't surface a separate info bucket.
+            finding("info", "frontend_security_ux"),
+            finding("informational", "data_retention_privacy"),
+        ];
+
+        let mut out = ToolOutput::success("# Security review\n");
+        super::bake_panel_state_snapshot(&mut out, &cp, None);
+
+        // Sanity: snapshot prepends as a single HTML comment line at the
+        // very top, so prior `out.content` survives unchanged below it.
+        assert!(out.content.starts_with("<!-- security-harness-state "));
+        assert!(out.content.contains("# Security review"));
+
+        let snap = parse_snapshot(&out.content);
+        assert_eq!(snap["run_id"], "sec-1780939724-2");
+        assert_eq!(snap["completed"], true);
+        assert!(snap["failed_at_stage"].is_null());
+        assert!(snap["failure_message"].is_null());
+        assert_eq!(snap["findings"]["critical"], 2);
+        assert_eq!(snap["findings"]["high"], 1);
+        assert_eq!(snap["findings"]["medium"], 1);
+        // info + informational + low merge into the low bucket — three findings.
+        assert_eq!(snap["findings"]["low"], 3);
+    }
+
+    #[test]
+    fn bake_panel_snapshot_emits_class_status_keyed_by_class_id() {
+        let mut cp = fixture_checkpoint();
+        cp.findings_so_far = vec![
+            finding("critical", "injection_unsafe_execution"),
+            finding("high", "injection_unsafe_execution"),
+            finding("critical", "secrets_credentials"),
+        ];
+        cp.class_coverage = vec![
+            VulnerabilityClassCoverage {
+                class_id: "injection_unsafe_execution".into(),
+                hunted: true,
+                ..Default::default()
+            },
+            VulnerabilityClassCoverage {
+                class_id: "secrets_credentials".into(),
+                hunted: true,
+                ..Default::default()
+            },
+            VulnerabilityClassCoverage {
+                class_id: "ssrf_outbound_network".into(),
+                checked_and_cleared: true,
+                ..Default::default()
+            },
+            VulnerabilityClassCoverage {
+                class_id: "container_sandbox_runtime".into(),
+                considered: true,
+                applicable: false,
+                ..Default::default()
+            },
+            // Classes that weren't considered shouldn't pollute the panel grid.
+            VulnerabilityClassCoverage {
+                class_id: "race_condition_toctou".into(),
+                ..Default::default()
+            },
+            // Empty class_id rows must be skipped — they'd render as a
+            // blank chip in the grid.
+            VulnerabilityClassCoverage {
+                class_id: String::new(),
+                hunted: true,
+                ..Default::default()
+            },
+        ];
+
+        let mut out = ToolOutput::success(String::new());
+        super::bake_panel_state_snapshot(&mut out, &cp, None);
+        let cls = &parse_snapshot(&out.content)["class_status"];
+
+        // Hunted classes carry the count from findings_so_far attribution.
+        assert_eq!(cls["injection_unsafe_execution"]["status"], "hunted");
+        assert_eq!(cls["injection_unsafe_execution"]["count"], 2);
+        assert_eq!(cls["secrets_credentials"]["status"], "hunted");
+        assert_eq!(cls["secrets_credentials"]["count"], 1);
+
+        // Cleared / inapplicable surface without a count.
+        assert_eq!(cls["ssrf_outbound_network"]["status"], "cleared");
+        assert_eq!(cls["ssrf_outbound_network"]["count"], 0);
+        assert_eq!(cls["container_sandbox_runtime"]["status"], "inapplicable");
+
+        // Unconsidered + empty-id entries must NOT appear.
+        assert!(cls.get("race_condition_toctou").is_none());
+        // Empty-string class_id row is suppressed too.
+        assert!(cls.as_object().unwrap().keys().all(|k| !k.is_empty()));
+    }
+
+    #[test]
+    fn bake_panel_snapshot_records_failure_stage_for_stage_errors() {
+        let mut cp = fixture_checkpoint();
+        // Run failed before completing — completed flag stays false, and
+        // the panel needs to render an "errored at validate" badge.
+        cp.completed = false;
+
+        let mut err_out = ToolOutput::error(
+            "security_engineer validate failed: no JSON object found in stage output",
+        );
+        super::bake_panel_state_snapshot(
+            &mut err_out,
+            &cp,
+            Some((
+                SecurityHarnessStage::Validate,
+                "no JSON object found in stage output",
+            )),
+        );
+
+        let snap = parse_snapshot(&err_out.content);
+        assert_eq!(snap["completed"], false);
+        assert_eq!(snap["failed_at_stage"], "validate");
+        assert_eq!(snap["failure_message"], "no JSON object found in stage output");
+        // The original error text must remain readable in the body too —
+        // the comment-stripping markdown renderer leaves it intact.
+        assert!(err_out.content.contains("validate failed"));
+    }
+
+    #[test]
+    fn bake_panel_snapshot_payload_is_valid_json_even_with_quote_heavy_failure_message() {
+        // Failure messages can come straight from a tool's stderr — they
+        // routinely contain quotes, braces, backslashes.  serde_json
+        // handles escaping; this test pins that nothing in the
+        // bake/serialize path manually splices the message into JSON.
+        let cp = fixture_checkpoint();
+        let mut out = ToolOutput::error("oops");
+        let nasty = r#"parse error: unexpected token `"--><script>alert(1)</script>` at line 4"#;
+        super::bake_panel_state_snapshot(
+            &mut out,
+            &cp,
+            Some((SecurityHarnessStage::Validate, nasty)),
+        );
+
+        let snap = parse_snapshot(&out.content);
+        assert_eq!(snap["failure_message"], nasty);
+        // Round-tripping the snapshot through serde must produce
+        // identical bytes — an unescaped `-->` would have closed the
+        // host HTML comment and broken extraction.
+        let raw = serde_json::to_string(&snap).unwrap();
+        let again: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(snap, again);
     }
 }

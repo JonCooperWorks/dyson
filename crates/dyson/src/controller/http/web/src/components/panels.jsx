@@ -273,13 +273,20 @@ function SubagentPanel({ children, summary, running }) {
 // Gapfill → Dedupe → Trace → Feedback → Report).  Without this panel the
 // operator stares at a long list of read_file/ast_query chips with no
 // signal about which stage is active, how many findings have accumulated,
-// or whether validate is about to bite.  The backend already emits a
-// `checkpoint` event with `message: "security_engineer: <stage>"` between
-// stages (see `security_engineer/mod.rs` and `stages.rs`), and those text
-// lines get appended to the live tool's body via `onCheckpoint`.  We
-// parse them here to derive the stage state — zero backend changes for
-// this MVP cut.  A future event-payload upgrade can replace the parsing
-// with structured fields.
+// or whether validate is about to bite.
+//
+// State recovery has two channels:
+//   * Live: the backend emits `checkpoint` events shaped
+//     `security_engineer: <stage>` (plus run-id, findings, class-hunted
+//     lines) which the frontend appends to the tool's body via
+//     `onCheckpoint`.  This drives the StageBar in real time.
+//   * Rehydrate-after-refresh: the backend additionally bakes a
+//     `<!-- security-harness-state {JSON} -->` block into the persisted
+//     tool content.  The snapshot is authoritative for run-id, completed
+//     flag, findings rollup, class status, and failure stage — fields
+//     that historically lost state to the hydrate / SSE replay /
+//     applyToolView ordering when the panel re-derived them from text
+//     events alone.  See `extractPanelStateSnapshot` below.
 
 const HARNESS_STAGES = [
   'recon', 'hunt', 'validate', 'gapfill', 'dedupe', 'trace', 'feedback', 'report',
@@ -304,22 +311,60 @@ const SEVERITY_COLOR = {
   low: '#6b7280',
 };
 
+// Authoritative snapshot block the backend bakes into tool content
+// alongside the event log.  Format:
+//   <!-- security-harness-state {"run_id":"sec-...","completed":true,...} -->
+// All `>` inside the JSON are escaped to `>` by the bake so the
+// closing `-->` is unambiguous.  Returns
+//   { snap, strippedText }
+// where `snap` is the parsed object (or null when absent / malformed)
+// and `strippedText` has the entire `<!-- security-harness-state ... -->`
+// region cut out.  Stripping matters even when parsing fails: a
+// malformed payload can still contain a `sec-...` substring that the
+// event-line regexes would pick up and mistake for the run id,
+// shadowing the real one.  Cutting the region keeps event parsing
+// clean.  See `security_engineer/mod.rs::bake_panel_state_snapshot`
+// for the authoritative producer.
+function extractPanelStateSnapshot(text) {
+  if (!text) return { snap: null, strippedText: text || '' };
+  const re = /<!--\s*security-harness-state\s+([\s\S]+?)\s*-->/;
+  const m = text.match(re);
+  if (!m) return { snap: null, strippedText: text };
+  const strippedText = text.slice(0, m.index) + text.slice(m.index + m[0].length);
+  let snap = null;
+  try {
+    snap = JSON.parse(m[1]);
+  } catch {
+    snap = null;
+  }
+  return { snap, strippedText };
+}
+
 // Parse the running text of `security_engineer` checkpoints into a state
-// record.  The text accumulates messages like
-//   security_engineer: starting checkpoint sec-...
-//   security_engineer: recon
-//   security_engineer: hunt
-//   security_engineer: hunt: class auth_authorization hunted (3 findings)
-//   security_engineer: hunt: class session_oauth_csrf cleared
-//   security_engineer: findings critical=1 high=20 medium=48 low=47
-//   security_engineer: validate
-//   security_engineer: validate failed: no JSON object found in stage output
-//   security_engineer: completed sec-... in 4521s
+// record.  Two input shapes:
 //
-// Every UI signal the panel surfaces is derived from this stream — zero
-// backend changes required beyond emitting the right strings.
+//   1. Live runs and historical content — a stream of bare event lines:
+//        security_engineer: created checkpoint sec-...
+//        security_engineer: recon
+//        security_engineer: hunt
+//        security_engineer: hunt: class auth_authorization hunted (3 findings)
+//        security_engineer: hunt: class session_oauth_csrf cleared
+//        security_engineer: findings critical=1 high=20 medium=48 low=47
+//        security_engineer: validate
+//        security_engineer: validate failed: no JSON object found in stage output
+//        security_engineer: completed sec-... in 4521s
+//
+//   2. Completed runs from a refreshed page — same event lines PLUS a
+//      `<!-- security-harness-state {JSON} -->` block.  The snapshot
+//      wins for every field it carries because the event-line parsing
+//      depended on which subset of events survived the hydrate / SSE
+//      replay / applyToolView path, and historically lost run-id,
+//      findings, and class status on refresh even though the events
+//      were in `body.text`.  The event parse still runs as a fallback
+//      so live runs (no snapshot yet) keep working.
 function parseHarnessState(text, isRunning, exitErr = false) {
-  const lines = (text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const { snap, strippedText } = extractPanelStateSnapshot(text);
+  const lines = strippedText.split('\n').map(l => l.trim()).filter(Boolean);
   let runId = null;
   let lastStage = null;
   let completed = false;
@@ -377,6 +422,40 @@ function parseHarnessState(text, isRunning, exitErr = false) {
       const s = sm[1].toLowerCase();
       if (HARNESS_STAGES.includes(s)) lastStage = s;
     }
+  }
+
+  // Snapshot fields override event-derived ones for every field the
+  // snapshot carries.  See extractPanelStateSnapshot above for why the
+  // snapshot is authoritative — the event stream remains the source
+  // of truth only for live-only signals (isRunning, resumed) that the
+  // snapshot doesn't model.
+  if (snap) {
+    if (typeof snap.run_id === 'string' && snap.run_id) runId = snap.run_id;
+    if (typeof snap.completed === 'boolean') completed = snap.completed;
+    if (typeof snap.failed_at_stage === 'string' && snap.failed_at_stage) {
+      failedAtStage = snap.failed_at_stage;
+    }
+    if (typeof snap.failure_message === 'string' && snap.failure_message) {
+      failureMessage = snap.failure_message;
+    }
+    if (snap.findings && typeof snap.findings === 'object') {
+      findings.critical = snap.findings.critical | 0;
+      findings.high = snap.findings.high | 0;
+      findings.medium = snap.findings.medium | 0;
+      findings.low = snap.findings.low | 0;
+    }
+    if (snap.class_status && typeof snap.class_status === 'object') {
+      for (const [cls, info] of Object.entries(snap.class_status)) {
+        if (info && typeof info === 'object' && info.status) {
+          classStatus[cls] = { status: info.status, count: info.count | 0 };
+        }
+      }
+    }
+    // When the snapshot marks the run completed, anchor lastStage on
+    // the terminal stage so the StageBar's "all done" branch fires
+    // even if the event stream lost the `security_engineer: report`
+    // line (the exact symptom we were debugging on 2026-06-08).
+    if (completed) lastStage = 'report';
   }
 
   const currentIdx = lastStage ? HARNESS_STAGES.indexOf(lastStage) : -1;
