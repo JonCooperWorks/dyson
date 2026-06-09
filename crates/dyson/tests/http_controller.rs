@@ -1108,7 +1108,15 @@ async fn artefact_listing_slow_disk_read_does_not_block_runtime() {
     });
 
     let fifo_for_writer = fifo.clone();
-    let unblock = std::thread::spawn(move || {
+    // Open the FIFO writer on the blocking pool and AWAIT it — do NOT
+    // `std::thread::spawn(...).join()` on the runtime thread.  This test runs
+    // on a `current_thread` runtime, so the test thread IS the sole executor;
+    // a blocking `join()` parks it outside the runtime, the server task can
+    // never reach its `spawn_blocking` FIFO read, and the reader/writer `open`
+    // calls never rendezvous — wedging forever under load.  Awaiting a
+    // `spawn_blocking` handle yields to the runtime, so the server keeps making
+    // progress while the writer is parked opening the FIFO.
+    let unblock = tokio::task::spawn_blocking(move || {
         std::thread::sleep(Duration::from_millis(250));
         let mut writer = std::fs::OpenOptions::new()
             .write(true)
@@ -1126,7 +1134,7 @@ async fn artefact_listing_slow_disk_read_does_not_block_runtime() {
         get(&format!("{}/healthz", r.base)).await.status()
     })
     .await;
-    unblock.join().unwrap();
+    unblock.await.unwrap();
     let response = list_response.await.unwrap();
     assert!(
         response.starts_with("HTTP/1.1 200"),
