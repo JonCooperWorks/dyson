@@ -10,7 +10,7 @@ build = "build.rs"
 # that dyson and dyson-swarm both speak. `oauth-client` pulls the reqwest
 # flow client (dyson runs the agent-side MCP OAuth flow). Git-pinned to a rev
 # so the contract can't silently re-resolve.
-dyson-common = { git = "ssh://git@github.com/JonCooperWorks/dyson-common.git", rev = "44f46c414f4771b006303c086522d8eb3a2a9662", features = ["oauth-client"] }
+dyson-common = { git = "ssh://git@github.com/JonCooperWorks/dyson-common.git", tag = "v0.1.0" }
 
 # Shared across workspace crates — inherit from [workspace.dependencies]
 # so version bumps live in one place and cargo always dedupes.
