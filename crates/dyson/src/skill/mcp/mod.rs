@@ -257,6 +257,10 @@ impl McpSkill {
                     grant_types: vec!["authorization_code".into(), "refresh_token".into()],
                     response_types: vec!["code".into()],
                     token_endpoint_auth_method: Some("none".into()),
+                    // The shared DTO carries an optional scope (swarm/Smithery
+                    // need it); dyson requests scopes on the authorize URL, not
+                    // at registration, so it stays None here.
+                    scope: None,
                 },
                 &http_client,
             )

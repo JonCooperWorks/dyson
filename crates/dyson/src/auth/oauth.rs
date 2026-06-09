@@ -29,54 +29,19 @@ use super::Auth;
 use super::credential::Credential;
 use crate::error::{DysonError, Result};
 
-/// OAuth 2.0 Authorization Server Metadata (RFC 8414).
-#[derive(Debug, Clone, Deserialize)]
-pub struct AuthMetadata {
-    pub authorization_endpoint: String,
-    pub token_endpoint: String,
-    #[serde(default)]
-    pub registration_endpoint: Option<String>,
-}
-
-/// Dynamic Client Registration request (RFC 7591).
-#[derive(Debug, Clone, Serialize)]
-pub struct DcrRequest {
-    pub client_name: String,
-    pub redirect_uris: Vec<String>,
-    pub grant_types: Vec<String>,
-    #[serde(default)]
-    pub response_types: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_endpoint_auth_method: Option<String>,
-}
-
-/// Dynamic Client Registration response (RFC 7591).
-#[derive(Debug, Clone, Deserialize)]
-pub struct DcrResponse {
-    pub client_id: String,
-    #[serde(default)]
-    pub client_secret: Option<String>,
-}
-
-/// Token endpoint response (RFC 6749 Section 5.1).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenResponse {
-    pub access_token: String,
-    pub token_type: String,
-    #[serde(default)]
-    pub expires_in: Option<u64>,
-    #[serde(default)]
-    pub refresh_token: Option<String>,
-    #[serde(default)]
-    pub scope: Option<String>,
-}
-
-/// PKCE code verifier + S256 challenge pair.
-#[derive(Debug, Clone)]
-pub struct PkceChallenge {
-    pub verifier: String,
-    pub challenge: String,
-}
+// The OAuth wire DTOs are defined once in `dyson-common` so dyson and swarm
+// agree on the shapes. Re-exported here so the flow fns and call sites keep
+// referencing `oauth::AuthMetadata` etc. unchanged.
+//
+// The flow functions below stay dyson-local: they return `crate::Result`
+// (DysonError with per-step context), fold the SSRF guard
+// (`validate_outbound_oauth_url`) directly into each network call, and take
+// dyson-shaped arguments (e.g. `build_auth_url` takes `&[String]` scopes).
+// dyson-common's `oauth::client` fns use a coarser `OAuthError` and a
+// caller-supplied `allow_url` predicate; reconciling that seam would rewrite
+// every call site and the error mapping for no behavior change, so only the
+// DTOs are shared for now.
+pub use dyson_common::oauth::{AuthMetadata, DcrRequest, DcrResponse, PkceChallenge, TokenResponse};
 
 /// Fetch metadata from `<origin>/.well-known/oauth-authorization-server`.
 pub async fn discover_metadata(server_url: &str, client: &reqwest::Client) -> Result<AuthMetadata> {
@@ -650,23 +615,8 @@ mod tests {
         assert_eq!(generate_state().len(), 22);
     }
 
-    #[test]
-    fn token_response_deserialize() {
-        let r: TokenResponse = serde_json::from_str(
-            r#"{"access_token":"t","token_type":"Bearer","expires_in":3600,"refresh_token":"r"}"#,
-        )
-        .unwrap();
-        assert_eq!(r.access_token, "t");
-        assert_eq!(r.expires_in, Some(3600));
-        assert_eq!(r.refresh_token.as_deref(), Some("r"));
-    }
-
-    #[test]
-    fn token_response_minimal() {
-        let r: TokenResponse =
-            serde_json::from_str(r#"{"access_token":"t","token_type":"Bearer"}"#).unwrap();
-        assert!(r.expires_in.is_none());
-    }
+    // TokenResponse round-trip / optional-field coverage lives in dyson-common
+    // (it owns the DTO now); dyson only re-exports it.
 
     #[test]
     fn sanitize_prevents_traversal() {
@@ -822,7 +772,9 @@ mod tests {
 
         let response = TokenResponse {
             access_token: "test-access".into(),
-            token_type: "Bearer".into(),
+            // token_type is now Option<String> in the shared DTO (servers may
+            // omit it; the spec defaults to "Bearer"). dyson never reads it.
+            token_type: Some("Bearer".into()),
             expires_in: Some(3600),
             refresh_token: Some("test-refresh".into()),
             scope: None,
@@ -886,6 +838,7 @@ mod tests {
                 grant_types: vec![],
                 response_types: vec![],
                 token_endpoint_auth_method: None,
+                scope: None,
             },
             &client,
         )

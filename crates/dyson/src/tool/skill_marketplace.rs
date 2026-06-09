@@ -59,17 +59,14 @@ struct SkillDetail {
     computed_sha256: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct SkillBody {
-    pub marketplace_id: String,
-    pub marketplace_name: String,
-    pub name: String,
-    pub version: String,
-    pub description: String,
-    pub declared_sha256: Option<String>,
-    pub computed_sha256: String,
-    pub skill_md: String,
-}
+// The install-package body is the shared catalog contract; dyson-common owns
+// the definition so swarm (producer) and dyson (consumer) can't drift on it.
+// Re-exported under the local name so call sites stay unchanged. The display
+// structs above (CatalogSkill/CatalogListing/SkillDetail) stay local: swarm's
+// listing view is dyson-specific (CatalogListing isn't in the shared crate) and
+// dyson-common's CatalogSkill carries extra required fields (license,
+// min_dyson_version) that dyson's display path neither needs nor deserializes.
+pub use dyson_common::marketplace::SkillPackageBody as SkillBody;
 
 #[derive(Debug, Serialize)]
 pub struct SkillInstallOutcome {

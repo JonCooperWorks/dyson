@@ -17,105 +17,17 @@
 
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
-
 use crate::error::Result;
 
 // ---------------------------------------------------------------------------
 // FeedbackRating
 // ---------------------------------------------------------------------------
 
-/// 7-point rating scale for assistant responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FeedbackRating {
-    Terrible,  // -3
-    Bad,       // -2
-    NotGood,   // -1
-    Decent,    //  0
-    Good,      // +1
-    VeryGood,  // +2
-    Excellent, // +3
-}
-
-impl FeedbackRating {
-    /// Numeric score for this rating (-3 to +3).
-    pub const fn score(self) -> i8 {
-        match self {
-            Self::Terrible => -3,
-            Self::Bad => -2,
-            Self::NotGood => -1,
-            Self::Decent => 0,
-            Self::Good => 1,
-            Self::VeryGood => 2,
-            Self::Excellent => 3,
-        }
-    }
-
-    /// Map a reaction emoji to a rating, returning `None` for unrecognized
-    /// emojis.  Shared by every controller (Telegram reactions, the web UI's
-    /// emoji buttons) so the mapping never drifts between input surfaces.
-    pub fn from_emoji(emoji: &str) -> Option<Self> {
-        match emoji {
-            "💩" | "😡" | "🤮" => Some(Self::Terrible),
-            "👎" => Some(Self::Bad),
-            "😢" | "😐" => Some(Self::NotGood),
-            "👍" | "👏" => Some(Self::Good),
-            "🔥" | "🎉" | "😂" => Some(Self::VeryGood),
-            "❤️" | "❤" | "🤯" | "💯" | "⚡" => Some(Self::Excellent),
-            _ => None,
-        }
-    }
-}
-
-#[cfg(test)]
-mod rating_tests {
-    use super::FeedbackRating;
-
-    #[test]
-    fn from_emoji_maps_every_known_reaction() {
-        let cases: &[(&str, FeedbackRating)] = &[
-            ("💩", FeedbackRating::Terrible),
-            ("😡", FeedbackRating::Terrible),
-            ("🤮", FeedbackRating::Terrible),
-            ("👎", FeedbackRating::Bad),
-            ("😢", FeedbackRating::NotGood),
-            ("😐", FeedbackRating::NotGood),
-            ("👍", FeedbackRating::Good),
-            ("👏", FeedbackRating::Good),
-            ("🔥", FeedbackRating::VeryGood),
-            ("🎉", FeedbackRating::VeryGood),
-            ("😂", FeedbackRating::VeryGood),
-            ("❤️", FeedbackRating::Excellent),
-            ("❤", FeedbackRating::Excellent),
-            ("🤯", FeedbackRating::Excellent),
-            ("💯", FeedbackRating::Excellent),
-            ("⚡", FeedbackRating::Excellent),
-        ];
-        for (e, want) in cases {
-            assert_eq!(FeedbackRating::from_emoji(e), Some(*want), "emoji {e}");
-        }
-        assert_eq!(FeedbackRating::from_emoji("🦀"), None);
-        assert_eq!(FeedbackRating::from_emoji(""), None);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FeedbackEntry
-// ---------------------------------------------------------------------------
-
-/// A single feedback entry linking a conversation turn to a rating.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FeedbackEntry {
-    /// Index of the assistant message in the conversation's `Vec<Message>`.
-    pub turn_index: usize,
-    /// The computed rating.
-    pub rating: FeedbackRating,
-    /// Numeric score (-3 to +3), denormalized for convenient export.
-    pub score: i8,
-    /// Unix timestamp (seconds) when the feedback was recorded.
-    pub timestamp: u64,
-}
+/// The 7-point rating scale (`FeedbackRating`, with `score`/`from_emoji`) and
+/// the per-turn `FeedbackEntry` are defined once in `dyson-common` and
+/// re-exported here, so existing call sites (`FeedbackRating::from_emoji(..)`,
+/// `FeedbackEntry { .. }`) are unchanged.  Wire form is snake_case.
+pub use dyson_common::feedback::{FeedbackEntry, FeedbackRating};
 
 // ---------------------------------------------------------------------------
 // FeedbackStore
