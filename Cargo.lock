@@ -922,9 +922,10 @@ dependencies = [
 
 [[package]]
 name = "dyson-common"
-version = "0.1.0"
-source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.0#44f46c414f4771b006303c086522d8eb3a2a9662"
+version = "0.1.2"
+source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.2#5841f03698a713e9e109b965c188280c3dc1d137"
 dependencies = [
+ "jsonwebtoken",
  "serde",
  "serde_json",
 ]

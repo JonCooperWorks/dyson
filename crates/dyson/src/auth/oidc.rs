@@ -41,6 +41,8 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
+use dyson_common::oidc::{Jwk, JwkSet, decoding_key_from_jwk};
+
 use crate::auth::{Auth, AuthInfo};
 use crate::error::{DysonError, Result};
 
@@ -64,43 +66,6 @@ pub struct OidcConfig {
     pub token_endpoint: Option<String>,
     #[serde(default)]
     pub userinfo_endpoint: Option<String>,
-}
-
-/// A single JSON Web Key as fetched from the provider's `jwks_uri`.
-/// We only need enough to build a `DecodingKey`; every IdP returns
-/// at least `kid`, `kty`, `alg`, and the key-material fields for its
-/// algorithm.
-/// Subset of an RFC 7517 JSON Web Key we know how to verify with.
-/// Only the fields we actually consume.  `alg`, `kty`, and the key-
-/// material fields all default to `None` so we can skip an unfamiliar
-/// JWK without failing the whole set.
-#[derive(Debug, Clone, Deserialize)]
-struct Jwk {
-    kid: String,
-    #[serde(default)]
-    alg: Option<String>,
-    #[serde(default)]
-    kty: Option<String>,
-    // RSA
-    #[serde(default)]
-    n: Option<String>,
-    #[serde(default)]
-    e: Option<String>,
-    // EC — `crv` is in the spec but jsonwebtoken's `from_ec_components`
-    // infers the curve from the algorithm, so we don't bind it.
-    #[serde(default)]
-    x: Option<String>,
-    #[serde(default)]
-    y: Option<String>,
-    // HMAC — uncommon for OIDC issuers but we support it so a local
-    // dex with a shared secret works for dev.
-    #[serde(default)]
-    k: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct JwkSet {
-    keys: Vec<Jwk>,
 }
 
 struct JwksCache {
@@ -361,42 +326,12 @@ impl OidcAuth {
             Some(c) => c,
             None => return Ok(None),
         };
-        let key = match Self::find_key(&cache.jwks, kid) {
-            Some(k) => k,
-            None => return Ok(None),
-        };
-        // Honour `alg` on the JWK if the IdP pins it; fall back to the
-        // `kty` to pick a builder.  Anything we can't construct a
-        // DecodingKey for is treated as a miss (will cause a 401, not
-        // a 500) so a partially-understood JWKS doesn't brick us.
-        let alg = key.alg.as_deref();
-        let kty = key.kty.as_deref();
-        let decoding = match (alg, kty) {
-            (Some("RS256") | Some("RS384") | Some("RS512"), _) | (_, Some("RSA")) => {
-                let n = key.n.as_deref().ok_or_else(|| no_key(kid))?;
-                let e = key.e.as_deref().ok_or_else(|| no_key(kid))?;
-                DecodingKey::from_rsa_components(n, e)
-                    .map_err(|e| DysonError::Config(format!("rsa jwk: {e}")))?
-            }
-            (Some("ES256") | Some("ES384") | Some("ES512"), _) | (_, Some("EC")) => {
-                let x = key.x.as_deref().ok_or_else(|| no_key(kid))?;
-                let y = key.y.as_deref().ok_or_else(|| no_key(kid))?;
-                DecodingKey::from_ec_components(x, y)
-                    .map_err(|e| DysonError::Config(format!("ec jwk: {e}")))?
-            }
-            (Some("HS256") | Some("HS384") | Some("HS512"), _) | (_, Some("oct")) => {
-                let k = key.k.as_deref().ok_or_else(|| no_key(kid))?;
-                DecodingKey::from_base64_secret(k)
-                    .map_err(|e| DysonError::Config(format!("hmac jwk: {e}")))?
-            }
-            _ => return Ok(None),
-        };
-        Ok(Some(decoding))
+        // A `kid` miss or a key whose material we can't construct both fall
+        // through to the same caller path (refresh once, then 401) — the
+        // shared `decoding_key_from_jwk` returns `None` for the latter, so a
+        // partially-understood JWKS doesn't brick verification.
+        Ok(Self::find_key(&cache.jwks, kid).and_then(decoding_key_from_jwk))
     }
-}
-
-fn no_key(kid: &str) -> DysonError {
-    DysonError::Config(format!("jwk {kid} missing key material"))
 }
 
 /// Compare two issuer URLs after normalising trailing slashes.  An IdP

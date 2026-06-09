@@ -170,15 +170,19 @@ pub trait Auth: Send + Sync {
 
 /// Extract the token from an `Authorization: Bearer <token>` header.
 ///
-/// Returns `None` if the header is absent, not valid ASCII, or lacks the
-/// `Bearer ` prefix (single space, case-sensitive).  Every server-side
-/// `validate_request` that accepts bearer tokens routes through this so the
-/// parsing semantics stay identical across schemes.
+/// Returns `None` if the header is absent or not valid ASCII.  The actual
+/// `Bearer ` parsing is `dyson_common::auth::strip_bearer`, shared with
+/// dyson-swarm so the two can't drift: it trims surrounding whitespace,
+/// accepts the scheme case-insensitively (the HTTP auth scheme is
+/// case-insensitive per RFC 7235), and rejects an empty token.  Every
+/// server-side `validate_request` that accepts bearer tokens routes through
+/// this so the parsing semantics stay identical across schemes.
 pub fn extract_bearer(headers: &hyper::HeaderMap) -> Option<&str> {
     headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        .get("authorization")?
+        .to_str()
+        .ok()
+        .and_then(dyson_common::auth::strip_bearer)
 }
 
 // ===========================================================================

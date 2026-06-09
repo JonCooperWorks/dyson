@@ -118,83 +118,13 @@ pub fn safe_redirect_policy() -> Policy {
     })
 }
 
-/// Whether an IPv4 address falls inside a range the HTTP layer refuses
-/// to connect to (loopback, RFC1918, link-local, broadcast, multicast,
-/// unspecified, or RFC 6598 CGNAT).
-///
-/// Exposed so every SSRF check in the codebase routes through the same
-/// predicate — no second set of rules to drift out of sync with this one.
-pub fn is_private_v4(ip: std::net::Ipv4Addr) -> bool {
-    ip.is_loopback()
-        || ip.is_private()
-        || ip.is_link_local()
-        || ip.is_broadcast()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        // RFC 6598 shared address space (CGNAT): 100.64.0.0/10
-        || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 64)
-        // Cloud metadata: 169.254.169.254 is already link-local, covered above.
-        // Carrier-grade / reserved: 192.0.0.0/24, 192.0.2.0/24, 198.18.0.0/15,
-        // 198.51.100.0/24, 203.0.113.0/24 — documentation / benchmarking only.
-        || ip.octets()[0] == 0
-}
-
-/// Companion to [`is_private_v4`] for IPv6.
-pub fn is_private_v6(ip: std::net::Ipv6Addr) -> bool {
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        // Unique local addresses: fc00::/7
-        || (ip.segments()[0] & 0xfe00) == 0xfc00
-        // Link-local: fe80::/10
-        || (ip.segments()[0] & 0xffc0) == 0xfe80
-        // IPv4-mapped IPv6 → check the v4 part.
-        || matches!(ip.to_ipv4_mapped(), Some(v4) if is_private_v4(v4))
-}
-
-/// Extract the host from a URL string, stripping scheme, userinfo, path,
-/// query, fragment, and port.  Handles IPv6 bracket notation
-/// (`[::1]:8080` → `::1`).  Returns `None` if the URL has no `://` scheme
-/// or the host is empty.
-///
-/// Exposed so every SSRF / internal-host check parses URL→host the same
-/// way, rather than each call site re-rolling its own splitter.
-pub fn host_from_url(url: &str) -> Option<&str> {
-    let after_scheme = &url[url.find("://")? + 3..];
-    // Strip path / query / fragment, then userinfo (`user:pass@host`).
-    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
-    let host_port = authority.rsplit('@').next().unwrap_or(authority);
-    let host = if host_port.starts_with('[') {
-        // IPv6 in brackets: `[::1]:8080` → `::1`.
-        host_port
-            .find(']')
-            .map(|i| &host_port[1..i])
-            .unwrap_or(host_port)
-    } else {
-        // IPv4 or hostname: `host:port` → `host`.
-        host_port.split(':').next().unwrap_or(host_port)
-    };
-    if host.is_empty() {
-        None
-    } else {
-        Some(host)
-    }
-}
-
-/// Whether a hostname matches a well-known cloud metadata service.
-pub fn is_metadata_host(host: &str) -> bool {
-    let h = host.trim_end_matches('.').to_ascii_lowercase();
-    matches!(
-        h.as_str(),
-        "localhost"
-            | "metadata.google.internal"
-            | "metadata"
-            | "metadata.aws.amazon.com"
-            | "metadata.azure.com"
-            | "metadata.tencentyun.com"
-            | "metadata.packet.net"
-    )
-}
+// SSRF / internal-network predicates live in dyson-common::net so dyson and
+// dyson-swarm can't drift on what "internal" means.  Re-exported under the
+// historical `crate::http::*` paths the rest of the codebase already imports
+// (safe_redirect_policy, config/loader.rs, sandbox/policy_sandbox.rs).  The
+// shared `is_private_v4` is a superset of the old local one — it also blocks
+// class-E 240.0.0.0/4 — a deliberate SSRF hardening.
+pub use dyson_common::net::{host_from_url, is_metadata_host, is_private_v4, is_private_v6};
 
 /// Process-wide HTTP client singleton.
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {

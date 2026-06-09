@@ -159,34 +159,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_token_with_leading_whitespace_in_header() {
-        // hyper preserves the header value verbatim — a `Bearer  x` (two
-        // spaces) does NOT match `Bearer x` because we strip a single
-        // `Bearer ` prefix and verify the rest as the plaintext.  Make
-        // sure that mismatch is actually a rejection (no whitespace
-        // tolerance silently leaking in).
+    async fn tolerates_surrounding_whitespace_around_the_token() {
+        // The shared `strip_bearer` trims surrounding whitespace: a
+        // `Bearer  right` (two spaces) or `Bearer right ` (trailing space)
+        // both yield the token "right".  That's lenient-but-safe — the
+        // trimmed token still has to match the stored hash, so padding
+        // can't smuggle a different credential past verification.
         let phc = HashedBearerAuth::hash("right").unwrap();
         let auth = HashedBearerAuth::from_phc(phc).unwrap();
         let mut h = hyper::HeaderMap::new();
         h.insert("authorization", "Bearer  right".parse().unwrap());
-        assert!(auth.validate_request(&h).await.is_err());
-        // Trailing whitespace: same story.
+        assert!(auth.validate_request(&h).await.is_ok());
         h.clear();
         h.insert("authorization", "Bearer right ".parse().unwrap());
-        assert!(auth.validate_request(&h).await.is_err());
+        assert!(auth.validate_request(&h).await.is_ok());
     }
 
     #[tokio::test]
-    async fn rejects_lowercase_bearer_prefix() {
-        // RFC 6750 says scheme tokens are case-insensitive, but our
-        // verifier is strict — clients that downcase the scheme would
-        // get a clean 401 here.  Pin that behaviour so an accidental
-        // tolerance doesn't slip in unnoticed.
+    async fn accepts_lowercase_bearer_prefix() {
+        // RFC 7235 makes the auth scheme case-insensitive, so the shared
+        // `strip_bearer` accepts a downcased `bearer ` scheme.  A client
+        // that lowercases the scheme verifies normally against the stored
+        // hash; the token itself is still matched byte-for-byte.
         let phc = HashedBearerAuth::hash("token").unwrap();
         let auth = HashedBearerAuth::from_phc(phc).unwrap();
         let mut h = hyper::HeaderMap::new();
         h.insert("authorization", "bearer token".parse().unwrap());
-        assert!(auth.validate_request(&h).await.is_err());
+        assert!(auth.validate_request(&h).await.is_ok());
     }
 
     #[tokio::test]
