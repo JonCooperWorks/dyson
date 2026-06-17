@@ -19,7 +19,7 @@ pub(super) async fn get(state: &HttpState) -> Resp {
     let snapshot = state.settings_snapshot();
     let ws = match open_workspace(&snapshot) {
         Ok(w) => w,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let names = ws.list_files();
     let mut files: Vec<serde_json::Value> = Vec::with_capacity(names.len());
@@ -48,7 +48,7 @@ pub(super) async fn get_file(state: &HttpState, query: &str) -> Resp {
     let snapshot = state.settings_snapshot();
     let ws = match open_workspace(&snapshot) {
         Ok(w) => w,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     match ws.get(&path) {
         Some(content) => json_ok(&serde_json::json!({ "path": path, "content": content })),
@@ -69,7 +69,7 @@ pub(super) async fn post_file(req: Request<hyper::body::Incoming>, state: &HttpS
     let snapshot = state.settings_snapshot();
     let mut ws = match open_workspace(&snapshot) {
         Ok(w) => w,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     ws.set(&body.path, &body.content);
     if let Err(e) = ws.save() {

@@ -18,7 +18,7 @@ pub(super) async fn get(state: &HttpState) -> Resp {
     let snapshot = state.settings_snapshot();
     let ws = match open_workspace(&snapshot) {
         Ok(w) => w,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let name = ws
         .get("IDENTITY.md")

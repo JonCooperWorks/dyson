@@ -979,10 +979,7 @@ impl SseStreamParser {
     fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
         self.buf.extend_from_slice(chunk);
         let mut frames = Vec::new();
-        loop {
-            let Some(newline) = self.buf.iter().position(|b| *b == b'\n') else {
-                break;
-            };
+        while let Some(newline) = self.buf.iter().position(|b| *b == b'\n') {
             let raw_line: Vec<u8> = self.buf.drain(..=newline).collect();
             // Drop the trailing `\n` and any preceding `\r`.
             let mut len = raw_line.len() - 1;
@@ -1004,10 +1001,10 @@ impl SseStreamParser {
                     Some(prev) => format!("{prev}\n{chunk}"),
                     None => chunk.to_string(),
                 });
-            } else if line.is_empty() {
-                if let Some(frame) = self.current.take() {
-                    frames.push(frame);
-                }
+            } else if line.is_empty()
+                && let Some(frame) = self.current.take()
+            {
+                frames.push(frame);
             }
             // Other SSE lines (event:, id:, retry:, comments starting
             // with `:`) are intentionally ignored — the wire format

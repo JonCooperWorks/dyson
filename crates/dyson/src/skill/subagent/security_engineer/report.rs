@@ -407,6 +407,41 @@ pub fn dedupe_findings(findings: &[SecurityFinding]) -> Vec<DedupeGroup> {
         .collect()
 }
 
+pub(crate) fn report_from_checkpoint(checkpoint: &SecurityCheckpoint) -> SecurityHarnessReport {
+    let reportable_ids = reportable_finding_ids(checkpoint);
+    let findings = checkpoint
+        .findings_so_far
+        .iter()
+        .filter(|finding| reportable_ids.contains(&finding.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let rejected_candidates = checkpoint
+        .validation_decisions_so_far
+        .iter()
+        .filter(|d| d.decision == ValidationDecisionKind::Rejected)
+        .cloned()
+        .collect();
+    let trace_evidence = checkpoint
+        .trace_results_so_far
+        .iter()
+        .filter(|trace| reportable_ids.contains(&trace.finding_id))
+        .cloned()
+        .collect();
+    SecurityHarnessReport {
+        schema_version: SECURITY_HARNESS_SCHEMA_VERSION,
+        run_id: checkpoint.run_id.clone(),
+        target: checkpoint.target.clone(),
+        scope: checkpoint.scope.clone(),
+        findings: findings.clone(),
+        rejected_candidates,
+        gaps: checkpoint.coverage_gaps.clone(),
+        dedupe_groups: dedupe_findings(&findings),
+        trace_evidence,
+        stage_history: checkpoint.stage_history.clone(),
+        class_coverage: checkpoint.class_coverage.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::types::{
@@ -630,40 +665,5 @@ mod tests {
             reportable_confirmed_findings(&cp).is_empty(),
             "findings with no validation decision should not be reportable"
         );
-    }
-}
-
-pub(crate) fn report_from_checkpoint(checkpoint: &SecurityCheckpoint) -> SecurityHarnessReport {
-    let reportable_ids = reportable_finding_ids(checkpoint);
-    let findings = checkpoint
-        .findings_so_far
-        .iter()
-        .filter(|finding| reportable_ids.contains(&finding.id))
-        .cloned()
-        .collect::<Vec<_>>();
-    let rejected_candidates = checkpoint
-        .validation_decisions_so_far
-        .iter()
-        .filter(|d| d.decision == ValidationDecisionKind::Rejected)
-        .cloned()
-        .collect();
-    let trace_evidence = checkpoint
-        .trace_results_so_far
-        .iter()
-        .filter(|trace| reportable_ids.contains(&trace.finding_id))
-        .cloned()
-        .collect();
-    SecurityHarnessReport {
-        schema_version: SECURITY_HARNESS_SCHEMA_VERSION,
-        run_id: checkpoint.run_id.clone(),
-        target: checkpoint.target.clone(),
-        scope: checkpoint.scope.clone(),
-        findings: findings.clone(),
-        rejected_candidates,
-        gaps: checkpoint.coverage_gaps.clone(),
-        dedupe_groups: dedupe_findings(&findings),
-        trace_evidence,
-        stage_history: checkpoint.stage_history.clone(),
-        class_coverage: checkpoint.class_coverage.clone(),
     }
 }

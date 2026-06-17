@@ -20,7 +20,7 @@ use std::sync::Arc;
 use dyson::config::{McpConfig, McpTransportConfig};
 use dyson::skill::Skill;
 use dyson::skill::mcp::McpSkill;
-use dyson::tool::{Tool, ToolContext};
+use dyson::tool::ToolContext;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 

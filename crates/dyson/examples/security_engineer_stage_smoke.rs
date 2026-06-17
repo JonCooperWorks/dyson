@@ -54,13 +54,11 @@
 //! Each invocation persists two files under `--output-dir` (default
 //! `stage-smoke-output/`):
 //!
-//! - `<stage>-<run_id>.md`              — the raw tool output (rendered
-//!                                         Markdown if it's the report stage)
+//! - `<stage>-<run_id>.md` — the raw tool output (rendered Markdown if it's
+//!   the report stage)
 //! - `<stage>-<run_id>-checkpoint.json` — a copy of the durable
-//!                                         `SecurityCheckpoint`, copied
-//!                                         from the harness's canonical
-//!                                         location `.dyson/security-harness/
-//!                                         checkpoints/<run_id>.json`
+//!   `SecurityCheckpoint`, copied from the harness's canonical location
+//!   `.dyson/security-harness/checkpoints/<run_id>.json`
 //!
 //! The checkpoint copy is the audit trail.  You can post-mortem a run
 //! without grepping the workspace, and the copy survives a `cargo clean`
@@ -71,9 +69,8 @@
 //! under `set -e` stops at the first real regression:
 //!
 //! 1. `output.is_error == true`              — the tool returned an error
-//! 2. The canonical checkpoint file is missing — harness returned success
-//!                                                 but didn't write a
-//!                                                 checkpoint (silent fail)
+//! 2. The canonical checkpoint file is missing — harness returned success but
+//!    didn't write a checkpoint (silent fail)
 //! 3. `current_stage` in the saved checkpoint is BEFORE the stage we asked
 //!    for — stage didn't advance (e.g. recon parse failed AND the
 //!    non-fatal fallback didn't update `current_stage`)
@@ -316,17 +313,17 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             )
         })?;
         persisted = true;
-        if let Ok(body) = std::fs::read_to_string(&persisted_checkpoint) {
-            if let Ok(json) = serde_json::from_str::<Value>(&body) {
-                saved_stage = json
-                    .get("current_stage")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                saved_completed = json
-                    .get("completed")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-            }
+        if let Ok(body) = std::fs::read_to_string(&persisted_checkpoint)
+            && let Ok(json) = serde_json::from_str::<Value>(&body)
+        {
+            saved_stage = json
+                .get("current_stage")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            saved_completed = json
+                .get("completed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         }
     }
 
@@ -379,16 +376,16 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
-    if let Some(stage) = saved_stage.as_deref() {
-        if !stage_at_or_past(args.stage, stage) {
-            return Err(format!(
-                "stage `{}` ran but saved checkpoint's current_stage is `{}` — the \
-                 stage did not advance, treating as a silent failure",
-                args.stage.as_str(),
-                stage
-            )
-            .into());
-        }
+    if let Some(stage) = saved_stage.as_deref()
+        && !stage_at_or_past(args.stage, stage)
+    {
+        return Err(format!(
+            "stage `{}` ran but saved checkpoint's current_stage is `{}` — the \
+             stage did not advance, treating as a silent failure",
+            args.stage.as_str(),
+            stage
+        )
+        .into());
     }
 
     // Hint the user about the next command.  The next stage in the canonical

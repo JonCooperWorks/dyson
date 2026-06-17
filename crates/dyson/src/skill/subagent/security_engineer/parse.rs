@@ -46,15 +46,15 @@ pub(super) fn extract_json(raw: &str) -> Option<&str> {
     let mut last_valid: Option<&str> = None;
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'{' {
-            if let Some(end) = scan_balanced_brace(bytes, i) {
-                let candidate = raw[i..=end].trim();
-                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
-                    last_valid = Some(candidate);
-                }
-                i = end + 1;
-                continue;
+        if bytes[i] == b'{'
+            && let Some(end) = scan_balanced_brace(bytes, i)
+        {
+            let candidate = raw[i..=end].trim();
+            if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                last_valid = Some(candidate);
             }
+            i = end + 1;
+            continue;
         }
         i += 1;
     }

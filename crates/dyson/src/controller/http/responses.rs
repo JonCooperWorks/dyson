@@ -265,12 +265,16 @@ pub(crate) fn json_ok<T: Serialize>(v: &T) -> Resp {
 }
 
 /// Open the workspace described by a settings snapshot, returning a ready
-/// `bad_request` response on failure so route handlers can `?`-propagate.
+/// `bad_request` response on failure so route handlers can return it verbatim.
+///
+/// The error variant is a fully-built `Resp` (a large type); it is boxed so the
+/// `Result` stays pointer-sized on the hot path (`result_large_err`). Callers
+/// deref it (`return *resp`) to hand the response back.
 pub(crate) fn open_workspace(
     snapshot: &crate::config::Settings,
-) -> std::result::Result<Box<dyn crate::workspace::Workspace>, Resp> {
+) -> std::result::Result<Box<dyn crate::workspace::Workspace>, Box<Resp>> {
     crate::workspace::create_workspace(&snapshot.workspace)
-        .map_err(|e| bad_request(&format!("workspace open failed: {e}")))
+        .map_err(|e| Box::new(bad_request(&format!("workspace open failed: {e}"))))
 }
 
 /// Build a JSON response with the given status from any serializable value.

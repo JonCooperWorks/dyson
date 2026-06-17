@@ -21,7 +21,7 @@
 //
 //   Dyson spawns: codex exec \
 //       --json \
-//       --full-auto \                     (or --dangerously-bypass-approvals-and-sandbox)
+//       --sandbox workspace-write \       (or --dangerously-bypass-approvals-and-sandbox)
 //       --ephemeral \
 //       --skip-git-repo-check \
 //       --model <model> \
@@ -32,7 +32,7 @@
 //   The key flags:
 //     exec                                Non-interactive mode
 //     --json                              Emit JSONL events to stdout
-//     --full-auto                         Skip approval prompts, keep sandbox
+//     --sandbox workspace-write           Keep the sandbox, allow workspace writes
 //     --dangerously-bypass-approvals-and-sandbox
 //                                         Only when --dangerous-no-sandbox is set
 //     --ephemeral                         Don't persist session files
@@ -175,12 +175,15 @@ impl CodexClient {
         ];
 
         // Only bypass all approvals and sandboxing when explicitly requested
-        // via --dangerous-no-sandbox.  Otherwise use --full-auto which keeps
-        // Codex's workspace sandbox active but skips most approval prompts.
+        // via --dangerous-no-sandbox.  Otherwise keep Codex's workspace
+        // sandbox active with `--sandbox workspace-write` (the non-deprecated
+        // replacement for `--full-auto`; in exec mode approvals are `never`
+        // regardless, so this grants write access without prompting).
         if self.dangerous_no_sandbox {
             args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
         } else {
-            args.push("--full-auto".to_string());
+            args.push("--sandbox".to_string());
+            args.push("workspace-write".to_string());
         }
 
         args.push("--model".to_string());
@@ -197,8 +200,11 @@ impl CodexClient {
 
             if let Some(token) = mcp_bearer_token {
                 args.push("-c".to_string());
+                // Codex serialises streamable-HTTP MCP auth under `http_headers`
+                // (see `codex mcp get`); a bare `headers` key is ignored, which
+                // makes Codex hit the workspace MCP server unauthenticated.
                 args.push(format!(
-                    "mcp_servers.dyson-workspace.headers.Authorization=Bearer {token}"
+                    "mcp_servers.dyson-workspace.http_headers.Authorization=Bearer {token}"
                 ));
             }
         }
@@ -774,12 +780,19 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn build_args_uses_full_auto_by_default() {
+    fn build_args_uses_workspace_write_sandbox_by_default() {
         let client = CodexClient::new(Some("codex"), None, false);
         let args = client.build_args("o3", "", "hello", None, None);
+        // `--sandbox workspace-write` is the non-deprecated replacement for
+        // the old `--full-auto`; the value follows the flag as a separate arg.
+        let i = args
+            .iter()
+            .position(|a| a == "--sandbox")
+            .expect("should pass --sandbox when sandbox is enabled");
+        assert_eq!(args.get(i + 1).map(String::as_str), Some("workspace-write"));
         assert!(
-            args.contains(&"--full-auto".to_string()),
-            "should use --full-auto when sandbox is enabled"
+            !args.contains(&"--full-auto".to_string()),
+            "should not use the deprecated --full-auto flag"
         );
         assert!(
             !args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
@@ -846,11 +859,23 @@ mod tests {
             Some("http://127.0.0.1:9999/mcp"),
             Some("secret-token-123"),
         );
+        // Codex's streamable-HTTP MCP config carries static headers under
+        // `http_headers` (verified via `codex mcp get`); there is no bare
+        // `headers` key, so emitting `headers.Authorization` makes Codex call
+        // the server unauthenticated. Mirror the sidecar's `apply_codex_mcp`,
+        // which already uses `http_headers`.
         assert!(
             args.contains(
-                &"mcp_servers.dyson-workspace.headers.Authorization=Bearer secret-token-123"
+                &"mcp_servers.dyson-workspace.http_headers.Authorization=Bearer secret-token-123"
                     .to_string()
-            )
+            ),
+            "bearer must be set under http_headers, got: {args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.starts_with("mcp_servers.dyson-workspace.headers.")),
+            "must not use the bare `headers` key — Codex ignores it"
         );
     }
 

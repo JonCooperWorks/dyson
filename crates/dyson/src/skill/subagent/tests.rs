@@ -288,9 +288,6 @@ struct MockLlm {
     /// Records the `model` field of every `CompletionConfig` the client
     /// receives so tests can assert which model a subagent billed.
     models_seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    /// Records the `system` prompt the client is called with — used to
-    /// assert the composed system prompt a subagent was given.
-    systems_seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl MockLlm {
@@ -299,7 +296,6 @@ impl MockLlm {
             responses: std::sync::Mutex::new(responses),
             fallback: std::sync::Mutex::new(None),
             models_seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            systems_seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -316,10 +312,6 @@ impl MockLlm {
     /// the client in `Box<dyn LlmClient>` so the test can still read it.
     fn models_seen_handle(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
         std::sync::Arc::clone(&self.models_seen)
-    }
-
-    fn systems_seen_handle(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
-        std::sync::Arc::clone(&self.systems_seen)
     }
 }
 
@@ -338,13 +330,12 @@ impl crate::llm::LlmClient for MockLlm {
     async fn stream(
         &self,
         _messages: &[crate::message::Message],
-        system: &str,
+        _system: &str,
         _system_suffix: &str,
         _tools: &[crate::llm::ToolDefinition],
         config: &crate::llm::CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
         self.models_seen.lock().unwrap().push(config.model.clone());
-        self.systems_seen.lock().unwrap().push(system.to_string());
         let events = {
             let mut queue = self.responses.lock().unwrap();
             if queue.is_empty() {
@@ -2197,7 +2188,7 @@ async fn security_engineer_resumes_checkpoint_and_does_not_rerun_completed_tasks
         // first run completes one task per class. The point of this
         // assertion is "the auth_authorization hunt ran" — verify that
         // explicitly so the test stays meaningful as the taxonomy grows.
-        assert!(checkpoint.completed_tasks.len() >= 1);
+        assert!(!checkpoint.completed_tasks.is_empty());
         assert!(
             checkpoint
                 .completed_tasks
@@ -2266,7 +2257,7 @@ async fn security_engineer_resumes_checkpoint_and_does_not_rerun_completed_tasks
     // checkpoint includes one completed task per class. Verify the
     // recon-supplied auth_authorization hunt (`hunt-001`) is among them
     // rather than asserting an exact count.
-    assert!(checkpoint.completed_tasks.len() >= 1);
+    assert!(!checkpoint.completed_tasks.is_empty());
     assert!(
         checkpoint
             .completed_tasks

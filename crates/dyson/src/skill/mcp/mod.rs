@@ -1179,11 +1179,11 @@ impl McpPromptsTool {
                 message: format!("failed to parse prompts/get: {e}"),
             })?;
         let mut out = String::new();
-        if let Some(desc) = got.description.as_deref().map(sanitize_mcp_description) {
-            if !desc.is_empty() {
-                out.push_str(&desc);
-                out.push_str("\n\n");
-            }
+        if let Some(desc) = got.description.as_deref().map(sanitize_mcp_description)
+            && !desc.is_empty()
+        {
+            out.push_str(&desc);
+            out.push_str("\n\n");
         }
         for msg in &got.messages {
             // A prompt message carries a single content block.  Render

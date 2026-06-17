@@ -303,7 +303,7 @@ mod tests {
         // update this test (and the path is no longer load-bearing).
         let ids: HashSet<String> = (0..32).map(|_| make_run_id()).collect();
         assert!(
-            ids.len() >= 1 && ids.len() <= 2,
+            !ids.is_empty() && ids.len() <= 2,
             "make_run_id is time+pid based; 32 same-second calls collapse to 1-2 ids, got {}",
             ids.len()
         );

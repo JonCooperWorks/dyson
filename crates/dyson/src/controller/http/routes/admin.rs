@@ -467,7 +467,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     {
         let mut ws = match open_workspace(&snapshot) {
             Ok(w) => w,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
         if let Some(identity_doc) = body.identity_doc.as_deref() {
             if !looks_like_full_identity_doc(identity_doc) {
@@ -925,7 +925,7 @@ pub(super) async fn post_skill_install(
     let snapshot = state.settings_snapshot();
     let workspace = match open_workspace(&snapshot) {
         Ok(w) => Arc::new(RwLock::new(w)),
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     match crate::tool::skill_marketplace::install_skill_package_to_workspace(
         &workspace,
@@ -964,7 +964,7 @@ pub(super) async fn delete_skill(
     let snapshot = state.settings_snapshot();
     let workspace = match open_workspace(&snapshot) {
         Ok(w) => Arc::new(RwLock::new(w)),
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     match crate::tool::skill_marketplace::remove_skill_from_workspace(&workspace, skill.trim())
         .await
@@ -1294,7 +1294,7 @@ pub fn preseed_configure_hash(dyson_home: &Path) -> std::io::Result<bool> {
     let salt = SaltString::generate(&mut OsRng);
     let hash = Argon2::default()
         .hash_password(secret.as_bytes(), &salt)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("argon2: {e}")))?
+        .map_err(|e| std::io::Error::other(format!("argon2: {e}")))?
         .to_string();
 
     std::fs::create_dir_all(dyson_home)?;
