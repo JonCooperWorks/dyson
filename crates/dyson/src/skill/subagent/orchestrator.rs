@@ -295,6 +295,7 @@ impl Tool for OrchestratorTool {
                     config_name: self.config.name,
                     provider: self.provider.clone(),
                     model: self.model.clone(),
+                    stage_models: super::security_engineer::resolve_stage_models(),
                     client: self.client.clone(),
                     sandbox: Arc::clone(&self.sandbox),
                     workspace: self.workspace.clone(),

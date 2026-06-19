@@ -1023,6 +1023,7 @@ mod tests {
             started_at: 0,
             finished_at: 0,
             summary: String::new(),
+            model: String::new(),
         });
         assert!(
             stage_completed(&c, SecurityHarnessStage::Recon),
@@ -1335,7 +1336,8 @@ mod tests {
         // returns `()` (no fatal error bubbles up to kill the run).
         let mut c = cp();
         c.pending_tasks.push(pending("t-ok", "auth_authorization"));
-        c.pending_tasks.push(pending("t-bad", "ssrf_outbound_network"));
+        c.pending_tasks
+            .push(pending("t-bad", "ssrf_outbound_network"));
         let ok = HuntDispatch {
             label: "auth_authorization".into(),
             stage_prompt: String::new(),

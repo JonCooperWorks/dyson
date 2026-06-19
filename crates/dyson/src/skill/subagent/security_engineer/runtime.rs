@@ -5,6 +5,7 @@
 //! resolution of provider/model/sandbox/etc., then handed to
 //! `run_security_harness`.  Stage runners use it read-only.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -24,6 +25,14 @@ pub(crate) struct SecurityHarnessRuntime {
     pub config_name: &'static str,
     pub provider: LlmProvider,
     pub model: String,
+    /// Per-stage model overrides. Resolved once at construction from
+    /// `DYSON_SEC_<STAGE>_MODEL` env vars. A stage present here runs on a
+    /// different model than `model` while reusing the SAME provider + client
+    /// (same-provider cross-model separation — the model is just a per-request
+    /// string for every provider Dyson talks to). Stages absent from the map
+    /// fall back to `model`. Deterministic stages (Gapfill/Dedupe/Feedback)
+    /// never spawn a child, so an override for them is inert.
+    pub stage_models: BTreeMap<SecurityHarnessStage, String>,
     pub client: RateLimitedHandle<Box<dyn LlmClient>>,
     pub sandbox: Arc<dyn Sandbox>,
     pub workspace: Option<WorkspaceHandle>,
@@ -41,6 +50,19 @@ pub(crate) struct SecurityHarnessRuntime {
     pub max_tokens: u32,
 }
 
+impl SecurityHarnessRuntime {
+    /// The model that should run `stage` — the per-stage override if one is
+    /// configured, otherwise the run default. Used by both `spawn_stage` (to
+    /// pick the child model) and the harness loop (to record provenance in
+    /// stage history), so the two can never disagree about what ran.
+    pub(super) fn stage_model(&self, stage: SecurityHarnessStage) -> &str {
+        self.stage_models
+            .get(&stage)
+            .map(String::as_str)
+            .unwrap_or(self.model.as_str())
+    }
+}
+
 pub(super) async fn spawn_stage(
     rt: &SecurityHarnessRuntime,
     stage: SecurityHarnessStage,
@@ -56,7 +78,7 @@ pub(super) async fn spawn_stage(
         rt.user_message, checkpoint_json
     );
     let settings = AgentSettings::for_child(
-        rt.model.clone(),
+        rt.stage_model(stage).to_string(),
         rt.provider.clone(),
         max_iterations,
         rt.max_tokens,

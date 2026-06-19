@@ -272,6 +272,13 @@ pub struct StageHistoryEntry {
     pub finished_at: u64,
     #[serde(default)]
     pub summary: String,
+    /// The model that actually ran this stage. Stages can be pinned to a
+    /// different model than the run default (e.g. Validate on a different
+    /// model than Hunt for cross-model adversarial separation), so the
+    /// per-run `ModelMetadata` is not enough to know what judged what.
+    /// Defaulted for backward-compatible reads of pre-v2 checkpoints.
+    #[serde(default)]
+    pub model: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -684,6 +691,7 @@ mod tests {
             started_at: 1,
             finished_at: 2,
             summary: "done".into(),
+            model: "claude".into(),
         });
         let json = serde_json::to_string(&cp).expect("checkpoint should serialize");
         let back: SecurityCheckpoint =
@@ -750,6 +758,7 @@ mod tests {
                 started_at: 10,
                 finished_at: 20,
                 summary: "ok".into(),
+                model: "claude".into(),
             }],
             class_coverage: vec![VulnerabilityClassCoverage {
                 class_id: "auth_authorization".into(),

@@ -172,6 +172,9 @@ pub(super) fn render_report_markdown(
                 entry.status,
                 entry.finished_at.saturating_sub(entry.started_at)
             ));
+            if !entry.model.trim().is_empty() {
+                out.push_str(&format!(" on `{}`", clean_inline(&entry.model)));
+            }
             if !entry.summary.is_empty() {
                 out.push_str(&format!(" - {}", clean_inline(&entry.summary)));
             }

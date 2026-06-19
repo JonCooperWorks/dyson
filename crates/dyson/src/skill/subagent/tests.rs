@@ -2526,6 +2526,7 @@ async fn security_engineer_trace_parse_failure_records_gap_and_reports() {
                 started_at: 1,
                 finished_at: 2,
                 summary: "done".into(),
+                model: String::new(),
             });
     }
 
@@ -3909,6 +3910,7 @@ async fn security_engineer_e2e_report_repair_path() {
                 started_at: 1,
                 finished_at: 2,
                 summary: "done".into(),
+                model: String::new(),
             });
     }
 
@@ -4032,6 +4034,7 @@ async fn security_engineer_e2e_resume_at_validate() {
                 started_at: 1,
                 finished_at: 2,
                 summary: "done".into(),
+                model: String::new(),
             });
     }
 
@@ -4172,6 +4175,7 @@ async fn security_engineer_e2e_resume_at_report() {
                 started_at: 1,
                 finished_at: 2,
                 summary: "done".into(),
+                model: String::new(),
             });
     }
 

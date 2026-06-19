@@ -96,7 +96,13 @@ const DIRECT_TOOLS: &[&str] = &[
 ];
 
 pub const SECURITY_HARNESS_SCHEMA_VERSION: u32 = 1;
-pub const SECURITY_HARNESS_VERSION: &str = "security-harness-v1";
+pub const SECURITY_HARNESS_VERSION: &str = "security-harness-v2";
+/// Harness versions whose checkpoints this binary can still resume. All v1→v2
+/// changes are additive (`#[serde(default)]` fields, a new optional Judgment
+/// stage), so a v1 checkpoint deserializes and resumes cleanly — any new stage
+/// simply isn't in its `stage_history` yet and runs once. Keep the current
+/// version in this list.
+pub const SUPPORTED_HARNESS_VERSIONS: &[&str] = &["security-harness-v1", "security-harness-v2"];
 /// Pure runaway backstop on class-specialist hunters spawned in one Hunt
 /// stage.  Specialist count is driven by the work list (one per applicable
 /// class), not by this number — it only stops a pathological recon that
@@ -153,6 +159,47 @@ pub fn security_engineer_config() -> OrchestratorConfig {
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn harness_stages() -> &'static [SecurityHarnessStage] {
     STAGES
+}
+
+/// Per-stage model overrides, sourced from `DYSON_SEC_<STAGE>_MODEL` env vars.
+///
+/// Pinning a different model to a later stage than Hunt is the cheapest path to
+/// Cloudflare-VVS-style cross-model separation: the run's findings get judged by
+/// different weights than the ones that produced them. The override reuses the
+/// run's provider + client (a model is just a per-request string), so this is
+/// same-provider only — cross-provider would need a second authenticated
+/// client. Empty or unset vars fall back to the run model. Mirrors the env-key
+/// fallback pattern in `llm::registry::resolve_api_key`.
+pub(crate) fn resolve_stage_models() -> std::collections::BTreeMap<SecurityHarnessStage, String> {
+    resolve_stage_models_from(|var| std::env::var(var).ok())
+}
+
+/// Only the LLM-backed stages are listed; Gapfill/Dedupe/Feedback run no child,
+/// so an override would be inert.
+const STAGE_MODEL_ENV: &[(SecurityHarnessStage, &str)] = &[
+    (SecurityHarnessStage::Recon, "DYSON_SEC_RECON_MODEL"),
+    (SecurityHarnessStage::Hunt, "DYSON_SEC_HUNT_MODEL"),
+    (SecurityHarnessStage::Validate, "DYSON_SEC_VALIDATE_MODEL"),
+    (SecurityHarnessStage::Trace, "DYSON_SEC_TRACE_MODEL"),
+    (SecurityHarnessStage::Report, "DYSON_SEC_REPORT_MODEL"),
+];
+
+/// Pure core of [`resolve_stage_models`], taking the env lookup as a closure so
+/// it can be unit-tested without mutating process-global environment (which is
+/// racy under the parallel test runner and `unsafe` on edition 2024).
+fn resolve_stage_models_from(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> std::collections::BTreeMap<SecurityHarnessStage, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for (stage, var) in STAGE_MODEL_ENV {
+        if let Some(model) = lookup(var) {
+            let model = model.trim();
+            if !model.is_empty() {
+                out.insert(*stage, model.to_string());
+            }
+        }
+    }
+    out
 }
 
 pub(crate) async fn run_security_harness(rt: SecurityHarnessRuntime) -> Result<ToolOutput> {
@@ -513,6 +560,7 @@ async fn run_security_harness_inner(
             started_at: stage_started,
             finished_at: stage_finished,
             summary: stage_summary(&checkpoint, *stage),
+            model: rt.stage_model(*stage).to_string(),
         });
         checkpoint.updated_at = stage_finished;
         if let Err(e) = store.save(&checkpoint).await {
@@ -567,6 +615,10 @@ async fn run_security_harness_inner(
             "target_path": report.target.repo_path,
             "provider": provider_label(&rt.provider),
             "model": rt.model,
+            // Per-stage overrides (empty when every stage ran the run model).
+            // Lets the artefact reader see e.g. validate judged on a different
+            // model than hunt without parsing the stage-history table.
+            "stage_models": serde_json::to_value(&rt.stage_models).unwrap_or_default(),
             "checkpoint_path": checkpoint.checkpoint_path(),
             "stage_count": checkpoint.stage_history.len(),
         });
@@ -644,6 +696,54 @@ mod specialist_tests {
         assert!(!should_resume(&parse(json!({"run_id": ""}))));
         assert!(!should_resume(&parse(json!({"run_id": "   "}))));
         assert!(!should_resume(&parse(json!({}))));
+    }
+
+    #[test]
+    fn resolve_stage_models_trims_and_skips_blank_or_unset() {
+        let envs = std::collections::HashMap::from([
+            ("DYSON_SEC_VALIDATE_MODEL", "  openrouter/judge-model  "),
+            ("DYSON_SEC_REPORT_MODEL", "   "), // blank → must be skipped
+        ]);
+        let map = super::resolve_stage_models_from(|var| envs.get(var).map(|s| s.to_string()));
+        assert_eq!(
+            map.get(&SecurityHarnessStage::Validate).map(String::as_str),
+            Some("openrouter/judge-model"),
+            "set var should be trimmed and recorded"
+        );
+        assert!(
+            !map.contains_key(&SecurityHarnessStage::Report),
+            "a blank env value must not create an override (would pin an empty model)"
+        );
+        assert!(
+            !map.contains_key(&SecurityHarnessStage::Hunt),
+            "an unset stage stays on the run default"
+        );
+    }
+
+    #[test]
+    fn resolve_stage_models_only_covers_llm_stages() {
+        // Even when every var is set, only the LLM-backed stages get overrides;
+        // the deterministic stages (Gapfill/Dedupe/Feedback) spawn no child.
+        let all = super::resolve_stage_models_from(|_| Some("x".to_string()));
+        for stage in [
+            SecurityHarnessStage::Recon,
+            SecurityHarnessStage::Hunt,
+            SecurityHarnessStage::Validate,
+            SecurityHarnessStage::Trace,
+            SecurityHarnessStage::Report,
+        ] {
+            assert!(all.contains_key(&stage), "{stage} should be overridable");
+        }
+        for stage in [
+            SecurityHarnessStage::Gapfill,
+            SecurityHarnessStage::Dedupe,
+            SecurityHarnessStage::Feedback,
+        ] {
+            assert!(
+                !all.contains_key(&stage),
+                "{stage} is deterministic and must not be overridable"
+            );
+        }
     }
 
     #[test]
@@ -1053,7 +1153,10 @@ mod specialist_tests {
         let snap = parse_snapshot(&err_out.content);
         assert_eq!(snap["completed"], false);
         assert_eq!(snap["failed_at_stage"], "validate");
-        assert_eq!(snap["failure_message"], "no JSON object found in stage output");
+        assert_eq!(
+            snap["failure_message"],
+            "no JSON object found in stage output"
+        );
         // The original error text must remain readable in the body too —
         // the comment-stripping markdown renderer leaves it intact.
         assert!(err_out.content.contains("validate failed"));

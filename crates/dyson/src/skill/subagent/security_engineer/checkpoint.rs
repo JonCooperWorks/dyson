@@ -134,11 +134,11 @@ pub(super) fn parse_checkpoint(body: &str) -> std::result::Result<SecurityCheckp
             checkpoint.schema_version, SECURITY_HARNESS_SCHEMA_VERSION
         ));
     }
-    if checkpoint.harness_version != super::SECURITY_HARNESS_VERSION {
+    if !super::SUPPORTED_HARNESS_VERSIONS.contains(&checkpoint.harness_version.as_str()) {
         return Err(format!(
-            "unsupported checkpoint harness_version {}; expected {}",
+            "unsupported checkpoint harness_version {}; supported {:?}",
             checkpoint.harness_version,
-            super::SECURITY_HARNESS_VERSION
+            super::SUPPORTED_HARNESS_VERSIONS
         ));
     }
     Ok(checkpoint)
@@ -291,6 +291,29 @@ mod tests {
         Arc::new(tokio::sync::RwLock::new(
             Box::new(InMemoryWorkspace::new()) as Box<dyn crate::workspace::Workspace>
         ))
+    }
+
+    #[test]
+    fn parse_checkpoint_accepts_every_supported_harness_version_and_rejects_others() {
+        // The v1→v2 changes are additive/defaulted, so a v1 checkpoint must
+        // still resume on a v2 binary. An unknown version is rejected loudly.
+        let base = fresh_checkpoint("sec-ver-1", "/repo", 1);
+        for version in super::super::SUPPORTED_HARNESS_VERSIONS {
+            let mut cp = base.clone();
+            cp.harness_version = (*version).to_string();
+            let body = serde_json::to_string(&cp).expect("serialize");
+            assert!(
+                super::parse_checkpoint(&body).is_ok(),
+                "supported version {version} should parse"
+            );
+        }
+        let mut bad = base;
+        bad.harness_version = "security-harness-v0".into();
+        let body = serde_json::to_string(&bad).expect("serialize");
+        assert!(
+            super::parse_checkpoint(&body).is_err(),
+            "an unknown harness_version must be rejected"
+        );
     }
 
     #[test]
