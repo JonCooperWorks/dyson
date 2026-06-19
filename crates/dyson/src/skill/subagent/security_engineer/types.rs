@@ -269,6 +269,27 @@ impl Default for ReportValidationState {
     }
 }
 
+/// Run-health signals for shallow/degraded-run detection (Cloudflare's VDH
+/// flags hunters that finish suspiciously fast or with nothing as "shallow").
+/// All fields are observational and additive; a degraded specialist or a fast
+/// stage never fails the run — it surfaces a blind spot in the report so the
+/// operator knows coverage was reduced.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunHealth {
+    /// Hunt specialists that errored, timed out, or failed to spawn (each is
+    /// already folded as a coverage gap; this is the count for the report).
+    #[serde(default)]
+    pub degraded_specialists: u32,
+    /// Classes given a one-shot retry after a degraded specialist, when the
+    /// `DYSON_SEC_REQUEUE_SHALLOW` opt-in is set. Bounds retries to once each.
+    #[serde(default)]
+    pub requeued_classes: Vec<String>,
+    /// LLM-backed stages that completed suspiciously fast (`stage:Ns`), a hint
+    /// the model did little work before returning.
+    #[serde(default)]
+    pub fast_stages: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StageHistoryEntry {
     pub stage: SecurityHarnessStage,
@@ -319,6 +340,8 @@ pub struct SecurityCheckpoint {
     #[serde(default)]
     pub report_validation_state: ReportValidationState,
     #[serde(default)]
+    pub run_health: RunHealth,
+    #[serde(default)]
     pub stage_history: Vec<StageHistoryEntry>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -354,6 +377,7 @@ impl SecurityCheckpoint {
             class_coverage: Vec::new(),
             report_draft: None,
             report_validation_state: ReportValidationState::default(),
+            run_health: RunHealth::default(),
             stage_history: Vec::new(),
             created_at: now,
             updated_at: now,

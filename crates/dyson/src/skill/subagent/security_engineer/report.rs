@@ -73,6 +73,8 @@ pub(super) fn render_report_markdown(
             .count()
     ));
 
+    render_run_health(&mut out, report, checkpoint);
+
     out.push_str("## Findings\n\n");
     if report.findings.is_empty() {
         out.push_str("No confirmed findings were reported.\n\n");
@@ -183,6 +185,63 @@ pub(super) fn render_report_markdown(
     }
 
     out
+}
+
+/// Render the Run Health section: shallow/degraded-coverage signals so an
+/// operator can tell when a "clean" run actually had reduced coverage. Always
+/// emitted (even on a healthy run) so its absence is never ambiguous.
+pub(super) fn render_run_health(
+    out: &mut String,
+    report: &SecurityHarnessReport,
+    checkpoint: &SecurityCheckpoint,
+) {
+    let health = &checkpoint.run_health;
+    let hunted_classes = report
+        .class_coverage
+        .iter()
+        .filter(|class| class.hunted)
+        .count();
+    let classes_with_findings: BTreeSet<&str> = report
+        .findings
+        .iter()
+        .map(|finding| finding.vulnerability_class.as_str())
+        .collect();
+    let cleared = report
+        .class_coverage
+        .iter()
+        .filter(|class| class.hunted && !classes_with_findings.contains(class.class_id.as_str()))
+        .count();
+
+    out.push_str("## Run Health\n\n");
+    out.push_str(&format!(
+        "- Degraded hunt specialists: {}\n",
+        health.degraded_specialists
+    ));
+    out.push_str(&format!(
+        "- Hunted classes cleared (no findings): {cleared} of {hunted_classes} hunted\n"
+    ));
+    if !health.requeued_classes.is_empty() {
+        out.push_str(&format!(
+            "- Retried classes (shallow-requeue): {}\n",
+            inline_code_list(&health.requeued_classes)
+        ));
+    }
+    if !health.fast_stages.is_empty() {
+        out.push_str(&format!(
+            "- Possibly-shallow stages (fast return): {}\n",
+            inline_code_list(&health.fast_stages)
+        ));
+    }
+    // The one signal worth shouting about: nothing found AND something broke.
+    // A zero-finding run with degraded specialists is far likelier "we missed
+    // it" than "the code is clean" — tell the operator to re-run.
+    if report.findings.is_empty() && health.degraded_specialists > 0 {
+        out.push_str(
+            "- WARNING: zero confirmed findings with degraded specialists — coverage is \
+             likely incomplete; re-run (optionally with DYSON_SEC_REQUEUE_SHALLOW=1).\n",
+        );
+    }
+    out.push('\n');
 }
 
 pub(super) fn render_finding_markdown(
@@ -648,6 +707,42 @@ mod tests {
         assert!(
             out.trim_end().ends_with("````"),
             "closing fence should match the escalated opener: {out}"
+        );
+    }
+
+    #[test]
+    fn run_health_section_surfaces_degraded_fast_and_requeued_signals() {
+        let mut cp = cp_with_target("/repo");
+        cp.run_health.degraded_specialists = 2;
+        cp.run_health.fast_stages = vec!["recon:1s".into()];
+        cp.run_health.requeued_classes = vec!["auth_authorization".into()];
+        // Zero confirmed findings + degraded specialists → the loud warning.
+        let report = report_with(&cp, vec![]);
+        let md = render_report_markdown(&report, &cp);
+        assert!(md.contains("## Run Health"), "section must always render");
+        assert!(md.contains("Degraded hunt specialists: 2"));
+        assert!(md.contains("recon:1s"), "fast stages must be listed");
+        assert!(
+            md.contains("auth_authorization"),
+            "retried classes must be listed"
+        );
+        assert!(
+            md.contains("WARNING"),
+            "zero findings with degraded specialists must warn to re-run"
+        );
+    }
+
+    #[test]
+    fn run_health_section_omits_warning_when_findings_present() {
+        let mut cp = cp_with_target("/repo");
+        cp.run_health.degraded_specialists = 1;
+        // A confirmed finding in the only hunted class → not a shallow run.
+        let report = report_with(&cp, vec![finding("finding-001", "rc")]);
+        let md = render_report_markdown(&report, &cp);
+        assert!(md.contains("## Run Health"));
+        assert!(
+            !md.contains("WARNING"),
+            "findings present means the run is not shallow — no warning"
         );
     }
 

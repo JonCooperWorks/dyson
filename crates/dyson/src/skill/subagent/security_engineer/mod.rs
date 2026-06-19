@@ -65,9 +65,9 @@ pub use self::{
     report::dedupe_findings,
     taxonomy::{VulnerabilityClassDefinition, vulnerability_taxonomy},
     types::{
-        CoverageGap, DedupeGroup, ModelMetadata, ReportValidationState, SecurityCheckpoint,
-        SecurityFinding, SecurityHarnessReport, SecurityHarnessStage, SecurityTask,
-        StageHistoryEntry, TargetRef, TaskStatus, TraceResult, ValidationDecision,
+        CoverageGap, DedupeGroup, ModelMetadata, ReportValidationState, RunHealth,
+        SecurityCheckpoint, SecurityFinding, SecurityHarnessReport, SecurityHarnessStage,
+        SecurityTask, StageHistoryEntry, TargetRef, TaskStatus, TraceResult, ValidationDecision,
         ValidationDecisionKind, VulnerabilityClassCoverage,
     },
 };
@@ -122,6 +122,26 @@ pub(crate) const RECON_MAX_ITERATIONS: usize = 60;
 pub(crate) const HUNT_MAX_ITERATIONS: usize = 28;
 pub(crate) const VALIDATE_MAX_ITERATIONS: usize = 16;
 pub(crate) const TRACE_MAX_ITERATIONS: usize = 16;
+
+/// A stage finishing faster than this (and that runs a child) is flagged as a
+/// possible shallow run in the report's Run Health section. Real LLM stages do
+/// many tool calls and take far longer; a sub-2s return means the model barely
+/// engaged. Purely observational — never fails the run.
+const FAST_STAGE_THRESHOLD_SECS: u64 = 2;
+
+/// Whether `stage` spawns a child agent (the deterministic bookkeeping stages —
+/// Gapfill/Dedupe/Feedback — legitimately finish instantly and must not be
+/// flagged as shallow).
+fn is_llm_backed_stage(stage: SecurityHarnessStage) -> bool {
+    matches!(
+        stage,
+        SecurityHarnessStage::Recon
+            | SecurityHarnessStage::Hunt
+            | SecurityHarnessStage::Validate
+            | SecurityHarnessStage::Trace
+            | SecurityHarnessStage::Report
+    )
+}
 
 const STAGES: &[SecurityHarnessStage] = &[
     SecurityHarnessStage::Recon,
@@ -554,6 +574,17 @@ async fn run_security_harness_inner(
         }
 
         let stage_finished = unix_seconds(std::time::SystemTime::now());
+        // Health signal: an LLM-backed stage that returns almost instantly
+        // probably did little real work (a shallow recon/hunt, a validator that
+        // rubber-stamped). The deterministic stages are legitimately instant, so
+        // they are excluded. Recorded for the report, never fatal.
+        let elapsed = stage_finished.saturating_sub(stage_started);
+        if is_llm_backed_stage(*stage) && elapsed < FAST_STAGE_THRESHOLD_SECS {
+            checkpoint
+                .run_health
+                .fast_stages
+                .push(format!("{stage}:{elapsed}s"));
+        }
         checkpoint.stage_history.push(StageHistoryEntry {
             stage: *stage,
             status: "completed".into(),
@@ -584,6 +615,20 @@ async fn run_security_harness_inner(
     if let Err(e) = store.save(&checkpoint).await {
         return Ok(ToolOutput::error(e));
     }
+
+    emit_checkpoint(
+        &mut out,
+        rt.events.as_ref(),
+        CheckpointEvent {
+            message: format!(
+                "security_engineer: health degraded={} requeued={} fast_stages={}",
+                checkpoint.run_health.degraded_specialists,
+                checkpoint.run_health.requeued_classes.len(),
+                checkpoint.run_health.fast_stages.len(),
+            ),
+            progress: Some(0.97),
+        },
+    );
 
     let report = checkpoint
         .report_draft

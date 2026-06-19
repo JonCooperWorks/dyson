@@ -38,6 +38,19 @@ use super::{
 
 const HUNT_CONCURRENCY: usize = 6;
 
+/// Whether the opt-in shallow-hunt requeue is enabled. Off by default; any
+/// truthy `DYSON_SEC_REQUEUE_SHALLOW` value (set, non-empty, not `0`/`false`)
+/// turns it on. A degraded class specialist then gets one extra attempt before
+/// its blind spot is recorded as a coverage gap.
+fn requeue_shallow_enabled() -> bool {
+    std::env::var("DYSON_SEC_REQUEUE_SHALLOW")
+        .map(|v| {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
 /// Hard wall-clock backstop for a single Hunt specialist child.
 ///
 /// This is a COARSE runaway guard, not the primary anti-hang mechanism — that
@@ -317,13 +330,15 @@ pub(super) fn fold_hunt_wave(
     aggregate: &mut ToolOutput,
     results: Vec<HuntOutcome>,
 ) {
+    // Read the opt-in once per wave, not once per degraded specialist.
+    let requeue_enabled = requeue_shallow_enabled();
     for (d, res) in results {
         match res {
             Ok((raw, stage_out)) => {
                 fold_hunt_result(checkpoint, aggregate, &d, raw, stage_out);
             }
             Err(e) => {
-                fold_hunt_degraded(checkpoint, aggregate, &d, &e);
+                fold_hunt_degraded(checkpoint, aggregate, &d, &e, requeue_enabled);
             }
         }
     }
@@ -341,7 +356,37 @@ pub(super) fn fold_hunt_degraded(
     aggregate: &mut ToolOutput,
     d: &HuntDispatch,
     err: &str,
+    requeue_enabled: bool,
 ) {
+    // Health signal: every degraded specialist is counted for the report's Run
+    // Health section, whether or not it is retried.
+    checkpoint.run_health.degraded_specialists =
+        checkpoint.run_health.degraded_specialists.saturating_add(1);
+
+    // Opt-in one-shot requeue (DYSON_SEC_REQUEUE_SHALLOW): leave the batch
+    // PENDING so the wave loop re-dispatches this class exactly once more. The
+    // retry is bounded both per-class (`requeued_classes`) and globally
+    // (`HUNT_SPECIALIST_BACKSTOP`), so a persistently-failing class still
+    // terminates the wave loop after its second attempt falls through below.
+    let retry =
+        d.is_class && requeue_enabled && !checkpoint.run_health.requeued_classes.contains(&d.label);
+    if retry {
+        checkpoint.run_health.requeued_classes.push(d.label.clone());
+        checkpoint.coverage_gaps.push(CoverageGap {
+            area: d.label.clone(),
+            reason: format!("hunt specialist did not complete; retrying once: {err}"),
+            risk: "unknown".into(),
+        });
+        aggregate.checkpoints.push(CheckpointEvent {
+            message: format!(
+                "security_engineer: hunt: class {} degraded (retrying once)",
+                d.label
+            ),
+            progress: Some(0.35),
+        });
+        return;
+    }
+
     if d.is_class {
         let ids: BTreeSet<String> = d.batch_ids.iter().cloned().collect();
         complete_tasks(checkpoint, &ids);
@@ -1271,7 +1316,7 @@ mod tests {
             is_class: true,
         };
         let mut aggregate = ToolOutput::success("");
-        fold_hunt_degraded(&mut c, &mut aggregate, &dispatch, "upstream stalled");
+        fold_hunt_degraded(&mut c, &mut aggregate, &dispatch, "upstream stalled", false);
         assert_eq!(c.findings_so_far.len(), 0, "degraded fold adds no findings");
         assert!(
             c.completed_tasks.iter().any(|t| t.id == "t1"),
@@ -1314,7 +1359,7 @@ mod tests {
             is_class: false,
         };
         let mut aggregate = ToolOutput::success("");
-        fold_hunt_degraded(&mut c, &mut aggregate, &dispatch, "timed out");
+        fold_hunt_degraded(&mut c, &mut aggregate, &dispatch, "timed out", false);
         assert!(
             c.coverage_gaps.iter().any(|g| g.area == "flask"),
             "stack specialist failure should still record a coverage gap"
@@ -1325,6 +1370,69 @@ mod tests {
                 .iter()
                 .any(|cp| cp.message.contains("hunt: class")),
             "stack specialists must not emit a per-class line even when degraded"
+        );
+    }
+
+    #[test]
+    fn fold_hunt_degraded_counts_every_degraded_specialist() {
+        let mut c = cp();
+        c.pending_tasks.push(pending("t1", "auth_authorization"));
+        let dispatch = HuntDispatch {
+            label: "auth_authorization".into(),
+            stage_prompt: String::new(),
+            checkpoint: c.clone(),
+            batch_ids: vec!["t1".into()],
+            is_class: true,
+        };
+        let mut aggregate = ToolOutput::success("");
+        fold_hunt_degraded(&mut c, &mut aggregate, &dispatch, "stalled", false);
+        assert_eq!(
+            c.run_health.degraded_specialists, 1,
+            "a degraded specialist must be counted for the Run Health section"
+        );
+    }
+
+    #[test]
+    fn fold_hunt_degraded_requeues_a_class_once_then_completes_it() {
+        // With requeue enabled, the first degradation leaves the batch PENDING
+        // (so the wave loop re-dispatches it) and records the class as retried;
+        // a second degradation falls through to mark the batch complete, so the
+        // wave loop is guaranteed to terminate.
+        let mut c = cp();
+        c.pending_tasks.push(pending("t1", "auth_authorization"));
+        let dispatch = HuntDispatch {
+            label: "auth_authorization".into(),
+            stage_prompt: String::new(),
+            checkpoint: c.clone(),
+            batch_ids: vec!["t1".into()],
+            is_class: true,
+        };
+        let mut aggregate = ToolOutput::success("");
+
+        // First failure with requeue on: batch stays pending, class recorded.
+        fold_hunt_degraded(&mut c, &mut aggregate, &dispatch, "stalled", true);
+        assert!(
+            c.pending_tasks.iter().any(|t| t.id == "t1"),
+            "requeue must leave the batch pending for a second attempt"
+        );
+        assert!(c.completed_tasks.is_empty(), "nothing completed on requeue");
+        assert_eq!(c.run_health.requeued_classes, vec!["auth_authorization"]);
+
+        // Second failure (still requeue on): already retried → falls through to
+        // complete, terminating the wave loop.
+        fold_hunt_degraded(&mut c, &mut aggregate, &dispatch, "stalled again", true);
+        assert!(
+            c.completed_tasks.iter().any(|t| t.id == "t1"),
+            "the second degradation must mark the batch complete (bounded retry)"
+        );
+        assert_eq!(
+            c.run_health.requeued_classes.len(),
+            1,
+            "a class is retried at most once"
+        );
+        assert_eq!(
+            c.run_health.degraded_specialists, 2,
+            "both degraded attempts are counted"
         );
     }
 
