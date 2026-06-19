@@ -28,15 +28,34 @@ use super::taxonomy::{
 };
 use super::types::{
     CoverageGap, HuntStageOutput, JudgmentStageOutput, ReconStageOutput, ReportValidationState,
-    SecurityCheckpoint, SecurityHarnessReport, SecurityHarnessStage, SecurityTask, SeverityRollup,
-    TaskStatus, TraceStageOutput, ValidationDecisionKind,
+    SecurityCheckpoint, SecurityFinding, SecurityHarnessReport, SecurityHarnessStage, SecurityTask,
+    SeverityRollup, TaskStatus, TraceStageOutput, ValidateStageOutput, ValidationDecisionKind,
 };
 use super::{
     HUNT_MAX_ITERATIONS, HUNT_SPECIALIST_BACKSTOP, JUDGMENT_MAX_ITERATIONS, RECON_MAX_ITERATIONS,
     TRACE_MAX_ITERATIONS, VALIDATE_MAX_ITERATIONS,
 };
 
-const HUNT_CONCURRENCY: usize = 6;
+/// Default in-wave concurrency for specialist/shard children. Overridable via
+/// `DYSON_SEC_HUNT_CONCURRENCY` (clamped to 1..=32). Bounds how many children
+/// the `buffer_unordered` waves poll at once; real LLM concurrency is further
+/// bounded by the client's own limiter underneath.
+const DEFAULT_STAGE_CONCURRENCY: usize = 6;
+
+fn stage_concurrency() -> usize {
+    std::env::var("DYSON_SEC_HUNT_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|n| n.clamp(1, 32))
+        .unwrap_or(DEFAULT_STAGE_CONCURRENCY)
+}
+
+/// Findings per Validate/Trace shard. A stage with this many findings or fewer
+/// runs as a single child (today's behaviour, preserving the validator's
+/// holistic view of a small finding set); larger sets fan out into concurrent
+/// shards keyed per-finding, where cross-finding reasoning is irrelevant
+/// because dedupe is a separate deterministic stage.
+const STAGE_SHARD_SIZE: usize = 8;
 
 /// Whether the opt-in shallow-hunt requeue is enabled. Off by default; any
 /// truthy `DYSON_SEC_REQUEUE_SHALLOW` value (set, non-empty, not `0`/`false`)
@@ -301,7 +320,7 @@ pub(super) async fn dispatch_hunts(
         };
         (d, res)
     }))
-    .buffer_unordered(HUNT_CONCURRENCY)
+    .buffer_unordered(stage_concurrency())
     .collect()
     .await
 }
@@ -563,6 +582,51 @@ pub(super) fn normalize_task_ids(tasks: &mut [SecurityTask], prefix: &str) {
     }
 }
 
+/// Split a checkpoint into per-shard copies, each carrying a chunk of `findings`
+/// in `findings_so_far`. Returns a single shard (the whole set) when
+/// `findings.len() <= STAGE_SHARD_SIZE`, preserving today's single-child
+/// behaviour for small reviews; larger sets fan out.
+fn shard_by_findings(
+    checkpoint: &SecurityCheckpoint,
+    findings: &[SecurityFinding],
+) -> Vec<SecurityCheckpoint> {
+    let size = if findings.len() > STAGE_SHARD_SIZE {
+        STAGE_SHARD_SIZE
+    } else {
+        findings.len().max(1)
+    };
+    findings
+        .chunks(size)
+        .map(|chunk| {
+            let mut cp = checkpoint.clone();
+            cp.findings_so_far = chunk.to_vec();
+            cp
+        })
+        .collect()
+}
+
+/// Run each shard checkpoint through `stage` concurrently (bounded by
+/// [`stage_concurrency`]). Per-finding stages (Validate/Trace) have no
+/// cross-shard dependency — each shard's decisions/traces are keyed by
+/// `finding_id` — so the caller concatenates the results.
+async fn dispatch_checkpoint_shards(
+    rt: &SecurityHarnessRuntime,
+    stage: SecurityHarnessStage,
+    prompt: &str,
+    shards: Vec<SecurityCheckpoint>,
+    max_iterations: usize,
+) -> Vec<std::result::Result<(String, ToolOutput), String>> {
+    use futures_util::stream::StreamExt;
+    futures_util::stream::iter(
+        shards
+            .into_iter()
+            .map(|cp| async move { spawn_stage(rt, stage, prompt, &cp, max_iterations).await }),
+    )
+    .buffer_unordered(stage_concurrency())
+    .collect()
+    .await
+}
+
 pub(super) async fn run_validate_stage(
     rt: &SecurityHarnessRuntime,
     checkpoint: &mut SecurityCheckpoint,
@@ -571,36 +635,49 @@ pub(super) async fn run_validate_stage(
         return Ok(None);
     }
     let prompt = include_str!("../prompts/security_engineer_validate.md");
-    let (raw, stage_out) = spawn_stage(
+    // One shard per up-to-STAGE_SHARD_SIZE findings; the small-review case is a
+    // single child identical to before.
+    let findings = checkpoint.findings_so_far.clone();
+    let shards = shard_by_findings(checkpoint, &findings);
+    let results = dispatch_checkpoint_shards(
         rt,
         SecurityHarnessStage::Validate,
         prompt,
-        checkpoint,
+        shards,
         VALIDATE_MAX_ITERATIONS,
     )
-    .await?;
-    // Shape loose: if the validator returned prose or a wrong-shaped JSON,
-    // we'd rather carry forward zero new decisions than kill the run.
-    // Semantic strict: if the shape is fine but the validator hallucinated
-    // a finding_id, confirmed a finding missing required evidence, or
-    // confirmed a no-vulnerability note, fail loudly — that's a quality-
-    // floor violation, and letting it through would put junk in the report.
-    let validate = match parse_validate_output_shape(&raw) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "validate stage output did not parse as JSON; carrying \
-                 existing decisions, no new decisions added"
-            );
-            super::types::ValidateStageOutput::default()
+    .await;
+
+    let mut aggregate = ToolOutput::success(String::new());
+    let mut decisions = Vec::new();
+    for res in results {
+        // A shard transport error fails the stage, matching the single-child
+        // `?` behaviour — Validate is a quality gate, not best-effort coverage.
+        let (raw, stage_out) = res?;
+        merge_stage_tool_output(&mut aggregate, stage_out);
+        // Shape loose per shard: prose / wrong-shaped JSON drops that shard's
+        // decisions, never the others.
+        match parse_validate_output_shape(&raw) {
+            Ok(v) => decisions.extend(v.decisions),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "validate shard output did not parse as JSON; carrying \
+                     existing decisions, no new decisions from this shard"
+                );
+            }
         }
-    };
-    validate_decisions_semantic(&validate, &checkpoint.findings_so_far)?;
+    }
+
+    // Semantic strict (across ALL shards' decisions): a hallucinated finding_id,
+    // a confirm missing required evidence, or a confirmed no-vulnerability note
+    // fails loudly — letting it through would put junk in the report.
+    let combined = ValidateStageOutput { decisions };
+    validate_decisions_semantic(&combined, &checkpoint.findings_so_far)?;
     checkpoint
         .validation_decisions_so_far
-        .extend(validate.decisions);
-    Ok(Some(stage_out))
+        .extend(combined.decisions);
+    Ok(Some(aggregate))
 }
 
 pub(super) fn run_gapfill_stage(checkpoint: &mut SecurityCheckpoint) {
@@ -649,42 +726,53 @@ pub(super) async fn run_trace_stage(
     rt: &SecurityHarnessRuntime,
     checkpoint: &mut SecurityCheckpoint,
 ) -> std::result::Result<Option<ToolOutput>, String> {
-    let confirmed: Vec<_> = checkpoint
+    let has_confirmed = checkpoint
         .validation_decisions_so_far
         .iter()
-        .filter(|d| d.decision == ValidationDecisionKind::Confirmed)
-        .collect();
-    if confirmed.is_empty() {
+        .any(|d| d.decision == ValidationDecisionKind::Confirmed);
+    if !has_confirmed {
         return Ok(None);
     }
     let prompt = include_str!("../prompts/security_engineer_trace.md");
-    let (raw, stage_out) = spawn_stage(
+    // Shard the full finding set (each shard's child traces its own confirmed
+    // findings); single child for a small review.
+    let findings = checkpoint.findings_so_far.clone();
+    let shards = shard_by_findings(checkpoint, &findings);
+    let results = dispatch_checkpoint_shards(
         rt,
         SecurityHarnessStage::Trace,
         prompt,
-        checkpoint,
+        shards,
         TRACE_MAX_ITERATIONS,
     )
-    .await?;
-    match parse_stage_json::<TraceStageOutput>(&raw) {
-        Ok(traces) => {
-            checkpoint.trace_results_so_far.extend(traces.traces);
-        }
-        Err(err) => {
-            checkpoint.coverage_gaps.push(CoverageGap {
-                area: "Trace stage".into(),
-                reason: format!(
-                    "Trace stage output was not parseable JSON; continuing with existing reachability evidence: {err}"
-                ),
-                risk: "unknown".into(),
-            });
-            checkpoint.report_validation_state = ReportValidationState {
-                status: "trace_unparsed".into(),
-                errors: vec![err],
-            };
+    .await;
+
+    let mut aggregate = ToolOutput::success(String::new());
+    let mut last_parse_err: Option<String> = None;
+    for res in results {
+        let (raw, stage_out) = res?;
+        merge_stage_tool_output(&mut aggregate, stage_out);
+        match parse_stage_json::<TraceStageOutput>(&raw) {
+            Ok(traces) => checkpoint.trace_results_so_far.extend(traces.traces),
+            Err(err) => {
+                checkpoint.coverage_gaps.push(CoverageGap {
+                    area: "Trace stage".into(),
+                    reason: format!(
+                        "Trace shard output was not parseable JSON; continuing with existing reachability evidence: {err}"
+                    ),
+                    risk: "unknown".into(),
+                });
+                last_parse_err = Some(err);
+            }
         }
     }
-    Ok(Some(stage_out))
+    if let Some(err) = last_parse_err {
+        checkpoint.report_validation_state = ReportValidationState {
+            status: "trace_unparsed".into(),
+            errors: vec![err],
+        };
+    }
+    Ok(Some(aggregate))
 }
 
 /// Repo-internal production-reachability judgment. Re-examines the confirmed
@@ -1012,6 +1100,62 @@ mod tests {
         assert!(
             pending_tasks_for_class(&c, "missing_class").is_empty(),
             "missing class should return empty list"
+        );
+    }
+
+    fn finding_with_id(id: &str) -> SecurityFinding {
+        SecurityFinding {
+            id: id.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn shard_by_findings_single_shard_at_or_below_threshold() {
+        let c = cp();
+        let findings: Vec<SecurityFinding> = (0..STAGE_SHARD_SIZE)
+            .map(|i| finding_with_id(&format!("f{i}")))
+            .collect();
+        let shards = shard_by_findings(&c, &findings);
+        assert_eq!(
+            shards.len(),
+            1,
+            "a finding set at the threshold must stay a single child"
+        );
+        assert_eq!(shards[0].findings_so_far.len(), STAGE_SHARD_SIZE);
+    }
+
+    #[test]
+    fn shard_by_findings_fans_out_large_sets_covering_each_finding_once() {
+        let c = cp();
+        let n = STAGE_SHARD_SIZE * 2 + 3;
+        let findings: Vec<SecurityFinding> =
+            (0..n).map(|i| finding_with_id(&format!("f{i}"))).collect();
+        let shards = shard_by_findings(&c, &findings);
+        assert!(
+            shards.len() >= 3,
+            "a set larger than 2x the shard size must fan out, got {} shards",
+            shards.len()
+        );
+        assert!(
+            shards
+                .iter()
+                .all(|s| s.findings_so_far.len() <= STAGE_SHARD_SIZE),
+            "no shard may exceed STAGE_SHARD_SIZE findings"
+        );
+        let total: usize = shards.iter().map(|s| s.findings_so_far.len()).sum();
+        assert_eq!(total, n, "every finding must appear in exactly one shard");
+        // Partition, not duplication: the union of shard finding ids equals the input.
+        let mut ids: Vec<String> = shards
+            .iter()
+            .flat_map(|s| s.findings_so_far.iter().map(|f| f.id.clone()))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            n,
+            "shards must partition the findings without overlap"
         );
     }
 
