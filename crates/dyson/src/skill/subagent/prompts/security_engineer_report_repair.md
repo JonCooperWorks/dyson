@@ -8,7 +8,7 @@ Return exactly one JSON object with:
 - non-empty `run_id`
 - non-empty `target.repo_path`
 - arrays for `findings`, `rejected_candidates`, `coverage`, `gaps`, `dedupe_groups`, `trace_evidence`, `stage_history`, and `class_coverage`
-- every finding has `id`, `title`, `severity`, `vulnerability_class`, `trust_boundary`, `entry_point`, `sink_or_decision`, `root_cause`, `affected_paths`, `evidence`, `reachability`, `tenant_or_instance_impact`, `severity_rationale`, and `fix_recommendation`
+- every finding has `id`, `title`, `severity`, `vulnerability_class`, `trust_boundary`, `entry_point`, `sink_or_decision`, `root_cause`, `affected_paths`, `evidence`, `reachability`, `tenant_or_instance_impact`, `severity_rationale`, and `fix_recommendation`; carry over the optional `suggested_patch` diff from checkpoint facts when present
 - every dedupe group has `id`, `root_cause`, `primary_finding_id`, `finding_ids`, and `affected_paths`
 
 Every finding and every dedupe group requires `root_cause`. If a required field is not present in checkpoint facts, exclude that item from `findings` rather than inventing data. Do not include verification notes such as "no vulnerability found", "no bypass found", "verified secure", or "verified safe" as findings.

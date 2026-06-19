@@ -1486,6 +1486,7 @@ fn security_test_finding(
         tenant_or_instance_impact: "cross-tenant access possible".into(),
         severity_rationale: "medium because the route crosses an auth boundary".into(),
         fix_recommendation: "add an owner-scoped authorization check".into(),
+        suggested_patch: String::new(),
     }
 }
 
@@ -1554,6 +1555,7 @@ fn security_engineer_validator_output_cannot_emit_new_findings() {
         tenant_or_instance_impact: "none".into(),
         severity_rationale: "medium because reachability is not traced".into(),
         fix_recommendation: "add explicit authorization check".into(),
+        suggested_patch: String::new(),
     }];
     let raw = r#"{
       "findings": [{"id": "finding-002"}],
@@ -1580,6 +1582,7 @@ fn security_engineer_validator_rejects_unknown_finding_id() {
         tenant_or_instance_impact: "none".into(),
         severity_rationale: "medium because reachability is not traced".into(),
         fix_recommendation: "add explicit authorization check".into(),
+        suggested_patch: String::new(),
     }];
     let raw =
         r#"{"decisions":[{"finding_id":"finding-999","decision":"confirmed","evidence":"no"}]}"#;
@@ -1829,6 +1832,7 @@ fn security_engineer_validator_cannot_confirm_without_required_evidence_fields()
         tenant_or_instance_impact: String::new(),
         severity_rationale: String::new(),
         fix_recommendation: String::new(),
+        suggested_patch: String::new(),
     }];
     let raw =
         r#"{"decisions":[{"finding_id":"finding-001","decision":"confirmed","evidence":"ok"}]}"#;
@@ -2493,6 +2497,7 @@ async fn security_engineer_trace_parse_failure_records_gap_and_reports() {
             tenant_or_instance_impact: "instance crossover possible".into(),
             severity_rationale: "high because a reachable boundary lacks caller identity".into(),
             fix_recommendation: "bind runtime socket calls to resolved instance identity".into(),
+            suggested_patch: String::new(),
         });
     checkpoint
         .validation_decisions_so_far
@@ -3874,6 +3879,7 @@ async fn security_engineer_e2e_report_repair_path() {
             tenant_or_instance_impact: "cross-tenant access".into(),
             severity_rationale: "high because reachable".into(),
             fix_recommendation: "add owner predicate".into(),
+            suggested_patch: String::new(),
         });
     checkpoint
         .validation_decisions_so_far
@@ -4011,6 +4017,7 @@ async fn security_engineer_e2e_resume_at_validate() {
             tenant_or_instance_impact: "cross-tenant access".into(),
             severity_rationale: "high because reachable".into(),
             fix_recommendation: "add owner predicate".into(),
+            suggested_patch: String::new(),
         });
     checkpoint
         .class_coverage
@@ -4131,6 +4138,7 @@ async fn security_engineer_e2e_resume_at_report() {
             tenant_or_instance_impact: "cross-tenant access".into(),
             severity_rationale: "high because reachable".into(),
             fix_recommendation: "add owner predicate".into(),
+            suggested_patch: String::new(),
         });
     checkpoint
         .validation_decisions_so_far

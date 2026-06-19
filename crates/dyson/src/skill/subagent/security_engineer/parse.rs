@@ -473,6 +473,7 @@ mod extract_json_tests {
             tenant_or_instance_impact: "impact".into(),
             severity_rationale: "rationale".into(),
             fix_recommendation: "fix".into(),
+            suggested_patch: String::new(),
         }
     }
 
@@ -804,6 +805,7 @@ mod extract_json_tests {
             evidence: vec!["src/handler.rs:42".into()],
             severity_rationale: "any unauthenticated user can hit it".into(),
             fix_recommendation: "add require_role(admin) to the handler".into(),
+            suggested_patch: String::new(),
             ..Default::default()
         }];
         let parsed = ValidateStageOutput {

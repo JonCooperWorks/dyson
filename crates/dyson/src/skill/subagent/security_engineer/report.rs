@@ -283,7 +283,35 @@ pub(super) fn render_finding_markdown(
 
     append_list(out, "Affected paths", &finding.affected_paths);
     append_list(out, "Evidence", &finding.evidence);
+    append_suggested_patch(out, &finding.suggested_patch);
     out.push('\n');
+}
+
+/// Render the optional fix diff as a fenced ```diff block. Suggestion only —
+/// the harness never applies it; a human reviews and applies it. The patch is
+/// emitted verbatim (not run through `clean_inline`, which collapses the
+/// whitespace a diff depends on). Empty patches render nothing.
+pub(super) fn append_suggested_patch(out: &mut String, patch: &str) {
+    let patch = patch.trim_end();
+    if patch.trim().is_empty() {
+        return;
+    }
+    // A diff line can itself contain a ``` run (e.g. a removed Markdown fence),
+    // which would close our block early. Make the fence longer than the longest
+    // consecutive backtick run anywhere in the patch, and at least 3.
+    let mut longest_run = 0usize;
+    let mut current = 0usize;
+    for ch in patch.chars() {
+        if ch == '`' {
+            current += 1;
+            longest_run = longest_run.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    let fence = "`".repeat((longest_run + 1).max(3));
+    out.push_str("\nSuggested patch (review before applying):\n");
+    out.push_str(&format!("{fence}diff\n{patch}\n{fence}\n"));
 }
 
 pub(super) fn append_list(out: &mut String, title: &str, items: &[String]) {
@@ -484,6 +512,7 @@ mod tests {
             tenant_or_instance_impact: "impact".into(),
             severity_rationale: "rationale".into(),
             fix_recommendation: "fix".into(),
+            suggested_patch: String::new(),
         }
     }
 
@@ -556,6 +585,7 @@ mod tests {
             tenant_or_instance_impact: String::new(),
             severity_rationale: String::new(),
             fix_recommendation: String::new(),
+            suggested_patch: String::new(),
         };
         let mut buf = String::new();
         render_finding_markdown(&mut buf, &report, &cp, &f);
@@ -566,6 +596,58 @@ mod tests {
         assert!(
             buf.contains("finding-min"),
             "rendered output should mention the finding id"
+        );
+    }
+
+    #[test]
+    fn security_finding_round_trips_suggested_patch() {
+        let mut f = finding("finding-patch", "rc");
+        f.suggested_patch = "--- a/x.rs\n+++ b/x.rs\n@@\n-bad\n+good\n".into();
+        let json = serde_json::to_string(&f).expect("serialize");
+        let back: SecurityFinding = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(f, back, "suggested_patch must survive a JSON round-trip");
+        // And a finding emitted without the field still parses (back-compat).
+        let legacy = r#"{"id":"x","title":"t","root_cause":"rc"}"#;
+        let parsed: SecurityFinding = serde_json::from_str(legacy).expect("legacy parse");
+        assert!(
+            parsed.suggested_patch.is_empty(),
+            "absent suggested_patch must default to empty"
+        );
+    }
+
+    #[test]
+    fn append_suggested_patch_emits_diff_fence_only_when_present() {
+        let mut empty = String::new();
+        append_suggested_patch(&mut empty, "   ");
+        assert!(empty.is_empty(), "blank patch renders nothing");
+
+        let mut out = String::new();
+        append_suggested_patch(&mut out, "--- a/x\n+++ b/x\n@@\n-a\n+b");
+        assert!(out.contains("```diff\n"), "should open a diff fence: {out}");
+        assert!(
+            out.trim_end().ends_with("```"),
+            "should close the fence: {out}"
+        );
+        assert!(out.contains("+b"), "patch body must be preserved verbatim");
+        assert!(
+            out.contains("Suggested patch (review before applying)"),
+            "should label the block as a non-applied suggestion"
+        );
+    }
+
+    #[test]
+    fn append_suggested_patch_escalates_fence_past_inner_backticks() {
+        // A diff that itself contains a ``` line must not close the outer fence
+        // early — the outer fence grows to outlast the inner run.
+        let mut out = String::new();
+        append_suggested_patch(&mut out, "--- a/md\n+++ b/md\n@@\n-```js\n+```ts\n");
+        assert!(
+            out.contains("````diff\n"),
+            "outer fence should be at least 4 backticks: {out}"
+        );
+        assert!(
+            out.trim_end().ends_with("````"),
+            "closing fence should match the escalated opener: {out}"
         );
     }
 

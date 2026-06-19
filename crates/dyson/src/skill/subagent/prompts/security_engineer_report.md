@@ -28,7 +28,8 @@ Return exactly one JSON object matching this schema:
       "reachability": "reachable or not traced",
       "tenant_or_instance_impact": "tenant or instance impact",
       "severity_rationale": "why the severity follows from evidence",
-      "fix_recommendation": "specific fix"
+      "fix_recommendation": "specific fix",
+      "suggested_patch": "optional minimal unified diff that applies the fix"
     }
   ],
   "rejected_candidates": [],
@@ -50,6 +51,8 @@ Return exactly one JSON object matching this schema:
 ```
 
 Every finding must include `id`, `title`, `severity`, `vulnerability_class`, `trust_boundary`, `entry_point`, `sink_or_decision`, `root_cause`, `affected_paths`, `evidence`, `reachability`, `tenant_or_instance_impact`, `severity_rationale`, and `fix_recommendation`.
+
+`suggested_patch` is optional but encouraged: when the fix is small and local, emit a minimal unified diff (standard `--- a/path` / `+++ b/path` / `@@` hunk format) that a human can review and apply. It is a suggestion only — it is never applied automatically. Omit it (or use an empty string) when the fix is too broad to express as a small diff. Never fabricate file contents you have not read.
 
 Every dedupe group must include `id`, `root_cause`, `primary_finding_id`, `finding_ids`, and `affected_paths`.
 

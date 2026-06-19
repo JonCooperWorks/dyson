@@ -115,6 +115,11 @@ pub struct SecurityFinding {
     pub severity_rationale: String,
     #[serde(default)]
     pub fix_recommendation: String,
+    /// Optional minimal unified diff that fixes this finding. Suggestion only —
+    /// the harness never applies it to the working tree; it is rendered as a
+    /// fenced ```diff block in the report for a human to review and apply.
+    #[serde(default)]
+    pub suggested_patch: String,
 }
 
 /// Per-severity counts the SecurityHarnessPanel renders as its findings row.
@@ -684,6 +689,7 @@ mod tests {
             tenant_or_instance_impact: "impact".into(),
             severity_rationale: "rationale".into(),
             fix_recommendation: "fix".into(),
+            suggested_patch: String::new(),
         });
         cp.stage_history.push(StageHistoryEntry {
             stage: SecurityHarnessStage::Recon,
@@ -727,6 +733,7 @@ mod tests {
                 tenant_or_instance_impact: "i".into(),
                 severity_rationale: "sr".into(),
                 fix_recommendation: "fix".into(),
+                suggested_patch: String::new(),
             }],
             rejected_candidates: vec![ValidationDecision {
                 finding_id: "f2".into(),
