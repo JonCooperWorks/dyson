@@ -350,6 +350,31 @@ pub(super) fn render_finding_markdown(
         append_list(out, "Trace evidence", &trace.evidence);
     }
 
+    if let Some(judgment) = checkpoint
+        .judgment_results
+        .iter()
+        .find(|j| j.finding_id == finding.id)
+    {
+        out.push_str(&format!(
+            "- Prod reachability: `{}`",
+            if judgment.reachable_in_prod {
+                "reachable"
+            } else {
+                "not reachable"
+            }
+        ));
+        if !judgment.severity_effect.trim().is_empty() {
+            out.push_str(&format!(
+                "; severity `{}`",
+                clean_inline(&judgment.severity_effect)
+            ));
+        }
+        out.push('\n');
+        if !judgment.rationale.trim().is_empty() {
+            out.push_str(&format!("  - {}\n", clean_inline(&judgment.rationale)));
+        }
+    }
+
     if let Some(group) = report
         .dedupe_groups
         .iter()
@@ -778,6 +803,32 @@ mod tests {
         assert!(
             !md.contains("WARNING"),
             "findings present means the run is not shallow — no warning"
+        );
+    }
+
+    #[test]
+    fn report_renders_prod_reachability_verdict_per_finding() {
+        use super::super::types::JudgmentResult;
+        let mut cp = cp_with_target("/repo");
+        cp.judgment_results.push(JudgmentResult {
+            finding_id: "finding-001".into(),
+            reachable_in_prod: false,
+            rationale: "route not mounted in deploy/compose.prod.yaml".into(),
+            severity_effect: "downgrade to low".into(),
+        });
+        let report = report_with(&cp, vec![finding("finding-001", "rc")]);
+        let md = render_report_markdown(&report, &cp);
+        assert!(
+            md.contains("Prod reachability: `not reachable`"),
+            "a not-reachable verdict must render: {md}"
+        );
+        assert!(
+            md.contains("downgrade to low"),
+            "severity effect must render"
+        );
+        assert!(
+            md.contains("route not mounted"),
+            "rationale must render under the verdict"
         );
     }
 

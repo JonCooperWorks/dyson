@@ -27,13 +27,13 @@ use super::taxonomy::{
     update_class_coverage_task_ids,
 };
 use super::types::{
-    CoverageGap, HuntStageOutput, ReconStageOutput, ReportValidationState, SecurityCheckpoint,
-    SecurityHarnessReport, SecurityHarnessStage, SecurityTask, SeverityRollup, TaskStatus,
-    TraceStageOutput, ValidationDecisionKind,
+    CoverageGap, HuntStageOutput, JudgmentStageOutput, ReconStageOutput, ReportValidationState,
+    SecurityCheckpoint, SecurityHarnessReport, SecurityHarnessStage, SecurityTask, SeverityRollup,
+    TaskStatus, TraceStageOutput, ValidationDecisionKind,
 };
 use super::{
-    HUNT_MAX_ITERATIONS, HUNT_SPECIALIST_BACKSTOP, RECON_MAX_ITERATIONS, TRACE_MAX_ITERATIONS,
-    VALIDATE_MAX_ITERATIONS,
+    HUNT_MAX_ITERATIONS, HUNT_SPECIALIST_BACKSTOP, JUDGMENT_MAX_ITERATIONS, RECON_MAX_ITERATIONS,
+    TRACE_MAX_ITERATIONS, VALIDATE_MAX_ITERATIONS,
 };
 
 const HUNT_CONCURRENCY: usize = 6;
@@ -687,6 +687,48 @@ pub(super) async fn run_trace_stage(
     Ok(Some(stage_out))
 }
 
+/// Repo-internal production-reachability judgment. Re-examines the confirmed
+/// findings against in-repo prod signals — latest HEAD, deploy/config files,
+/// feature flags, dead code — to decide whether each flaw is actually reachable
+/// in a real deployment, and records a per-finding verdict. Non-fatal on bad
+/// JSON (mirrors Trace): a missing verdict simply leaves the finding unannotated.
+pub(super) async fn run_judgment_stage(
+    rt: &SecurityHarnessRuntime,
+    checkpoint: &mut SecurityCheckpoint,
+) -> std::result::Result<Option<ToolOutput>, String> {
+    let has_confirmed = checkpoint
+        .validation_decisions_so_far
+        .iter()
+        .any(|d| d.decision == ValidationDecisionKind::Confirmed);
+    if !has_confirmed {
+        return Ok(None);
+    }
+    let prompt = include_str!("../prompts/security_engineer_judgment.md");
+    let (raw, stage_out) = spawn_stage(
+        rt,
+        SecurityHarnessStage::Judgment,
+        prompt,
+        checkpoint,
+        JUDGMENT_MAX_ITERATIONS,
+    )
+    .await?;
+    match parse_stage_json::<JudgmentStageOutput>(&raw) {
+        Ok(out) => {
+            checkpoint.judgment_results.extend(out.judgments);
+        }
+        Err(err) => {
+            checkpoint.coverage_gaps.push(CoverageGap {
+                area: "Judgment stage".into(),
+                reason: format!(
+                    "Judgment stage output was not parseable JSON; continuing without prod-reachability verdicts: {err}"
+                ),
+                risk: "unknown".into(),
+            });
+        }
+    }
+    Ok(Some(stage_out))
+}
+
 pub(super) fn run_feedback_stage(checkpoint: &mut SecurityCheckpoint) {
     let mut next = checkpoint.pending_tasks.len() + checkpoint.completed_tasks.len() + 1;
     let mut existing: BTreeSet<String> = checkpoint
@@ -855,6 +897,12 @@ pub(super) fn stage_summary(
         SecurityHarnessStage::Trace => {
             format!("{} trace results", checkpoint.trace_results_so_far.len())
         }
+        SecurityHarnessStage::Judgment => {
+            format!(
+                "{} reachability verdicts",
+                checkpoint.judgment_results.len()
+            )
+        }
         SecurityHarnessStage::Feedback => {
             format!("{} pending feedback tasks", checkpoint.pending_tasks.len())
         }
@@ -870,6 +918,7 @@ pub(super) fn progress_for(stage: SecurityHarnessStage) -> Option<f32> {
         SecurityHarnessStage::Gapfill => 0.58,
         SecurityHarnessStage::Dedupe => 0.66,
         SecurityHarnessStage::Trace => 0.76,
+        SecurityHarnessStage::Judgment => 0.81,
         SecurityHarnessStage::Feedback => 0.86,
         SecurityHarnessStage::Report => 0.94,
     })
@@ -1090,6 +1139,7 @@ mod tests {
             SecurityHarnessStage::Gapfill,
             SecurityHarnessStage::Dedupe,
             SecurityHarnessStage::Trace,
+            SecurityHarnessStage::Judgment,
             SecurityHarnessStage::Feedback,
             SecurityHarnessStage::Report,
         ] {
@@ -1113,6 +1163,7 @@ mod tests {
             SecurityHarnessStage::Gapfill,
             SecurityHarnessStage::Dedupe,
             SecurityHarnessStage::Trace,
+            SecurityHarnessStage::Judgment,
             SecurityHarnessStage::Feedback,
             SecurityHarnessStage::Report,
         ] {

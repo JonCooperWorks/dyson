@@ -12,8 +12,9 @@ The harness stages are:
 4. Gapfill
 5. Dedupe
 6. Trace
-7. Feedback
-8. Report
+7. Judgment
+8. Feedback
+9. Report
 
 Durable checkpoint JSON is provided in every stage prompt. Treat it as the source of truth for already-completed work. Never rerun completed tasks on resume.
 
@@ -27,6 +28,7 @@ Prefer narrow, composable work:
 - Gapfill turns uncovered high-risk areas into follow-up tasks.
 - Dedupe collapses shared root causes and keeps variants as affected paths.
 - Trace proves whether attacker-controlled input reaches a reusable-component flaw from real entry points.
+- Judgment decides whether each confirmed finding is reachable in a real production deployment, using repo-internal signals only (HEAD, deploy/config files, feature flags), and annotates severity.
 - Feedback creates scoped consumer-path hunts from reachable traces.
 - Report emits structured schema data, not prose-only summaries.
 

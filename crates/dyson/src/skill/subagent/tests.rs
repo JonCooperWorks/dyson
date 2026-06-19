@@ -1396,7 +1396,8 @@ fn security_engineer_config_describes_staged_harness() {
     assert_eq!(
         stages,
         vec![
-            "recon", "hunt", "validate", "gapfill", "dedupe", "trace", "feedback", "report"
+            "recon", "hunt", "validate", "gapfill", "dedupe", "trace", "judgment", "feedback",
+            "report"
         ]
     );
 }
@@ -1442,7 +1443,7 @@ fn security_engineer_prompts_include_all_harness_stages() {
     let config = security_engineer_config();
     let protocol = config.injects_protocol.unwrap();
     for stage in [
-        "Recon", "Hunt", "Validate", "Gapfill", "Dedupe", "Trace", "Feedback", "Report",
+        "Recon", "Hunt", "Validate", "Gapfill", "Dedupe", "Trace", "Judgment", "Feedback", "Report",
     ] {
         assert!(
             config.system_prompt.contains(stage),
@@ -2214,6 +2215,7 @@ async fn security_engineer_resumes_checkpoint_and_does_not_rerun_completed_tasks
         mock_text_response(
             r#"{"traces":[{"finding_id":"finding-001","reachable":true,"severity_effect":"keeps","evidence":["trace evidence"]}]}"#,
         ),
+        e2e_judgment_reachable_response(),
         mock_text_response(report_json),
     ]);
     let resume_tool = OrchestratorTool::new(
@@ -2423,6 +2425,7 @@ async fn security_engineer_resumes_json_checkpoint_after_filesystem_workspace_re
         mock_text_response(
             r#"{"traces":[{"finding_id":"finding-001","reachable":true,"severity_effect":"keeps","evidence":["trace evidence"]}]}"#,
         ),
+        e2e_judgment_reachable_response(),
         mock_text_response(report_json),
     ]);
     let resume_tool = OrchestratorTool::new(
@@ -2560,6 +2563,7 @@ async fn security_engineer_trace_parse_failure_records_gap_and_reports() {
     }"#;
     let llm = MockLlm::new(vec![
         mock_text_response("Trace could not produce machine-readable JSON."),
+        e2e_judgment_reachable_response(),
         mock_text_response(report_json),
     ]);
     let tool = OrchestratorTool::new(
@@ -3434,6 +3438,12 @@ fn e2e_trace_reachable_response() -> Vec<crate::llm::stream::StreamEvent> {
     )
 }
 
+fn e2e_judgment_reachable_response() -> Vec<crate::llm::stream::StreamEvent> {
+    mock_text_response(
+        r#"{"judgments":[{"finding_id":"finding-001","reachable_in_prod":true,"rationale":"handler mounted in router and present in deploy config","severity_effect":"keeps high"}]}"#,
+    )
+}
+
 fn e2e_full_report_json() -> &'static str {
     r#"{
       "schema_version": 1,
@@ -3613,6 +3623,19 @@ async fn security_engineer_e2e_happy_path_one_finding() {
     let out = run_stage(&workspace, dir.path(), Some(&run_id), "trace", trace_llm).await;
     assert!(!out.is_error, "trace stage error: {}", out.content);
 
+    // Judgment stage: repo-internal prod-reachability verdict for the
+    // confirmed finding.
+    let judgment_llm = MockLlm::new(vec![e2e_judgment_reachable_response()]);
+    let out = run_stage(
+        &workspace,
+        dir.path(),
+        Some(&run_id),
+        "judgment",
+        judgment_llm,
+    )
+    .await;
+    assert!(!out.is_error, "judgment stage error: {}", out.content);
+
     // Feedback is bookkeeping-only.
     let llm = MockLlm::new(vec![]);
     let out = run_stage(&workspace, dir.path(), Some(&run_id), "feedback", llm).await;
@@ -3666,6 +3689,7 @@ async fn security_engineer_e2e_happy_path_one_finding() {
         security_engineer::SecurityHarnessStage::Gapfill,
         security_engineer::SecurityHarnessStage::Dedupe,
         security_engineer::SecurityHarnessStage::Trace,
+        security_engineer::SecurityHarnessStage::Judgment,
         security_engineer::SecurityHarnessStage::Feedback,
         security_engineer::SecurityHarnessStage::Report,
     ] {
@@ -3906,6 +3930,7 @@ async fn security_engineer_e2e_report_repair_path() {
         security_engineer::SecurityHarnessStage::Gapfill,
         security_engineer::SecurityHarnessStage::Dedupe,
         security_engineer::SecurityHarnessStage::Trace,
+        security_engineer::SecurityHarnessStage::Judgment,
         security_engineer::SecurityHarnessStage::Feedback,
     ] {
         checkpoint
@@ -4055,10 +4080,11 @@ async fn security_engineer_e2e_resume_at_validate() {
     // A fresh MockLlm with NO fallback keeps the test honest — if resume
     // erroneously re-runs recon or hunt, those stages will fan out
     // dozens of specialists and exhaust the explicit queue, failing the
-    // test loudly. We only enumerate validate + trace + report.
+    // test loudly. We only enumerate validate + trace + judgment + report.
     let llm = MockLlm::new(vec![
         e2e_validate_confirm_response(),
         e2e_trace_reachable_response(),
+        e2e_judgment_reachable_response(),
         mock_text_response(e2e_full_report_json()),
     ]);
     let models_seen = llm.models_seen_handle();
@@ -4090,12 +4116,12 @@ async fn security_engineer_e2e_resume_at_validate() {
     );
 
     let seen = models_seen.lock().unwrap().clone();
-    // Three calls total: one each for validate, trace, report. Hunt
-    // would have added ~24 (one per taxonomy class).
+    // Four calls total: one each for validate, trace, judgment, report.
+    // Hunt would have added ~24 (one per taxonomy class).
     assert_eq!(
         seen.len(),
-        3,
-        "resume at validate should invoke the LLM exactly 3 times (validate, trace, report), got {} calls: {:?}",
+        4,
+        "resume at validate should invoke the LLM exactly 4 times (validate, trace, judgment, report), got {} calls: {:?}",
         seen.len(),
         seen
     );
@@ -4173,6 +4199,7 @@ async fn security_engineer_e2e_resume_at_report() {
         security_engineer::SecurityHarnessStage::Gapfill,
         security_engineer::SecurityHarnessStage::Dedupe,
         security_engineer::SecurityHarnessStage::Trace,
+        security_engineer::SecurityHarnessStage::Judgment,
         security_engineer::SecurityHarnessStage::Feedback,
     ] {
         checkpoint

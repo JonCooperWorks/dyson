@@ -24,6 +24,7 @@ pub enum SecurityHarnessStage {
     Gapfill,
     Dedupe,
     Trace,
+    Judgment,
     Feedback,
     Report,
 }
@@ -37,6 +38,7 @@ impl SecurityHarnessStage {
             Self::Gapfill => "gapfill",
             Self::Dedupe => "dedupe",
             Self::Trace => "trace",
+            Self::Judgment => "judgment",
             Self::Feedback => "feedback",
             Self::Report => "report",
         }
@@ -50,6 +52,7 @@ impl SecurityHarnessStage {
             "gapfill" => Some(Self::Gapfill),
             "dedupe" => Some(Self::Dedupe),
             "trace" => Some(Self::Trace),
+            "judgment" => Some(Self::Judgment),
             "feedback" => Some(Self::Feedback),
             "report" => Some(Self::Report),
             _ => None,
@@ -239,6 +242,25 @@ pub struct TraceResult {
     pub evidence: Vec<String>,
 }
 
+/// A repo-internal production-reachability verdict for one confirmed finding,
+/// produced by the Judgment stage. Judges whether the flaw is reachable in a
+/// real deployment using in-repo signals only (latest HEAD, deploy/config
+/// files, feature flags) — no external calls. A `false` verdict never drops the
+/// finding; it annotates it with a downgrade note in the report.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct JudgmentResult {
+    #[serde(default)]
+    pub finding_id: String,
+    #[serde(default)]
+    pub reachable_in_prod: bool,
+    #[serde(default)]
+    pub rationale: String,
+    /// Effect on severity, e.g. "keeps high", "downgrade to low (behind a
+    /// disabled feature flag)".
+    #[serde(default)]
+    pub severity_effect: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TargetRef {
     #[serde(default)]
@@ -358,6 +380,8 @@ pub struct SecurityCheckpoint {
     #[serde(default)]
     pub trace_results_so_far: Vec<TraceResult>,
     #[serde(default)]
+    pub judgment_results: Vec<JudgmentResult>,
+    #[serde(default)]
     pub gapfill_tasks: Vec<SecurityTask>,
     #[serde(default)]
     pub coverage_gaps: Vec<CoverageGap>,
@@ -402,6 +426,7 @@ impl SecurityCheckpoint {
             validation_decisions_so_far: Vec::new(),
             dedupe_groups_so_far: Vec::new(),
             trace_results_so_far: Vec::new(),
+            judgment_results: Vec::new(),
             gapfill_tasks: Vec::new(),
             coverage_gaps: Vec::new(),
             class_coverage: Vec::new(),
@@ -477,6 +502,12 @@ pub(super) struct TraceStageOutput {
     pub traces: Vec<TraceResult>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct JudgmentStageOutput {
+    #[serde(default)]
+    pub judgments: Vec<JudgmentResult>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,6 +521,7 @@ mod tests {
             SecurityHarnessStage::Gapfill,
             SecurityHarnessStage::Dedupe,
             SecurityHarnessStage::Trace,
+            SecurityHarnessStage::Judgment,
             SecurityHarnessStage::Feedback,
             SecurityHarnessStage::Report,
         ] {
@@ -533,6 +565,7 @@ mod tests {
             SecurityHarnessStage::Gapfill,
             SecurityHarnessStage::Dedupe,
             SecurityHarnessStage::Trace,
+            SecurityHarnessStage::Judgment,
             SecurityHarnessStage::Feedback,
             SecurityHarnessStage::Report,
         ] {
@@ -556,6 +589,7 @@ mod tests {
             SecurityHarnessStage::Gapfill,
             SecurityHarnessStage::Dedupe,
             SecurityHarnessStage::Trace,
+            SecurityHarnessStage::Judgment,
             SecurityHarnessStage::Feedback,
             SecurityHarnessStage::Report,
         ];

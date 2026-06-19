@@ -289,7 +289,7 @@ function SubagentPanel({ children, summary, running }) {
 //     events alone.  See `extractPanelStateSnapshot` below.
 
 const HARNESS_STAGES = [
-  'recon', 'hunt', 'validate', 'gapfill', 'dedupe', 'trace', 'feedback', 'report',
+  'recon', 'hunt', 'validate', 'gapfill', 'dedupe', 'trace', 'judgment', 'feedback', 'report',
 ];
 
 const STAGE_LABEL = {
@@ -299,6 +299,7 @@ const STAGE_LABEL = {
   gapfill: 'Gapfill',
   dedupe: 'Dedupe',
   trace: 'Trace',
+  judgment: 'Judgment',
   feedback: 'Feedback',
   report: 'Report',
 };

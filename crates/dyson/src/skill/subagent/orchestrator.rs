@@ -190,7 +190,7 @@ impl Tool for OrchestratorTool {
                 },
                 "stop_after_stage": {
                     "type": "string",
-                    "enum": ["recon", "hunt", "validate", "gapfill", "dedupe", "trace", "feedback", "report"],
+                    "enum": ["recon", "hunt", "validate", "gapfill", "dedupe", "trace", "judgment", "feedback", "report"],
                     "description": "Optional bounded-run control for smoke tests or operator-driven \
                         checkpoint creation. The harness saves the stage checkpoint and returns \
                         before later stages."

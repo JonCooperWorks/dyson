@@ -52,8 +52,9 @@ use self::checkpoint::{
 };
 use self::report::render_report_markdown;
 use self::stages::{
-    progress_for, run_feedback_stage, run_gapfill_stage, run_hunt_stage, run_recon_stage,
-    run_report_stage, run_trace_stage, run_validate_stage, stage_completed, stage_summary,
+    progress_for, run_feedback_stage, run_gapfill_stage, run_hunt_stage, run_judgment_stage,
+    run_recon_stage, run_report_stage, run_trace_stage, run_validate_stage, stage_completed,
+    stage_summary,
 };
 
 // Re-export the module's public + crate-private API at the directory root so
@@ -66,7 +67,7 @@ pub use self::{
     report::dedupe_findings,
     taxonomy::{VulnerabilityClassDefinition, vulnerability_taxonomy},
     types::{
-        CoverageGap, DedupeGroup, LedgerSummary, LedgerSummaryEntry, ModelMetadata,
+        CoverageGap, DedupeGroup, JudgmentResult, LedgerSummary, LedgerSummaryEntry, ModelMetadata,
         ReportValidationState, RunHealth, SecurityCheckpoint, SecurityFinding,
         SecurityHarnessReport, SecurityHarnessStage, SecurityTask, StageHistoryEntry, TargetRef,
         TaskStatus, TraceResult, ValidationDecision, ValidationDecisionKind,
@@ -124,6 +125,9 @@ pub(crate) const RECON_MAX_ITERATIONS: usize = 60;
 pub(crate) const HUNT_MAX_ITERATIONS: usize = 28;
 pub(crate) const VALIDATE_MAX_ITERATIONS: usize = 16;
 pub(crate) const TRACE_MAX_ITERATIONS: usize = 16;
+/// Judgment operates on the bounded set of confirmed findings + in-repo config
+/// signals, so it stays at the same modest cap as Validate/Trace.
+pub(crate) const JUDGMENT_MAX_ITERATIONS: usize = 16;
 
 /// A stage finishing faster than this (and that runs a child) is flagged as a
 /// possible shallow run in the report's Run Health section. Real LLM stages do
@@ -141,6 +145,7 @@ fn is_llm_backed_stage(stage: SecurityHarnessStage) -> bool {
             | SecurityHarnessStage::Hunt
             | SecurityHarnessStage::Validate
             | SecurityHarnessStage::Trace
+            | SecurityHarnessStage::Judgment
             | SecurityHarnessStage::Report
     )
 }
@@ -152,6 +157,7 @@ const STAGES: &[SecurityHarnessStage] = &[
     SecurityHarnessStage::Gapfill,
     SecurityHarnessStage::Dedupe,
     SecurityHarnessStage::Trace,
+    SecurityHarnessStage::Judgment,
     SecurityHarnessStage::Feedback,
     SecurityHarnessStage::Report,
 ];
@@ -203,6 +209,7 @@ const STAGE_MODEL_ENV: &[(SecurityHarnessStage, &str)] = &[
     (SecurityHarnessStage::Hunt, "DYSON_SEC_HUNT_MODEL"),
     (SecurityHarnessStage::Validate, "DYSON_SEC_VALIDATE_MODEL"),
     (SecurityHarnessStage::Trace, "DYSON_SEC_TRACE_MODEL"),
+    (SecurityHarnessStage::Judgment, "DYSON_SEC_JUDGMENT_MODEL"),
     (SecurityHarnessStage::Report, "DYSON_SEC_REPORT_MODEL"),
 ];
 
@@ -551,6 +558,7 @@ async fn run_security_harness_inner(
                 Ok(None)
             }
             SecurityHarnessStage::Trace => run_trace_stage(rt, &mut checkpoint).await,
+            SecurityHarnessStage::Judgment => run_judgment_stage(rt, &mut checkpoint).await,
             SecurityHarnessStage::Feedback => {
                 run_feedback_stage(&mut checkpoint);
                 Ok(None)
