@@ -213,6 +213,78 @@ const STAGE_MODEL_ENV: &[(SecurityHarnessStage, &str)] = &[
     (SecurityHarnessStage::Report, "DYSON_SEC_REPORT_MODEL"),
 ];
 
+/// The "judging" half of a VDH/VVS split — the stages a secondary model runs
+/// when the user opts into cross-model review. Discovery (Recon/Hunt/Trace)
+/// stays on the run model; these independently validate, judge prod-reachability,
+/// and render. A per-stage `DYSON_SEC_<STAGE>_MODEL` env override still wins.
+const ELICITED_JUDGE_STAGES: &[SecurityHarnessStage] = &[
+    SecurityHarnessStage::Validate,
+    SecurityHarnessStage::Judgment,
+    SecurityHarnessStage::Report,
+];
+
+/// Ask the user (via the elicitation modal) for a secondary model to run the
+/// judging stages. No-op unless a UI is attached; an env override on every
+/// judge stage means there is nothing to ask. A declined/blank/timed-out answer
+/// leaves every stage on the run model.
+async fn elicit_secondary_model(rt: &mut SecurityHarnessRuntime) {
+    if !crate::skill::mcp::elicitation::ui_enabled() {
+        return;
+    }
+    if ELICITED_JUDGE_STAGES
+        .iter()
+        .all(|stage| rt.stage_models.contains_key(stage))
+    {
+        return;
+    }
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "validation_model": {
+                "type": "string",
+                "description": "Model id (e.g. an OpenRouter slug like z-ai/glm-5.2) \
+                    to independently validate and judge findings. Leave blank to use \
+                    the run model for every stage."
+            }
+        }
+    });
+    let message = "Cross-model security review: pick a secondary model to validate and judge \
+         findings (the adversarial half of the harness — it runs validate/judgment/report \
+         while the run model does recon/hunt/trace). Leave blank to use one model for everything."
+        .to_string();
+    let result = crate::skill::mcp::elicitation::broker()
+        .elicit("security_engineer".to_string(), message, schema)
+        .await;
+    apply_secondary_model_choice(&mut rt.stage_models, &result);
+}
+
+/// Apply an elicitation result to the per-stage model map: on `accept` with a
+/// non-empty `validation_model`, pin the judge stages to it WITHOUT clobbering
+/// an existing env override (`entry().or_insert`). Pure, so the
+/// action/content/precedence handling is unit-testable.
+fn apply_secondary_model_choice(
+    stage_models: &mut std::collections::BTreeMap<SecurityHarnessStage, String>,
+    result: &serde_json::Value,
+) {
+    if result.get("action").and_then(|a| a.as_str()) != Some("accept") {
+        return;
+    }
+    let model = result
+        .get("content")
+        .and_then(|c| c.get("validation_model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if model.is_empty() {
+        return;
+    }
+    for stage in ELICITED_JUDGE_STAGES {
+        stage_models
+            .entry(*stage)
+            .or_insert_with(|| model.to_string());
+    }
+}
+
 /// Pure core of [`resolve_stage_models`], taking the env lookup as a closure so
 /// it can be unit-tested without mutating process-global environment (which is
 /// racy under the parallel test runner and `unsafe` on edition 2024).
@@ -231,7 +303,14 @@ fn resolve_stage_models_from(
     out
 }
 
-pub(crate) async fn run_security_harness(rt: SecurityHarnessRuntime) -> Result<ToolOutput> {
+pub(crate) async fn run_security_harness(mut rt: SecurityHarnessRuntime) -> Result<ToolOutput> {
+    // Before the clock starts: a fresh run may pick a secondary "judging" model
+    // via the elicitation modal, so findings get validated by different weights
+    // than produced them. No-op on resume and when no UI is attached.
+    if !should_resume(&rt.parsed) {
+        elicit_secondary_model(&mut rt).await;
+    }
+
     let started_at = std::time::SystemTime::now();
     let started_epoch = unix_seconds(started_at);
     let mut activity_token = rt.activity.as_ref().map(|a| {
@@ -809,6 +888,68 @@ mod specialist_tests {
         assert!(
             !map.contains_key(&SecurityHarnessStage::Hunt),
             "an unset stage stays on the run default"
+        );
+    }
+
+    #[test]
+    fn apply_secondary_model_choice_pins_judge_stages_on_accept() {
+        let mut map = std::collections::BTreeMap::new();
+        let result = serde_json::json!({
+            "action": "accept",
+            "content": { "validation_model": "  z-ai/glm-5.2  " }
+        });
+        super::apply_secondary_model_choice(&mut map, &result);
+        for stage in super::ELICITED_JUDGE_STAGES {
+            assert_eq!(
+                map.get(stage).map(String::as_str),
+                Some("z-ai/glm-5.2"),
+                "{stage} should be pinned to the trimmed secondary model"
+            );
+        }
+        // Discovery stages are never touched by the secondary-model choice.
+        assert!(!map.contains_key(&SecurityHarnessStage::Hunt));
+        assert!(!map.contains_key(&SecurityHarnessStage::Recon));
+    }
+
+    #[test]
+    fn apply_secondary_model_choice_is_noop_on_decline_or_blank() {
+        for result in [
+            serde_json::json!({ "action": "decline" }),
+            serde_json::json!({ "action": "cancel" }),
+            serde_json::json!({ "action": "accept", "content": { "validation_model": "   " } }),
+            serde_json::json!({ "action": "accept" }),
+        ] {
+            let mut map = std::collections::BTreeMap::new();
+            super::apply_secondary_model_choice(&mut map, &result);
+            assert!(
+                map.is_empty(),
+                "decline/cancel/blank must not pin any stage, got {map:?} for {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_secondary_model_choice_does_not_clobber_env_override() {
+        // An env override (pre-populated) on a judge stage wins over the modal.
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(
+            SecurityHarnessStage::Validate,
+            "env/pinned-model".to_string(),
+        );
+        let result = serde_json::json!({
+            "action": "accept",
+            "content": { "validation_model": "z-ai/glm-5.2" }
+        });
+        super::apply_secondary_model_choice(&mut map, &result);
+        assert_eq!(
+            map.get(&SecurityHarnessStage::Validate).map(String::as_str),
+            Some("env/pinned-model"),
+            "an env override must not be overwritten by the elicited model"
+        );
+        assert_eq!(
+            map.get(&SecurityHarnessStage::Report).map(String::as_str),
+            Some("z-ai/glm-5.2"),
+            "stages without an env override still get the elicited model"
         );
     }
 
