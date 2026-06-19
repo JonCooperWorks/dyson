@@ -65,12 +65,16 @@ pub(super) fn render_report_markdown(
         report.class_coverage.len()
     ));
     out.push_str(&format!(
-        "- Vulnerability classes hunted: {}\n\n",
+        "- Vulnerability classes hunted: {}\n",
         report
             .class_coverage
             .iter()
             .filter(|class| class.hunted)
             .count()
+    ));
+    out.push_str(&format!(
+        "- Ledger: {} new this run, {} recurring\n\n",
+        checkpoint.ledger_summary.new_findings, checkpoint.ledger_summary.recurring_findings
     ));
 
     render_run_health(&mut out, report, checkpoint);
@@ -252,6 +256,20 @@ pub(super) fn render_finding_markdown(
 ) {
     out.push_str(&format!("### {}: {}\n\n", finding.id, finding.title));
     out.push_str(&format!("- Severity: `{}`\n", finding.severity));
+    if let Some(entry) = checkpoint
+        .ledger_summary
+        .entries
+        .iter()
+        .find(|e| e.finding_id == finding.id && !e.finding_key.is_empty())
+    {
+        out.push_str(&format!("- Ledger key: `{}`", entry.finding_key));
+        if entry.recurring {
+            out.push_str(&format!(" (recurring, seen {}x)", entry.occurrences));
+        } else {
+            out.push_str(" (new this run)");
+        }
+        out.push('\n');
+    }
     out.push_str(&format!(
         "- Vulnerability class: `{}`\n",
         clean_inline(&finding.vulnerability_class)
@@ -467,21 +485,37 @@ pub(super) fn report_checkpoint_for_prompt(checkpoint: &SecurityCheckpoint) -> S
     filtered
 }
 
+/// Cluster findings by stable fingerprint (see
+/// [`super::ledger::finding_fingerprint`]) rather than by exact `root_cause`
+/// string. Two hunters describing the same flaw in different words — same class,
+/// files, and trust boundary — now collapse into one group, which exact-string
+/// matching missed. The group's displayed `root_cause` is the primary finding's
+/// (falling back to its title), preserving the human-readable label.
 pub fn dedupe_findings(findings: &[SecurityFinding]) -> Vec<DedupeGroup> {
-    let mut by_root: BTreeMap<String, Vec<&SecurityFinding>> = BTreeMap::new();
+    // BTreeMap over the fingerprint string keeps group ordering + ids stable for
+    // a given input (the stable-id contract downstream code relies on).
+    let mut by_fp: BTreeMap<String, Vec<&SecurityFinding>> = BTreeMap::new();
     for finding in findings {
-        let root = if finding.root_cause.trim().is_empty() {
-            finding.title.clone()
-        } else {
-            finding.root_cause.clone()
-        };
-        by_root.entry(root).or_default().push(finding);
+        by_fp
+            .entry(super::ledger::finding_fingerprint(finding))
+            .or_default()
+            .push(finding);
     }
-    by_root
+    by_fp
         .into_iter()
         .enumerate()
-        .map(|(idx, (root_cause, group))| {
-            let primary = group.first().map(|f| f.id.clone()).unwrap_or_default();
+        .map(|(idx, (_fingerprint, group))| {
+            let primary = group.first().copied();
+            let root_cause = primary
+                .map(|f| {
+                    if f.root_cause.trim().is_empty() {
+                        f.title.clone()
+                    } else {
+                        f.root_cause.clone()
+                    }
+                })
+                .unwrap_or_default();
+            let primary_id = primary.map(|f| f.id.clone()).unwrap_or_default();
             let mut affected = BTreeSet::new();
             for finding in &group {
                 affected.extend(finding.affected_paths.iter().cloned());
@@ -489,7 +523,7 @@ pub fn dedupe_findings(findings: &[SecurityFinding]) -> Vec<DedupeGroup> {
             DedupeGroup {
                 id: format!("dedupe-{:03}", idx + 1),
                 root_cause,
-                primary_finding_id: primary,
+                primary_finding_id: primary_id,
                 finding_ids: group.iter().map(|f| f.id.clone()).collect(),
                 affected_paths: affected.into_iter().collect(),
             }
@@ -535,7 +569,8 @@ pub(crate) fn report_from_checkpoint(checkpoint: &SecurityCheckpoint) -> Securit
 #[cfg(test)]
 mod tests {
     use super::super::types::{
-        ModelMetadata, TargetRef, ValidationDecision, VulnerabilityClassCoverage,
+        LedgerSummary, LedgerSummaryEntry, ModelMetadata, TargetRef, ValidationDecision,
+        VulnerabilityClassCoverage,
     };
     use super::*;
 
@@ -747,18 +782,61 @@ mod tests {
     }
 
     #[test]
-    fn dedupe_findings_groups_by_root_cause() {
-        let findings = vec![finding("a", "X"), finding("b", "X"), finding("c", "Y")];
-        let groups = dedupe_findings(&findings);
+    fn report_renders_ledger_summary_and_per_finding_key() {
+        let mut cp = cp_with_target("/repo");
+        cp.ledger_summary = LedgerSummary {
+            new_findings: 1,
+            recurring_findings: 2,
+            entries: vec![LedgerSummaryEntry {
+                finding_id: "finding-001".into(),
+                finding_key: "DYS-ABCD1234".into(),
+                recurring: true,
+                occurrences: 3,
+            }],
+        };
+        let report = report_with(&cp, vec![finding("finding-001", "rc")]);
+        let md = render_report_markdown(&report, &cp);
+        assert!(
+            md.contains("Ledger: 1 new this run, 2 recurring"),
+            "summary must show new/recurring counts"
+        );
+        assert!(
+            md.contains("Ledger key: `DYS-ABCD1234`"),
+            "finding must show its stable key"
+        );
+        assert!(
+            md.contains("(recurring, seen 3x)"),
+            "recurring findings must show the occurrence count"
+        );
+    }
+
+    #[test]
+    fn dedupe_findings_clusters_by_fingerprint_across_phrasing() {
+        // a and b share class + file but use DIFFERENT root_cause wording — the
+        // old exact-string match split them; fingerprint clustering collapses
+        // them. c is the same class in a DIFFERENT file, so it stays separate.
+        let a = finding("a", "the handler skips the owner check");
+        let b = finding("b", "missing owner-scoped authorization permits IDOR");
+        let mut c = finding("c", "the handler skips the owner check");
+        c.affected_paths = vec!["src/other.rs:9".into()];
+        c.entry_point = "src/other.rs:9".into();
+
+        let groups = dedupe_findings(&[a, b, c]);
         assert_eq!(
             groups.len(),
             2,
-            "two distinct root causes should produce two dedupe groups"
+            "same file collapses regardless of phrasing; a different file splits"
         );
-        let by_root: std::collections::BTreeMap<&str, &DedupeGroup> =
-            groups.iter().map(|g| (g.root_cause.as_str(), g)).collect();
-        assert_eq!(by_root["X"].finding_ids.len(), 2);
-        assert_eq!(by_root["Y"].finding_ids.len(), 1);
+        let merged = groups
+            .iter()
+            .find(|g| g.finding_ids.len() == 2)
+            .expect("a and b must share a group");
+        assert!(
+            merged.finding_ids.contains(&"a".to_string())
+                && merged.finding_ids.contains(&"b".to_string()),
+            "the two same-file findings must cluster together: {:?}",
+            merged.finding_ids
+        );
     }
 
     #[test]

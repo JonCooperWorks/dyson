@@ -290,6 +290,34 @@ pub struct RunHealth {
     pub fast_stages: Vec<String>,
 }
 
+/// Per-finding cross-run ledger status, attached to the report after the
+/// findings ledger is upserted on completion. Lets the report say which
+/// findings are new this run and which are recurring (with a stable key).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LedgerSummaryEntry {
+    #[serde(default)]
+    pub finding_id: String,
+    /// Stable cross-run key, e.g. `DYS-1A2B3C4D`.
+    #[serde(default)]
+    pub finding_key: String,
+    /// True when this fingerprint was already in the ledger from a prior run.
+    #[serde(default)]
+    pub recurring: bool,
+    /// Total times this fingerprint has been seen across runs (>= 1).
+    #[serde(default)]
+    pub occurrences: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LedgerSummary {
+    #[serde(default)]
+    pub new_findings: u32,
+    #[serde(default)]
+    pub recurring_findings: u32,
+    #[serde(default)]
+    pub entries: Vec<LedgerSummaryEntry>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StageHistoryEntry {
     pub stage: SecurityHarnessStage,
@@ -342,6 +370,8 @@ pub struct SecurityCheckpoint {
     #[serde(default)]
     pub run_health: RunHealth,
     #[serde(default)]
+    pub ledger_summary: LedgerSummary,
+    #[serde(default)]
     pub stage_history: Vec<StageHistoryEntry>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -378,6 +408,7 @@ impl SecurityCheckpoint {
             report_draft: None,
             report_validation_state: ReportValidationState::default(),
             run_health: RunHealth::default(),
+            ledger_summary: LedgerSummary::default(),
             stage_history: Vec::new(),
             created_at: now,
             updated_at: now,

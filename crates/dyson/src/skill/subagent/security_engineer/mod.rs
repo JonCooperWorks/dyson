@@ -31,6 +31,7 @@
 //! hunters run.
 
 mod checkpoint;
+mod ledger;
 mod parse;
 mod report;
 mod runtime;
@@ -65,10 +66,11 @@ pub use self::{
     report::dedupe_findings,
     taxonomy::{VulnerabilityClassDefinition, vulnerability_taxonomy},
     types::{
-        CoverageGap, DedupeGroup, ModelMetadata, ReportValidationState, RunHealth,
-        SecurityCheckpoint, SecurityFinding, SecurityHarnessReport, SecurityHarnessStage,
-        SecurityTask, StageHistoryEntry, TargetRef, TaskStatus, TraceResult, ValidationDecision,
-        ValidationDecisionKind, VulnerabilityClassCoverage,
+        CoverageGap, DedupeGroup, LedgerSummary, LedgerSummaryEntry, ModelMetadata,
+        ReportValidationState, RunHealth, SecurityCheckpoint, SecurityFinding,
+        SecurityHarnessReport, SecurityHarnessStage, SecurityTask, StageHistoryEntry, TargetRef,
+        TaskStatus, TraceResult, ValidationDecision, ValidationDecisionKind,
+        VulnerabilityClassCoverage,
     },
 };
 #[allow(unused_imports)]
@@ -419,6 +421,39 @@ fn emit_checkpoint(
     out.checkpoints.push(event);
 }
 
+/// Reconcile a completed run's confirmed findings against the durable
+/// cross-run [`ledger`], stamping `checkpoint.ledger_summary` with each
+/// finding's stable key and new/recurring status. Best-effort: a load/save
+/// failure logs and leaves the summary empty rather than failing the run.
+async fn upsert_findings_ledger(
+    rt: &SecurityHarnessRuntime,
+    report: &SecurityHarnessReport,
+    checkpoint: &mut SecurityCheckpoint,
+) {
+    let store = ledger::LedgerStore::new(rt.workspace.clone(), rt.parent_working_dir.clone());
+    let mut findings_ledger = store.load().await;
+    let mut summary = LedgerSummary::default();
+    for finding in &report.findings {
+        let fingerprint = ledger::finding_fingerprint(finding);
+        let outcome = findings_ledger.upsert(&fingerprint, finding, &checkpoint.run_id);
+        if outcome.recurring {
+            summary.recurring_findings += 1;
+        } else {
+            summary.new_findings += 1;
+        }
+        summary.entries.push(LedgerSummaryEntry {
+            finding_id: finding.id.clone(),
+            finding_key: outcome.finding_key,
+            recurring: outcome.recurring,
+            occurrences: outcome.occurrences,
+        });
+    }
+    if let Err(e) = store.save(&findings_ledger).await {
+        tracing::warn!(error = %e, "failed to persist findings ledger; report still produced");
+    }
+    checkpoint.ledger_summary = summary;
+}
+
 async fn run_security_harness_inner(
     rt: &SecurityHarnessRuntime,
     started_epoch: u64,
@@ -634,6 +669,10 @@ async fn run_security_harness_inner(
         .report_draft
         .clone()
         .unwrap_or_else(|| report_from_checkpoint(&checkpoint));
+    // Reconcile this run's confirmed findings against the durable cross-run
+    // ledger BEFORE rendering, so the report can mark each finding new/recurring
+    // with a stable key. Best-effort: a ledger failure never blocks the report.
+    upsert_findings_ledger(rt, &report, &mut checkpoint).await;
     let elapsed = checkpoint.updated_at.saturating_sub(started_epoch);
     out.content = render_report_markdown(&report, &checkpoint);
     emit_checkpoint(
