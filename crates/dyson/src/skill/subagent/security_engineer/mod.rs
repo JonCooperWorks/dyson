@@ -223,10 +223,27 @@ const ELICITED_JUDGE_STAGES: &[SecurityHarnessStage] = &[
     SecurityHarnessStage::Report,
 ];
 
+/// Process-global memo of the cross-model judging decision, so the harness
+/// prompts for it AT MOST ONCE per process.
+///
+/// Without this, `elicit_secondary_model` re-parked an elicitation on every
+/// fresh run; an agent driving the harness repeatedly (or a human re-running it)
+/// saw the modal pop straight back up after answering, with no way to make it
+/// stop. The decision is a session-level choice, not a per-run one, so we ask
+/// once and reuse the answer. Outer `None` = not asked yet; inner `Some(model)`
+/// = judge on this model; inner `None` = answered "single model"
+/// (decline/cancel/blank/timeout), remembered so we stop asking.
+fn secondary_model_memo() -> &'static std::sync::Mutex<Option<Option<String>>> {
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<Option<Option<String>>>> =
+        std::sync::OnceLock::new();
+    MEMO.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 /// Ask the user (via the elicitation modal) for a secondary model to run the
-/// judging stages. No-op unless a UI is attached; an env override on every
-/// judge stage means there is nothing to ask. A declined/blank/timed-out answer
-/// leaves every stage on the run model.
+/// judging stages — but only the first time this process needs one. No-op
+/// unless a UI is attached; an env override on every judge stage means there is
+/// nothing to ask. A declined/blank/timed-out answer leaves every stage on the
+/// run model and is remembered so later runs don't re-prompt.
 async fn elicit_secondary_model(rt: &mut SecurityHarnessRuntime) {
     if !crate::skill::mcp::elicitation::ui_enabled() {
         return;
@@ -235,6 +252,11 @@ async fn elicit_secondary_model(rt: &mut SecurityHarnessRuntime) {
         .iter()
         .all(|stage| rt.stage_models.contains_key(stage))
     {
+        return;
+    }
+    // Already answered once this process? Reuse it instead of re-prompting.
+    if let Some(remembered) = secondary_model_memo().lock().unwrap().clone() {
+        pin_secondary_model(&mut rt.stage_models, remembered.as_deref());
         return;
     }
     let schema = serde_json::json!({
@@ -255,19 +277,17 @@ async fn elicit_secondary_model(rt: &mut SecurityHarnessRuntime) {
     let result = crate::skill::mcp::elicitation::broker()
         .elicit("security_engineer".to_string(), message, schema)
         .await;
-    apply_secondary_model_choice(&mut rt.stage_models, &result);
+    let chosen = secondary_model_from_result(&result);
+    *secondary_model_memo().lock().unwrap() = Some(chosen.clone());
+    pin_secondary_model(&mut rt.stage_models, chosen.as_deref());
 }
 
-/// Apply an elicitation result to the per-stage model map: on `accept` with a
-/// non-empty `validation_model`, pin the judge stages to it WITHOUT clobbering
-/// an existing env override (`entry().or_insert`). Pure, so the
-/// action/content/precedence handling is unit-testable.
-fn apply_secondary_model_choice(
-    stage_models: &mut std::collections::BTreeMap<SecurityHarnessStage, String>,
-    result: &serde_json::Value,
-) {
+/// The chosen secondary judge model from an elicitation result: `Some(model)`
+/// only on `accept` with a non-empty (trimmed) `validation_model`; `None` for
+/// decline/cancel/blank/timeout (judge on the run model). Pure + unit-testable.
+fn secondary_model_from_result(result: &serde_json::Value) -> Option<String> {
     if result.get("action").and_then(|a| a.as_str()) != Some("accept") {
-        return;
+        return None;
     }
     let model = result
         .get("content")
@@ -275,14 +295,34 @@ fn apply_secondary_model_choice(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
-    if model.is_empty() {
+    (!model.is_empty()).then(|| model.to_string())
+}
+
+/// Pin the judge stages to `model` WITHOUT clobbering an existing env override
+/// (`entry().or_insert`). No-op when `model` is `None`. Pure + unit-testable.
+fn pin_secondary_model(
+    stage_models: &mut std::collections::BTreeMap<SecurityHarnessStage, String>,
+    model: Option<&str>,
+) {
+    let Some(model) = model else {
         return;
-    }
+    };
     for stage in ELICITED_JUDGE_STAGES {
         stage_models
             .entry(*stage)
             .or_insert_with(|| model.to_string());
     }
+}
+
+/// Apply an elicitation result to the per-stage model map. Thin composition of
+/// [`secondary_model_from_result`] + [`pin_secondary_model`], kept for direct
+/// testing of the action/content/precedence handling.
+#[cfg(test)]
+fn apply_secondary_model_choice(
+    stage_models: &mut std::collections::BTreeMap<SecurityHarnessStage, String>,
+    result: &serde_json::Value,
+) {
+    pin_secondary_model(stage_models, secondary_model_from_result(result).as_deref());
 }
 
 /// Pure core of [`resolve_stage_models`], taking the env lookup as a closure so
