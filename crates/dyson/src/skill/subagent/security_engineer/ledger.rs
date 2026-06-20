@@ -25,60 +25,92 @@ use crate::workspace::WorkspaceHandle;
 const LEDGER_PATH: &str = "kb/security-harness/findings-ledger.json";
 const LEDGER_SCHEMA_VERSION: u32 = 1;
 
-/// Common connectives that carry no signal for identifying a finding. Kept
-/// deliberately small: over-stripping would erase the distinctive identifiers
-/// (function/route/symbol names) the signature relies on.
-const STOPWORDS: &[&str] = &[
-    "the", "and", "for", "with", "that", "this", "from", "into", "are", "was", "not", "but",
-    "then", "than", "when", "where", "which", "while", "must", "should", "could", "would", "only",
-    "also", "does", "done", "via", "per",
-];
-
 /// A stable, phrasing-independent fingerprint for a finding.
 ///
-/// Built from the *structural* anchors of the finding — its canonical
-/// vulnerability class, the file basenames it touches, the trust boundary, and
-/// distinctive identifier tokens from the entry point / sink — and SHA-256'd so
-/// it is stable across processes, platforms, and Rust versions (a hand-rolled
-/// `Hash` is none of those). The free-text `root_cause`/`title` are excluded on
-/// purpose: re-phrasings of the same bug must produce the same fingerprint.
+/// Keyed on the only three things two *independent* hunts of the same code
+/// reliably agree on: the canonical vulnerability class, the file basenames it
+/// touches, and the **sink location** (the `file:line` of the vulnerable line).
+/// SHA-256'd so it is stable across processes, platforms, and Rust versions (a
+/// hand-rolled `Hash` is none of those).
+///
+/// Everything else is excluded on purpose. The free-text `trust_boundary`,
+/// `entry_point`, `sink_or_decision`, `root_cause`, and `title` are all model
+/// prose: two runs describe the same IDOR as "unauthenticated internet caller
+/// -> user data store" and "any network caller -> in-memory user store", or the
+/// same sink as "dictionary lookup with no ownership check" and "retrieves the
+/// full record with no identity predicate". Hashing that prose made every re-run
+/// of unchanged code mint brand-new `DYS-` keys (live QA: 0 recurring across two
+/// consecutive identical runs). The structural anchors below survive re-wording;
+/// the prose does not, so it stays out of the fingerprint.
 pub(super) fn finding_fingerprint(finding: &SecurityFinding) -> String {
     let class =
         canonical_vulnerability_class(&finding.vulnerability_class).unwrap_or("uncategorized");
 
-    // Location anchor: file basenames (line numbers dropped so the fingerprint
+    // File identity: basenames only (line numbers dropped here so a finding
     // survives edits that merely shift lines). entry_point often carries a
-    // path:line too, so fold it in.
+    // path:line too, so fold its basename in.
     let mut paths: BTreeSet<String> = finding
         .affected_paths
         .iter()
         .map(|p| path_basename(p))
-        .filter(|s| !s.is_empty())
+        .filter(|s| s.contains('.'))
         .collect();
     let ep_path = path_basename(&finding.entry_point);
-    if !ep_path.is_empty() && ep_path.contains('.') {
+    if ep_path.contains('.') {
         paths.insert(ep_path);
     }
 
-    let boundary = normalize_ws(&finding.trust_boundary).to_lowercase();
-
-    // Distinctive identifier tokens from the structural fields — route names,
-    // symbol names, sink descriptors. Sorted + deduped so ordering/phrasing of
-    // the same identifiers yields the same signature.
-    let mut sig: BTreeSet<String> = BTreeSet::new();
-    for field in [&finding.entry_point, &finding.sink_or_decision] {
-        for tok in signature_tokens(field) {
-            sig.insert(tok);
-        }
-    }
+    // Sink location: the precise `file:line` of the vulnerable line, the one
+    // structural fact two independent hunts agree on (both cite `app.py:28` for
+    // the same IDOR even while wording the prose differently). Taken from the
+    // sink description, falling back to the entry point. Absent a `file:line`
+    // anchor the fingerprint is class+files only — coarser, but never keyed on
+    // prose. Deliberately NOT sourced from `affected_paths`, whose line numbers
+    // drift between runs without indicating a different bug.
+    let sink = sink_location(finding);
 
     let canonical = format!(
-        "class={class}|paths={}|boundary={boundary}|sig={}",
+        "class={class}|paths={}|sink={sink}",
         paths.into_iter().collect::<Vec<_>>().join(","),
-        sig.into_iter().collect::<Vec<_>>().join(","),
     );
     let digest = Sha256::digest(canonical.as_bytes());
     format!("fp-{}", hex16(&digest))
+}
+
+/// The vulnerable `basename:line` — the stable anchor two hunts of the same code
+/// agree on. Reads the first `path.ext:line` reference out of `sink_or_decision`
+/// (where the harness prompt has the model lead with the sink location), falling
+/// back to `entry_point`. Empty when neither carries one.
+fn sink_location(finding: &SecurityFinding) -> String {
+    first_file_line(&finding.sink_or_decision)
+        .or_else(|| first_file_line(&finding.entry_point))
+        .unwrap_or_default()
+}
+
+/// Extract the first `basename:line` from a `path.ext:line` reference embedded
+/// in free text, e.g. `app.py:47 — subprocess.run(...)` -> `app.py:47`. No regex
+/// dependency: scan whitespace/bracket-delimited tokens for one shaped like a
+/// file:line. `<int:user_id>` and `127.0.0.1` are rejected (no `.ext` before a
+/// numeric `:line`).
+fn first_file_line(s: &str) -> Option<String> {
+    for raw in s.split(|c: char| {
+        c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | '"')
+    }) {
+        let tok = raw.trim_matches(|c: char| {
+            !(c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '_' | '/' | '-'))
+        });
+        let Some((path, line)) = tok.rsplit_once(':') else {
+            continue;
+        };
+        if line.is_empty() || !line.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let base = path.rsplit('/').next().unwrap_or(path);
+        if base.len() >= 3 && base.contains('.') {
+            return Some(format!("{}:{}", base.to_ascii_lowercase(), line));
+        }
+    }
+    None
 }
 
 /// Stable human-facing key minted for a fingerprint on first sighting, e.g.
@@ -96,21 +128,6 @@ fn path_basename(p: &str) -> String {
     let p = p.trim();
     let last = p.rsplit('/').next().unwrap_or(p);
     last.split(':').next().unwrap_or(last).trim().to_string()
-}
-
-fn normalize_ws(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Identifier-ish tokens: lowercased runs of `[a-z0-9_]`, length >= 4, not a
-/// stopword, not purely numeric.
-fn signature_tokens(s: &str) -> Vec<String> {
-    s.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .filter(|t| t.len() >= 4)
-        .map(|t| t.to_ascii_lowercase())
-        .filter(|t| !STOPWORDS.contains(&t.as_str()))
-        .filter(|t| !t.chars().all(|c| c.is_ascii_digit()))
-        .collect()
 }
 
 fn hex16(digest: &[u8]) -> String {
@@ -381,6 +398,80 @@ mod tests {
         assert!(finding_fingerprint(&f).starts_with("fp-"));
     }
 
+    /// Regression for the live QA failure: two independent hunts of the SAME
+    /// IDOR worded every prose field differently but both pinned the sink to
+    /// `app.py:28`. The old prose-token fingerprint minted disjoint keys
+    /// (0 recurring); keying on the sink location makes them identical.
+    #[test]
+    fn fingerprint_keys_on_sink_location_not_prose() {
+        let run_a = SecurityFinding {
+            vulnerability_class: "auth_authorization".into(),
+            affected_paths: vec!["vuln-demo/app.py:22".into()],
+            entry_point: "app.py:22 — get_user(user_id) Flask route handler; user_id from URL path"
+                .into(),
+            sink_or_decision:
+                "app.py:28 — USERS.get(user_id) dictionary lookup with no ownership check".into(),
+            trust_boundary: "unauthenticated internet caller -> user data store (USERS dict)"
+                .into(),
+            ..Default::default()
+        };
+        let run_b = SecurityFinding {
+            vulnerability_class: "auth_authorization".into(),
+            // line drift in affected_paths must not matter (basename only).
+            affected_paths: vec!["vuln-demo/app.py:21".into()],
+            entry_point: "app.py:22 — def get_user(user_id) receives <int:user_id> from the route"
+                .into(),
+            sink_or_decision:
+                "app.py:28 — USERS.get(user_id) retrieves the full record with no identity predicate"
+                    .into(),
+            trust_boundary: "any network caller -> in-memory user store".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            finding_fingerprint(&run_a),
+            finding_fingerprint(&run_b),
+            "same class + file + sink line must fingerprint identically despite reworded prose"
+        );
+
+        // A genuinely different sink line (different bug) must NOT collide.
+        let other_line = SecurityFinding {
+            sink_or_decision: "app.py:47 — subprocess.run(cmd, shell=True) executes attacker input"
+                .into(),
+            vulnerability_class: "injection_unsafe_execution".into(),
+            ..run_a.clone()
+        };
+        assert_ne!(
+            finding_fingerprint(&run_a),
+            finding_fingerprint(&other_line)
+        );
+    }
+
+    #[test]
+    fn first_file_line_extracts_sink_anchor() {
+        assert_eq!(
+            first_file_line("app.py:47 — subprocess.run(cmd, shell=True)").as_deref(),
+            Some("app.py:47")
+        );
+        assert_eq!(
+            first_file_line("the call at (src/api/users.rs:28) returns the row").as_deref(),
+            Some("users.rs:28")
+        );
+        // Not file:line anchors: a host:port-ish literal, a `<int:user_id>`
+        // converter, and prose with no location.
+        assert_eq!(
+            first_file_line("ping -c 1 127.0.0.1 then exit").as_deref(),
+            None
+        );
+        assert_eq!(
+            first_file_line("<int:user_id> path converter").as_deref(),
+            None
+        );
+        assert_eq!(
+            first_file_line("no location in this sentence").as_deref(),
+            None
+        );
+    }
+
     #[test]
     fn upsert_mints_then_reopens_the_same_key() {
         let mut ledger = FindingsLedger::default();
@@ -504,12 +595,14 @@ mod tests {
         };
         let model_report = vec![model_idor.clone(), model_cmdi];
 
-        // The model's rephrasing genuinely changes the *raw* fingerprint — this
-        // is the trap the old code fell into by hashing `report.findings`.
-        assert_ne!(
+        // The model's rephrasing leaves the structural fingerprint untouched:
+        // same class, same file basename, same (here: absent) sink line. Keying
+        // on structure rather than prose is what makes the key stable whichever
+        // report path renders it.
+        assert_eq!(
             finding_fingerprint(&idor),
             finding_fingerprint(&model_idor),
-            "precondition: the model's rephrasing perturbs the raw fingerprint"
+            "reworded prose must not perturb the structural fingerprint"
         );
 
         // A fresh run reloads the persisted ledger before reconciling.

@@ -523,7 +523,7 @@ pub(super) fn report_checkpoint_for_prompt(checkpoint: &SecurityCheckpoint) -> S
 /// Cluster findings by stable fingerprint (see
 /// [`super::ledger::finding_fingerprint`]) rather than by exact `root_cause`
 /// string. Two hunters describing the same flaw in different words — same class,
-/// files, and trust boundary — now collapse into one group, which exact-string
+/// file, and sink location — now collapse into one group, which exact-string
 /// matching missed. The group's displayed `root_cause` is the primary finding's
 /// (falling back to its title), preserving the human-readable label.
 pub fn dedupe_findings(findings: &[SecurityFinding]) -> Vec<DedupeGroup> {
