@@ -518,22 +518,16 @@ async fn upsert_findings_ledger(
 ) {
     let store = ledger::LedgerStore::new(rt.workspace.clone(), rt.parent_working_dir.clone());
     let mut findings_ledger = store.load().await;
-    let mut summary = LedgerSummary::default();
-    for finding in &report.findings {
-        let fingerprint = ledger::finding_fingerprint(finding);
-        let outcome = findings_ledger.upsert(&fingerprint, finding, &checkpoint.run_id);
-        if outcome.recurring {
-            summary.recurring_findings += 1;
-        } else {
-            summary.new_findings += 1;
-        }
-        summary.entries.push(LedgerSummaryEntry {
-            finding_id: finding.id.clone(),
-            finding_key: outcome.finding_key,
-            recurring: outcome.recurring,
-            occurrences: outcome.occurrences,
-        });
-    }
+    // Fingerprint the canonical checkpoint findings, NOT `report.findings`: the
+    // latter are model-re-authored in the `valid` path and raw in the
+    // `deterministic_fallback` path, so hashing them minted a fresh key per run
+    // whenever the path differed. See `ledger::reconcile_findings_ledger`.
+    let summary = ledger::reconcile_findings_ledger(
+        &mut findings_ledger,
+        &checkpoint.findings_so_far,
+        &report.findings,
+        &checkpoint.run_id,
+    );
     if let Err(e) = store.save(&findings_ledger).await {
         tracing::warn!(error = %e, "failed to persist findings ledger; report still produced");
     }

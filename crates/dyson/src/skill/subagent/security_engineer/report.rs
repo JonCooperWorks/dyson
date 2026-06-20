@@ -507,6 +507,16 @@ pub(super) fn report_checkpoint_for_prompt(checkpoint: &SecurityCheckpoint) -> S
         .filter(|trace| reportable_ids.contains(&trace.finding_id))
         .cloned()
         .collect();
+    // Drop the orchestration-only task queues from the prompt. The report
+    // contract is "use only findings, rejected candidates, class coverage,
+    // gaps, dedupe groups, trace evidence, and stage history" — the per-task
+    // hunt/gapfill queues are never read, but on a large run they balloon the
+    // serialized checkpoint the report model has to ingest, which is what tips
+    // a heavy run into a JSON-shape failure and the deterministic fallback.
+    // Coverage is already conveyed by `class_coverage` + `stage_history`.
+    filtered.completed_tasks = Vec::new();
+    filtered.pending_tasks = Vec::new();
+    filtered.gapfill_tasks = Vec::new();
     filtered
 }
 
@@ -931,6 +941,64 @@ mod tests {
             "a confirmed and complete finding should appear in reportable list"
         );
         assert_eq!(result[0].id, "finding-001");
+    }
+
+    #[test]
+    fn report_checkpoint_for_prompt_drops_task_queues_but_keeps_reportable_facts() {
+        use super::super::types::{SecurityTask, TaskStatus};
+        let mut cp = cp_with_target("/repo");
+        cp.findings_so_far.push(finding("finding-001", "rc"));
+        cp.validation_decisions_so_far.push(ValidationDecision {
+            finding_id: "finding-001".into(),
+            decision: ValidationDecisionKind::Confirmed,
+            evidence: "ok".into(),
+            severity: None,
+        });
+        cp.class_coverage.push(VulnerabilityClassCoverage {
+            class_id: "auth_authorization".into(),
+            class_name: "Authentication and authorization".into(),
+            considered: true,
+            applicable: true,
+            hunted: true,
+            ..Default::default()
+        });
+        let task = |id: &str| SecurityTask {
+            id: id.into(),
+            attack_class: "auth_authorization".into(),
+            scope_hint: "scope".into(),
+            status: TaskStatus::Completed,
+            rationale: "r".into(),
+        };
+        cp.completed_tasks.push(task("t-done"));
+        cp.pending_tasks.push(task("t-pending"));
+        cp.gapfill_tasks.push(task("t-gap"));
+
+        let pruned = report_checkpoint_for_prompt(&cp);
+        // Orchestration queues are dropped to shrink the report model's input.
+        assert!(
+            pruned.completed_tasks.is_empty(),
+            "completed_tasks must be dropped from the report prompt"
+        );
+        assert!(
+            pruned.pending_tasks.is_empty(),
+            "pending_tasks must be dropped"
+        );
+        assert!(
+            pruned.gapfill_tasks.is_empty(),
+            "gapfill_tasks must be dropped"
+        );
+        // The facts the report contract relies on must survive the prune.
+        assert_eq!(
+            pruned.findings_so_far.len(),
+            1,
+            "reportable findings must survive the prune"
+        );
+        assert_eq!(pruned.findings_so_far[0].id, "finding-001");
+        assert_eq!(
+            pruned.class_coverage.len(),
+            1,
+            "class coverage must survive the prune"
+        );
     }
 
     #[test]

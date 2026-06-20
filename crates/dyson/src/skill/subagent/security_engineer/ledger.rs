@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::taxonomy::canonical_vulnerability_class;
-use super::types::SecurityFinding;
+use super::types::{LedgerSummary, LedgerSummaryEntry, SecurityFinding};
 use crate::workspace::WorkspaceHandle;
 
 const LEDGER_PATH: &str = "kb/security-harness/findings-ledger.json";
@@ -198,6 +198,58 @@ impl FindingsLedger {
     }
 }
 
+/// Reconcile the findings a run will report against the durable ledger,
+/// returning the per-finding [`LedgerSummary`] (stable key + new/recurring).
+///
+/// The fingerprint is derived from the *canonical* checkpoint finding
+/// (`canonical_findings`, looked up by `finding.id`) rather than from the
+/// rendered `report_findings`. This is the load-bearing detail: the rendered
+/// findings differ between the two report paths — in the `valid` path they are
+/// re-authored by the report model (which freely rephrases `entry_point`,
+/// `sink_or_decision`, `trust_boundary`, etc.), while in the
+/// `deterministic_fallback` path they are the raw checkpoint findings. Hashing
+/// the model's rephrasing made the SAME bug mint a fresh `DYS-` key whenever the
+/// report path differed across runs, so re-runs never matched. Folding back to
+/// the checkpoint finding removes the report model from the fingerprint entirely,
+/// leaving only the hunt phrasing the fingerprint already absorbs structurally.
+///
+/// The summary entry is still keyed by the *rendered* `finding.id` so the report
+/// renderer can join keys onto the findings it actually prints. A rendered
+/// finding whose id is absent from the checkpoint (model renumbered/invented)
+/// falls back to fingerprinting itself — degraded, but never wrong.
+pub(super) fn reconcile_findings_ledger(
+    ledger: &mut FindingsLedger,
+    canonical_findings: &[SecurityFinding],
+    report_findings: &[SecurityFinding],
+    run_id: &str,
+) -> LedgerSummary {
+    let canonical: BTreeMap<&str, &SecurityFinding> = canonical_findings
+        .iter()
+        .map(|finding| (finding.id.as_str(), finding))
+        .collect();
+    let mut summary = LedgerSummary::default();
+    for finding in report_findings {
+        let fingerprint_source = canonical
+            .get(finding.id.as_str())
+            .copied()
+            .unwrap_or(finding);
+        let fingerprint = finding_fingerprint(fingerprint_source);
+        let outcome = ledger.upsert(&fingerprint, fingerprint_source, run_id);
+        if outcome.recurring {
+            summary.recurring_findings += 1;
+        } else {
+            summary.new_findings += 1;
+        }
+        summary.entries.push(LedgerSummaryEntry {
+            finding_id: finding.id.clone(),
+            finding_key: outcome.finding_key,
+            recurring: outcome.recurring,
+            occurrences: outcome.occurrences,
+        });
+    }
+    summary
+}
+
 /// Loads/saves the [`FindingsLedger`]. Mirrors `checkpoint::CheckpointStore`:
 /// workspace `kb/` tree when present (Swarm-mirrored), local `.dyson/` fallback
 /// otherwise.
@@ -360,5 +412,141 @@ mod tests {
         let json = serde_json::to_string(&ledger).expect("serialize");
         let back: FindingsLedger = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(ledger, back);
+    }
+
+    fn finding_with_id(
+        id: &str,
+        class: &str,
+        path: &str,
+        entry: &str,
+        sink: &str,
+    ) -> SecurityFinding {
+        SecurityFinding {
+            id: id.into(),
+            title: format!("title for {id}"),
+            severity: "high".into(),
+            vulnerability_class: class.into(),
+            affected_paths: vec![path.into()],
+            entry_point: entry.into(),
+            sink_or_decision: sink.into(),
+            trust_boundary: "caller-to-service".into(),
+            root_cause: "rc".into(),
+            ..Default::default()
+        }
+    }
+
+    fn in_memory_workspace() -> WorkspaceHandle {
+        std::sync::Arc::new(tokio::sync::RwLock::new(Box::new(
+            crate::workspace::InMemoryWorkspace::new(),
+        )
+            as Box<dyn crate::workspace::Workspace>))
+    }
+
+    /// Regression for the live QA: running the harness twice against unchanged
+    /// code minted brand-new `DYS-` keys and reported 0 recurring on the second
+    /// run, because run 1 fell back to the `deterministic_fallback` report path
+    /// (findings == raw checkpoint findings) while run 2 produced a `valid`,
+    /// model-authored report (findings re-phrased by the report model). The two
+    /// paths hashed different text, so the fingerprints — and thus the keys —
+    /// diverged. Folding the fingerprint back to the canonical checkpoint
+    /// finding makes the key path-independent.
+    #[tokio::test]
+    async fn rerun_across_report_paths_keeps_keys_and_marks_recurring() {
+        // The Swarm-mirrored `kb/` tree, shared across both runs.
+        let workspace = in_memory_workspace();
+        let store = LedgerStore::new(Some(workspace), PathBuf::from("/unused"));
+
+        // The two confirmed bugs in ./vuln-demo. Identical code → identical
+        // canonical checkpoint findings on every run (the hunt's structural
+        // output, which the fingerprint already absorbs).
+        let idor = finding_with_id(
+            "finding-001",
+            "auth_authorization",
+            "vuln-demo/app.py:14",
+            "GET /users/<id> handler",
+            "ownership authorization decision",
+        );
+        let cmdi = finding_with_id(
+            "finding-002",
+            "injection_unsafe_execution",
+            "vuln-demo/app.py:27",
+            "POST /ping handler",
+            "subprocess shell invocation",
+        );
+        let canonical = vec![idor.clone(), cmdi.clone()];
+
+        // Run 1: the report stage fell back to deterministic_fallback, so the
+        // rendered findings ARE the canonical checkpoint findings verbatim.
+        let mut ledger = store.load().await;
+        let run1 = reconcile_findings_ledger(&mut ledger, &canonical, &canonical, "sec-run-1");
+        store.save(&ledger).await.expect("persist run 1");
+        assert_eq!(run1.new_findings, 2, "first run: both findings are new");
+        assert_eq!(run1.recurring_findings, 0);
+
+        // Run 2: the report stage produced a VALID, model-authored report. The
+        // report model re-phrased every free-text + structural field but kept
+        // the finding ids and the underlying bugs.
+        let model_idor = SecurityFinding {
+            title: "Insecure direct object reference on user lookup".into(),
+            trust_boundary: "unauthenticated caller to application server".into(),
+            entry_point: "Flask route GET /users/<id> (users_show view)".into(),
+            sink_or_decision: "user row returned without an owner check".into(),
+            root_cause: "the view never verifies the session owns the requested id".into(),
+            ..idor.clone()
+        };
+        let model_cmdi = SecurityFinding {
+            title: "OS command injection via ping host parameter".into(),
+            trust_boundary: "remote attacker to host shell".into(),
+            entry_point: "Flask route POST /ping (ping_host view)".into(),
+            sink_or_decision: "os.system invoked with shell=True on attacker input".into(),
+            root_cause: "user-controlled host concatenated into a shell command".into(),
+            ..cmdi.clone()
+        };
+        let model_report = vec![model_idor.clone(), model_cmdi];
+
+        // The model's rephrasing genuinely changes the *raw* fingerprint — this
+        // is the trap the old code fell into by hashing `report.findings`.
+        assert_ne!(
+            finding_fingerprint(&idor),
+            finding_fingerprint(&model_idor),
+            "precondition: the model's rephrasing perturbs the raw fingerprint"
+        );
+
+        // A fresh run reloads the persisted ledger before reconciling.
+        let mut ledger = store.load().await;
+        let run2 = reconcile_findings_ledger(&mut ledger, &canonical, &model_report, "sec-run-2");
+        store.save(&ledger).await.expect("persist run 2");
+
+        assert_eq!(
+            run2.recurring_findings, 2,
+            "re-run of identical code: both findings must be recurring"
+        );
+        assert_eq!(
+            run2.new_findings, 0,
+            "a clean re-run must not mint any new findings"
+        );
+
+        let run1_keys: BTreeMap<&str, &str> = run1
+            .entries
+            .iter()
+            .map(|e| (e.finding_id.as_str(), e.finding_key.as_str()))
+            .collect();
+        for entry in &run2.entries {
+            assert_eq!(
+                run1_keys.get(entry.finding_id.as_str()),
+                Some(&entry.finding_key.as_str()),
+                "finding {} must keep the SAME DYS- key across runs",
+                entry.finding_id
+            );
+            assert!(
+                entry.finding_key.starts_with("DYS-"),
+                "key should be a DYS- ledger key, got {}",
+                entry.finding_key
+            );
+            assert_eq!(
+                entry.occurrences, 2,
+                "a recurring finding's occurrence count must bump on re-sighting"
+            );
+        }
     }
 }
