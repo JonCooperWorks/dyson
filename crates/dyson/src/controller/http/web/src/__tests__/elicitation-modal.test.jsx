@@ -218,6 +218,34 @@ describe('ElicitationModal', () => {
     expect(client.respondElicitation).toHaveBeenCalledWith('6', { action: 'cancel' });
   });
 
+  it('auto-dismisses a prompt once the backend stops listing it', async () => {
+    // The broker cancels a parked elicitation after 300s; the harness may also
+    // resolve it out of band. The modal must not strand: it keeps polling while
+    // shown and clears itself when the prompt vanishes from the pending list.
+    let calls = 0;
+    const prompt = {
+      id: '1',
+      server: 'security_engineer',
+      message: 'Stale prompt?',
+      requestedSchema: { type: 'object' },
+    };
+    const client = {
+      // Listed for the first couple of polls, then gone (resolved/timed out).
+      listElicitations: vi.fn(async () => {
+        calls += 1;
+        return { pending: calls <= 2 ? [prompt] : [] };
+      }),
+      respondElicitation: vi.fn(async () => ({ ok: true })),
+    };
+    renderWith(client);
+
+    await waitFor(() => expect(screen.getByText('Stale prompt?')).toBeTruthy());
+    // No user action — the continued poll clears it. The old code stopped
+    // polling once a prompt showed and stranded the modal here forever.
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull(), { timeout: 4000 });
+    expect(client.respondElicitation).not.toHaveBeenCalled();
+  });
+
   it('renders field descriptions as help text', async () => {
     const client = mockClient({
       pending: [

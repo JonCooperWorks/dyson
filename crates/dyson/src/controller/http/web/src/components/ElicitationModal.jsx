@@ -23,9 +23,16 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useApi } from '../hooks/useApi.js';
 
 /** Idle poll interval — fast enough that a server-side elicit lands
- *  promptly, slow enough not to spam the controller.  Once a prompt is on
- *  screen we stop polling entirely until the user dismisses it. */
+ *  promptly, slow enough not to spam the controller. */
 const IDLE_POLL_MS = 500;
+
+/** Slow poll kept running WHILE a prompt is on screen.  Without it, a prompt
+ *  the backend has already resolved or timed out (the broker cancels a parked
+ *  elicitation after 300s) would strand a modal the user can never dismiss —
+ *  every Cancel/Submit then 404s on the vanished id, and SPA hash-routing never
+ *  remounts the component.  Re-checking lets the modal clear itself once the
+ *  backend stops listing the prompt. */
+const STALE_POLL_MS = 3000;
 
 /** Build the initial form state from a JSON-schema `properties` object.
  *  Honor `default` where the spec admits it; otherwise booleans start
@@ -208,21 +215,27 @@ export function ElicitationModal() {
         if (next && (!cur || cur.id !== next.id)) {
           setValues(initialValues(next.requestedSchema));
           setTouched({});
+          return next;
         }
-        return next;
+        // Same prompt still pending: keep the existing reference so a
+        // background re-poll doesn't churn the form. A null `next` (the prompt
+        // was resolved or timed out on the backend) falls through and dismisses
+        // the modal.
+        return next && cur && next.id === cur.id ? cur : next;
       });
     } catch {
       // Network blips are transient; the next tick retries.
     }
   }, [api]);
 
-  // While idle (no prompt visible), poll fast; once a prompt is on screen
-  // we stop polling — the user is busy filling it out and the next prompt
-  // can wait until this one resolves.
+  // Poll fast while idle so a prompt lands promptly; keep polling (slower)
+  // while one is shown so a prompt resolved or timed out on the backend clears
+  // itself instead of stranding a modal the user can't dismiss. The poll's
+  // setPrompt updater keeps the current prompt's reference stable, so this does
+  // not clobber a half-filled form.
   useEffect(() => {
-    if (prompt) return undefined;
     poll();
-    const t = setInterval(poll, IDLE_POLL_MS);
+    const t = setInterval(poll, prompt ? STALE_POLL_MS : IDLE_POLL_MS);
     return () => clearInterval(t);
   }, [poll, prompt]);
 
@@ -278,11 +291,14 @@ export function ElicitationModal() {
       setValues({});
       setTouched({});
     } catch {
-      // Leave the modal open so the user can retry.
+      // The answer didn't land. If the prompt is already gone on the backend
+      // (resolved elsewhere or timed out), an immediate re-poll clears the
+      // modal; otherwise it stays open for the user to retry.
+      poll();
     } finally {
       setBusy(false);
     }
-  }, [api, prompt, props, values, hasErrors]);
+  }, [api, prompt, props, values, hasErrors, poll]);
 
   // ESC cancels, Cmd/Ctrl-Enter accepts.  Enter alone is intentionally
   // *not* a submit shortcut: it would fire while the user is mid-typing
