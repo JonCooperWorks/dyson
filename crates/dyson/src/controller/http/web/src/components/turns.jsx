@@ -767,6 +767,9 @@ function Composer({
   const controlled = typeof onDraftChange === 'function';
   const [localVal, setLocalVal] = useState('');
   const [slash, setSlash] = useState(false);
+  // Highlighted row in the slash menu, driven by ArrowUp/ArrowDown and
+  // hover.  Mirrors command-palette.jsx's `active` cursor.
+  const [slashIdx, setSlashIdx] = useState(0);
   // Real File objects from <input type="file"> or drag-drop.  Sent as
   // base64 attachments through DysonClient.send → /api/.../turn → agent
   // run_with_attachments (same path Telegram takes for media).
@@ -779,6 +782,7 @@ function Composer({
   const apiClient = useApiOptional();
   const taRef = useRef();
   const fileRef = useRef();
+  const slashItemRef = useRef(null);
   const activeModel = useAppState(s => s.activeModel);
   const agentName = useAppState(s => s.agentName) || 'dyson';
   const val = controlled ? draftText : localVal;
@@ -788,6 +792,9 @@ function Composer({
   const commandToken = trimmedDraft.split(/\s/)[0] || '/';
   const commandTokenOnly = trimmedDraft.startsWith('/') && !/\s/.test(trimmedDraft);
   const filtered = slash && commandTokenOnly ? availableSlashCommands.filter(c => c.cmd.startsWith(commandToken)) : [];
+  // Clamp the highlight into range — the filtered list shrinks as the
+  // user types, so a stale index must not point past the end.
+  const activeSlashIdx = filtered.length ? Math.min(slashIdx, filtered.length - 1) : 0;
   const preview = slashCommandPreview(val, availableSlashCommands);
   const setDraft = useCallback((text, attachments = atts) => {
     if (controlled) onDraftChange({ text, attachments });
@@ -808,6 +815,25 @@ function Composer({
     prepareComposerFocus(taRef.current);
     taRef.current?.focus({ preventScroll: true });
   }, []);
+
+  // Insert a slash command into the draft and dismiss the menu.  Shared
+  // by click and by Enter/Tab keyboard selection.
+  const pickSlash = useCallback((c) => {
+    if (!c) return;
+    setDraft(c.cmd + ' ');
+    setSlash(false);
+    focusTextarea();
+  }, [setDraft, focusTextarea]);
+
+  // Reset the highlight to the top whenever the filter text changes or
+  // the menu (re)opens, matching command-palette's behaviour.
+  useEffect(() => { setSlashIdx(0); }, [commandToken, slash]);
+
+  // Keep the highlighted row visible as arrow-nav walks a scrolling list.
+  // `?.()` guards jsdom, which doesn't implement scrollIntoView.
+  useEffect(() => {
+    slashItemRef.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [activeSlashIdx, slash]);
 
   useEffect(() => {
     pinComposerFocusGuard(taRef.current);
@@ -898,7 +924,11 @@ function Composer({
       {slash && filtered.length > 0 && (
         <div className="slashmenu">
           {filtered.map((c, i) => (
-            <div key={i} className={`item ${i===0?'focused':''}`} onClick={() => { setDraft(c.cmd + ' '); setSlash(false); focusTextarea(); }}>
+            <div key={i}
+                 ref={i === activeSlashIdx ? slashItemRef : null}
+                 className={`item ${i === activeSlashIdx ? 'focused' : ''}`}
+                 onMouseEnter={() => setSlashIdx(i)}
+                 onClick={() => pickSlash(c)}>
               <span className="cmd">{c.cmd}</span>
               <span className="desc">{c.desc}</span>
               <span className="src">{c.src}</span>
@@ -957,12 +987,31 @@ function Composer({
           }}
           onPaste={onPaste}
           onKeyDown={e => {
+            const menuOpen = slash && filtered.length > 0;
+            // Arrow keys drive the slash-menu highlight while it's open.
+            if (menuOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+              e.preventDefault();
+              setSlashIdx(() => e.key === 'ArrowDown'
+                ? Math.min(activeSlashIdx + 1, filtered.length - 1)
+                : Math.max(activeSlashIdx - 1, 0));
+              return;
+            }
+            // Tab also picks the highlighted command (no newline cost).
+            if (menuOpen && e.key === 'Tab' && !e.shiftKey) {
+              e.preventDefault();
+              pickSlash(filtered[activeSlashIdx]);
+              return;
+            }
             // Enter alone sends; Shift+Enter inserts a newline.
             // Ignore other modifiers so OS-level shortcuts (⌘↵ etc.)
-            // don't double-fire on top of the browser's default.
+            // don't double-fire on top of the browser's default.  While
+            // the slash menu is open, Enter picks the highlighted command
+            // instead of sending.
             if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
               e.preventDefault();
+              if (menuOpen) { pickSlash(filtered[activeSlashIdx]); return; }
               sub();
+              return;
             }
             if (e.key === 'Escape') setSlash(false);
           }}
