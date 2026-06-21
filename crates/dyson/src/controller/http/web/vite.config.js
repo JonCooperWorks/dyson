@@ -51,6 +51,12 @@ const useMock = process.env.VITE_DYSON_MOCK === '1';
 
 export default defineConfig({
   plugins: [react(), inlineCss(), ...(useMock ? [dysonMock()] : [])],
+  // Shared UI lives in the dyson-common-ui package; dedupe React so the
+  // linked/peer package and the app share one React instance (no dup-React
+  // "invalid hook call").
+  resolve: {
+    dedupe: ['react', 'react-dom'],
+  },
   // Vitest runs under jsdom so regression tests can mount components and
   // walk the resulting DOM — source-text greps missed the artefacts-tab
   // black-screen bug five times because they couldn't see what React

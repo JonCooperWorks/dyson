@@ -17,7 +17,7 @@ import { CommandPalette } from './command-palette.jsx';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession, useSessionMutator } from '../hooks/useSession.js';
-import { useEscapeKey } from '../hooks/useEscapeKey.js';
+import { useEscapeKey } from 'dyson-common-ui';
 import {
   setTool, updateTool, mergeTools, upsertConversation,
   switchProviderModel,

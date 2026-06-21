@@ -21,7 +21,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useApi } from '../hooks/useApi.js';
-import { Modal } from './Modal.jsx';
+import { Modal } from 'dyson-common-ui';
 
 /** Idle poll interval — fast enough that a server-side elicit lands
  *  promptly, slow enough not to spam the controller. */

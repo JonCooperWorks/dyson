@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { NAVS } from './views.jsx';
 import { FALLBACK_SLASH_COMMANDS } from '../store/constants.js';
-import { Modal } from './Modal.jsx';
+import { Modal } from 'dyson-common-ui';
 
 export function buildCommandItems({
   conversations = [],

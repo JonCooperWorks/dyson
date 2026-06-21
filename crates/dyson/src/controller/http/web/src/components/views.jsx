@@ -8,7 +8,7 @@ import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
-import { useEscapeKey } from '../hooks/useEscapeKey.js';
+import { useEscapeKey } from 'dyson-common-ui';
 import {
   switchProviderModel, removeConversation, upsertConversation,
 } from '../store/app.js';

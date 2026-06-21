@@ -1,26 +1,14 @@
 /* Dyson skin aligned with swarm's web UI.  This file is imported last so
    existing component behavior stays intact while the visual language comes
-   from swarm's tokens, controls, rails, and panels. */
+   from swarm's tokens, controls, rails, and panels.
+
+   The canonical design tokens (--bg, --accent, --mono, --radius, …) now
+   live in dyson-common-ui/tokens.css (imported in main.jsx) — the single
+   source of the look shared with swarm.  This file keeps only the
+   compatibility aliases that bridge Dyson's native token names
+   (--panel, --line, --font-ui, role colors, …) onto those shared tokens. */
 
 :root {
-  --bg: #0f1115;
-  --bg-1: #161922;
-  --bg-2: #1d2230;
-  --fg: #e5e7eb;
-  --fg-muted: #9aa3b2;
-  --fg-faint: #6b7280;
-  --border: #262b39;
-  --accent: #6ea9ff;
-  --accent-fg: #0f1115;
-  --danger: #f87171;
-  --warn: #fbbf24;
-  --ok: #34d399;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --radius: 6px;
-  --gap: 12px;
-  --control-height: 34px;
-
   /* Compatibility aliases for Dyson's existing selectors. */
   --panel: var(--bg-1);
   --panel-2: var(--bg-2);

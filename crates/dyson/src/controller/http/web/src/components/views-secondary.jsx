@@ -15,7 +15,7 @@ import { copyToClipboard } from '../lib/clipboard.js';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession } from '../hooks/useSession.js';
-import { useEscapeKey } from '../hooks/useEscapeKey.js';
+import { useEscapeKey } from 'dyson-common-ui';
 import {
   setActivity,
   requestOpenArtefact, clearPendingArtefact,

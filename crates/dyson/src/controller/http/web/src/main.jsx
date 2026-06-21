@@ -5,10 +5,12 @@
 // channel, no bump() counter.
 
 import './styles/tokens.css';
+import 'dyson-common-ui/tokens.css';
 import './styles/layout.css';
 import './styles/turns.css';
 import './styles/panels.css';
 import './styles/swarm-theme.css';
+import 'dyson-common-ui/components.css';
 
 import React from 'react';
 import ReactDOM from 'react-dom/client';
