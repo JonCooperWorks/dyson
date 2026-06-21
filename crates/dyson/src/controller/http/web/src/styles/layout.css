@@ -989,7 +989,8 @@
 }
 
 /* mobile menu toggles in topbar */
-.topbar .menu-toggle {
+.topbar .menu-toggle,
+.topbar .new-chat {
   display: none;
   background: transparent; border: 0;
   color: var(--fg-dim);
@@ -998,9 +999,11 @@
   cursor: pointer; border-radius: 5px;
   transition: background 120ms ease, color 120ms ease;
 }
-.topbar .menu-toggle:hover { background: var(--panel); color: var(--fg); }
+.topbar .menu-toggle:hover,
+.topbar .new-chat:hover { background: var(--panel); color: var(--fg); }
 @media (max-width: 760px) {
-  .topbar .menu-toggle { display: inline-flex; }
+  .topbar .menu-toggle,
+  .topbar .new-chat { display: inline-flex; }
 }
 
 /* ---------- empty state ---------- */

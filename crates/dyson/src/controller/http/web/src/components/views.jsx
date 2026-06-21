@@ -34,7 +34,7 @@ export function brandMark(agentName) {
   return name.replace(/\s+/g, '').slice(0, 1).toUpperCase() || 'D';
 }
 
-function TopBar({ view, setView, onToggleLeft, running, nextRunModel, onPickModel }) {
+function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel, onPickModel }) {
   const client = useApi();
   const model = useAppState(s => s.activeModel);
   const providers = useAppState(s => s.providers);
@@ -77,6 +77,11 @@ function TopBar({ view, setView, onToggleLeft, running, nextRunModel, onPickMode
       <button className="menu-toggle" title={drawerTitle} aria-label={drawerTitle} onClick={onToggleLeft}>
         <Icon name="menu" size={14}/>
       </button>
+      {typeof onNewChat === 'function' && (
+        <button className="new-chat" title="New conversation" aria-label="New conversation" onClick={onNewChat}>
+          <Icon name="compose" size={15}/>
+        </button>
+      )}
       <div className="brand"><div className="mark">{brandMark(agentName)}</div><div className="name">{brandLabel(agentName)}</div></div>
       <nav>
         {NAVS.map(n => (
@@ -152,7 +157,7 @@ function ModelMenu({ providers, model, expanded, nextRunModel, onToggleGroup, on
   );
 }
 
-function LeftRail({ active, setActive, filter, emptyLabel }) {
+function LeftRail({ active, setActive, filter, emptyLabel, onNew }) {
   // HTTP + Telegram chats live in the same ~/.dyson/chats directory —
   // one flat list is the accurate shape.  `filter` trims the list for
   // views that only care about a subset (e.g. Artefacts hides chats
@@ -171,10 +176,13 @@ function LeftRail({ active, setActive, filter, emptyLabel }) {
   // the active chat into an archive file the user couldn't see without
   // CLI access.  Rotation is opt-in via /clear; explicit removal is via
   // the per-row delete button.
-  const newConv = () => client.createChat('New conversation').then(c => {
+  // App lifts a single new-conversation handler so the TopBar's mobile
+  // new-chat button, the ⌘K shortcut, and this rail button all share one
+  // behaviour.  Fall back to a local impl when rendered standalone (tests).
+  const newConv = onNew || (() => client.createChat('New conversation').then(c => {
     upsertConversation({ id: c.id, title: c.title, live: false, source: 'http' });
     setActive(c.id);
-  }).catch(() => {});
+  }).catch(() => {}));
 
   const deleteConv = (id, e) => {
     e.stopPropagation();

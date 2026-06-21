@@ -483,13 +483,15 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.topbar .menu-toggle {
+.topbar .menu-toggle,
+.topbar .new-chat {
   width: 32px;
   height: 32px;
   border-radius: var(--radius);
   color: var(--fg-muted);
 }
-.topbar .menu-toggle:hover {
+.topbar .menu-toggle:hover,
+.topbar .new-chat:hover {
   background: var(--bg-2);
   color: var(--fg);
 }
@@ -2215,7 +2217,8 @@ textarea {
     gap: 8px;
     min-width: 0;
   }
-  .topbar .menu-toggle {
+  .topbar .menu-toggle,
+  .topbar .new-chat {
     flex: 0 0 32px;
   }
   .topbar .brand {

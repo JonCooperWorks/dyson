@@ -155,6 +155,19 @@ function App() {
     clearPendingArtefact();
   }, []);
 
+  // Single new-conversation handler shared by the TopBar new-chat button
+  // (mobile reaches this without opening the sidebar), the ⌘K shortcut,
+  // and the LeftRail button.  Lands on the fresh chat in conv view and
+  // closes the mobile rail.
+  const newConversation = useCallback(() => (
+    client.createChat('New conversation').then(c => {
+      upsertConversation({ id: c.id, title: c.title, live: false, source: 'http' });
+      setConv(c.id);
+      setToolRef(null);
+      selectView('conv');
+    }).catch(() => {})
+  ), [client, selectView]);
+
   const conversations = useAppState(s => s.conversations);
   const providers = useAppState(s => s.providers);
   const slashCommands = useAppState(s => s.commands);
@@ -249,10 +262,7 @@ function App() {
         if (idx < VIEW_IDS.length) { e.preventDefault(); selectView(VIEW_IDS[idx]); }
       } else if (e.key === 'k') {
         e.preventDefault();
-        client.createChat('New conversation').then(c => {
-          upsertConversation({ id: c.id, title: c.title, live: false, source: 'http' });
-          setConv(c.id);
-        }).catch(() => {});
+        newConversation();
       } else if (e.key.toLowerCase() === 'p') {
         e.preventDefault();
         setPaletteOpen(true);
@@ -260,7 +270,7 @@ function App() {
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [client, selectView]);
+  }, [selectView, newConversation]);
 
   // iOS keyboard dodge.  On iOS the layout viewport is fixed when the
   // keyboard opens — only visualViewport shrinks — so a composer
@@ -322,6 +332,7 @@ function App() {
         view={view}
         setView={selectView}
         onToggleLeft={onToggleLeft}
+        onNewChat={newConversation}
         running={!!activeSession?.running}
         nextRunModel={activeSession?.nextRunModel || null}
         onPickModel={pickModel}/>
@@ -340,7 +351,8 @@ function App() {
       {view === 'conv' && (
         <main className={bodyClass}>
           {showLeft && <div className="scrim" onClick={closeRails}/>}
-          <LeftRail active={conv} setActive={(id) => { setConv(id); setToolRef(null); setShowLeft(false); }}/>
+          <LeftRail active={conv} onNew={newConversation}
+                    setActive={(id) => { setConv(id); setToolRef(null); setShowLeft(false); }}/>
           <ConversationView conv={conv} toolRef={toolRef} setToolRef={setToolRef}/>
         </main>
       )}
