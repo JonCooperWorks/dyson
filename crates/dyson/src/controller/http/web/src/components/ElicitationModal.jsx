@@ -21,6 +21,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useApi } from '../hooks/useApi.js';
+import { Modal } from './Modal.jsx';
 
 /** Idle poll interval — fast enough that a server-side elicit lands
  *  promptly, slow enough not to spam the controller. */
@@ -300,16 +301,14 @@ export function ElicitationModal() {
     }
   }, [api, prompt, props, values, hasErrors, poll]);
 
-  // ESC cancels, Cmd/Ctrl-Enter accepts.  Enter alone is intentionally
-  // *not* a submit shortcut: it would fire while the user is mid-typing
-  // a number/string and skip validation surprises.
+  // Cmd/Ctrl-Enter accepts; the shared <Modal> handles Esc-to-cancel.
+  // Enter alone is intentionally *not* a submit shortcut: it would fire
+  // while the user is mid-typing a number/string and skip validation
+  // surprises.
   useEffect(() => {
     if (!prompt) return undefined;
     const onKey = (e) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        submit('cancel');
-      } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         e.preventDefault();
         submit('accept');
       }
@@ -324,8 +323,13 @@ export function ElicitationModal() {
   const source = prompt.server ? `MCP · ${prompt.server}` : 'MCP request';
 
   return (
-    <div className="elicit-overlay" role="dialog" aria-modal="true" aria-label="MCP request">
-      <div className="elicit-modal">
+    <Modal
+      scrimClassName="elicit-overlay"
+      className="elicit-modal"
+      label="MCP request"
+      onClose={() => submit('cancel')}
+      closeOnScrimClick={false}
+    >
         <div className="elicit-header">
           <span className="elicit-source">{source}</span>
           {queueLength > 1 ? (
@@ -387,7 +391,6 @@ export function ElicitationModal() {
           </button>
         </div>
         <div className="elicit-hint">Esc to cancel · ⌘/Ctrl + Enter to submit</div>
-      </div>
-    </div>
+    </Modal>
   );
 }

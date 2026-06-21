@@ -17,6 +17,7 @@ import { CommandPalette } from './command-palette.jsx';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession, useSessionMutator } from '../hooks/useSession.js';
+import { useEscapeKey } from '../hooks/useEscapeKey.js';
 import {
   setTool, updateTool, mergeTools, upsertConversation,
   switchProviderModel,
@@ -301,6 +302,8 @@ function App() {
   }, []);
 
   const closeRails = useCallback(() => { setShowLeft(false); }, []);
+  // Esc closes the mobile left rail when it's open.
+  useEscapeKey(showLeft ? closeRails : null);
 
   const onToggleLeft = () => {
     // Artefacts tab has no LeftRail — hamburger drives the tree drawer

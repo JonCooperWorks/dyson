@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { NAVS } from './views.jsx';
 import { FALLBACK_SLASH_COMMANDS } from '../store/constants.js';
+import { Modal } from './Modal.jsx';
 
 export function buildCommandItems({
   conversations = [],
@@ -110,10 +111,7 @@ export function CommandPalette({ open, onClose, ...sources }) {
   };
 
   const onKeyDown = (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      onClose?.();
-    } else if (e.key === 'ArrowDown') {
+    if (e.key === 'ArrowDown') {
       e.preventDefault();
       setActive(i => Math.min(i + 1, Math.max(0, visible.length - 1)));
     } else if (e.key === 'ArrowUp') {
@@ -126,8 +124,7 @@ export function CommandPalette({ open, onClose, ...sources }) {
   };
 
   return (
-    <div className="cmdpal-scrim" role="presentation" onMouseDown={onClose}>
-      <div className="cmdpal" role="dialog" aria-modal="true" aria-label="Command palette" onMouseDown={e => e.stopPropagation()}>
+    <Modal scrimClassName="cmdpal-scrim" className="cmdpal" label="Command palette" onClose={onClose}>
         <div className="cmdpal-input">
           <Icon name="search" size={14}/>
           <input
@@ -159,7 +156,6 @@ export function CommandPalette({ open, onClose, ...sources }) {
             </button>
           ))}
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

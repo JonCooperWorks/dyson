@@ -8,6 +8,7 @@ import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
+import { useEscapeKey } from '../hooks/useEscapeKey.js';
 import {
   switchProviderModel, removeConversation, upsertConversation,
 } from '../store/app.js';
@@ -108,6 +109,7 @@ function TopBar({ view, setView, onToggleLeft, running, nextRunModel, onPickMode
 }
 
 function ModelMenu({ providers, model, expanded, nextRunModel, onToggleGroup, onPick, onDismiss }) {
+  useEscapeKey(onDismiss);
   return (
     <>
       <div className="modelmenu-scrim" onClick={onDismiss}/>

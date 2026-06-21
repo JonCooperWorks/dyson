@@ -15,6 +15,7 @@ import { copyToClipboard } from '../lib/clipboard.js';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession } from '../hooks/useSession.js';
+import { useEscapeKey } from '../hooks/useEscapeKey.js';
 import {
   setActivity,
   requestOpenArtefact, clearPendingArtefact,
@@ -25,6 +26,8 @@ import {
 
 export function MindView({ showSide, onHideSide, path, setPath }) {
   const client = useApi();
+  // Esc closes the mobile workspace drawer when it's open.
+  useEscapeKey(showSide ? onHideSide : null);
   const m = useAppState(s => s.mind);
   // Selection is owned by the URL hash so the back button moves
   // between selected files and a deep-link / refresh restores the
@@ -444,6 +447,8 @@ export function ArtefactsView({ conv, setConv }) {
   // reader.
   const initialPending = !!pendingArtefactId;
   const [showSide, setShowSide] = useState(!initialPending);
+  // Esc closes the mobile artefacts drawer when it's open.
+  useEscapeKey(showSide ? () => setShowSide(false) : null);
   // Tree expansion state per chat.  Keep the current chat (or first
   // report-bearing chat) open, then hydrate sibling branches on demand.
   // A 30-chat workspace used to fan out 30 artefact requests on first
