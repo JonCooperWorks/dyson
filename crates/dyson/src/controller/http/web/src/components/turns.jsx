@@ -705,13 +705,13 @@ function RunStatusStrip({ phase, tname, startedAt, onCancel, onJump, onCollapseA
       {phase === 'tool' && tname && <span className="tname mono">{tname}</span>}
       <span className="elapsed mono">{mm}:{ss}</span>
       <span className="sep"/>
-      <button className="btn ghost xs" onClick={onJump} title="Jump to latest">
+      <button className="btn ghost xs" onClick={onJump} title="Jump to latest" aria-label="Jump to latest">
         <Icon name="arr-down" size={11}/> latest
       </button>
-      <button className="btn ghost xs" onClick={onCollapseAll} title="Collapse all tool blocks">
+      <button className="btn ghost xs" onClick={onCollapseAll} title="Collapse all tool blocks" aria-label="Collapse all tool blocks">
         <Icon name="chev" size={10}/> collapse
       </button>
-      <button className="btn ghost xs danger" onClick={onCancel} title="Cancel run">
+      <button className="btn ghost xs danger" onClick={onCancel} title="Cancel run" aria-label="Cancel run">
         <Icon name="stop" size={11}/> cancel
       </button>
     </div>
@@ -968,17 +968,18 @@ function Composer({
           }}
         />
         <div className="row">
-          <button className="btn" onClick={() => fileRef.current?.click()} title="Attach files">
+          <button className="btn" onClick={() => fileRef.current?.click()} title="Attach files" aria-label="Attach files">
             <Icon name="paperclip" size={12}/>
           </button>
-          <button className={`btn ${slash?'' : ''}`} onClick={() => { setDraft('/'); setSlash(true); focusTextarea(); }} title="Slash menu">
+          <button className={`btn ${slash?'' : ''}`} onClick={() => { setDraft('/'); setSlash(true); focusTextarea(); }} title="Slash menu" aria-label="Slash commands">
             <Icon name="slash" size={12}/> <span className="btn-label">commands</span>
           </button>
           {running && (
             <button
               className={`btn queue-toggle ${queueMode === 'next_tool_call' ? 'on' : ''}`}
               onClick={() => onQueueModeChange?.(queueMode === 'next_tool_call' ? 'normal' : 'next_tool_call')}
-              title="Queue with next tool call">
+              aria-pressed={queueMode === 'next_tool_call'}
+              title="Queue with next tool call" aria-label="Queue with next tool call">
               <Icon name="arr-right" size={11}/> next tool
             </button>
           )}
@@ -989,7 +990,8 @@ function Composer({
           {activeModel && (
             <span className="model-label" style={{fontFamily:'var(--font-mono)', fontSize:10.5, color:'var(--mute)'}}>{activeModel}</span>
           )}
-          <button className="btn send sm" onClick={sub} disabled={!val.trim() && !atts.length}>
+          <button className="btn send sm" onClick={sub} disabled={!val.trim() && !atts.length}
+                  aria-label={running ? 'Queue message' : 'Send message'}>
             {running ? 'queue' : 'send'} <Kbd>↵</Kbd>
           </button>
         </div>

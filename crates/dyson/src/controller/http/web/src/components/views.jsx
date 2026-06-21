@@ -94,13 +94,17 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
       <div className="spacer"/>
       <div className="meta" style={{position:'relative'}}>
         {model && (
-          <span className="select" onClick={() => totalModels > 0 && setMenuOpen(o => !o)}
-                style={{cursor: totalModels > 0 ? 'pointer' : 'default', opacity: busy ? 0.5 : 1}}
-                title={totalModels > 0 ? 'Switch model' : 'Active model'}>
+          <button type="button" className="select"
+                  onClick={() => totalModels > 0 && setMenuOpen(o => !o)}
+                  disabled={totalModels === 0}
+                  aria-haspopup="menu" aria-expanded={menuOpen}
+                  aria-label={totalModels > 0 ? 'Switch model' : 'Active model'}
+                  style={{opacity: busy ? 0.5 : 1}}
+                  title={totalModels > 0 ? 'Switch model' : 'Active model'}>
             <span className="label">{nextRunModel ? 'next' : 'model'}</span>
             <span className="mono">{nextRunModel ? nextRunModel.model : model}</span>
             {totalModels > 0 && <Icon name="chevd" size={10}/>}
-          </span>
+          </button>
         )}
         {menuOpen && totalModels > 0 && (
           <ModelMenu providers={providers} model={model} expanded={expanded}

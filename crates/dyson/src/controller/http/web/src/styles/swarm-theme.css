@@ -490,14 +490,23 @@ textarea {
   border-radius: var(--radius);
   color: var(--fg-muted);
 }
-.topbar .menu-toggle:hover,
-.topbar .new-chat:hover {
+.topbar .menu-toggle:hover {
   background: var(--bg-2);
   color: var(--fg);
 }
 .topbar .menu-toggle.active {
   color: var(--fg);
   filter: none;
+}
+/* The new-chat button sits next to the hamburger; tint it with the brand
+   accent so the primary "start a chat" action reads differently from the
+   drawer toggle instead of looking like a twin ghost icon. */
+.topbar .new-chat {
+  color: var(--accent);
+}
+.topbar .new-chat:hover {
+  color: var(--accent);
+  background: var(--accent-wash);
 }
 
 .modelmenu-scrim { position: fixed; inset: 0; z-index: 19; }

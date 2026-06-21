@@ -264,7 +264,8 @@ describe('Composer image paste', () => {
     );
     fireEvent.click(getByRole('button', { name: /next tool/i }));
     expect(onQueueModeChange).toHaveBeenCalledWith('next_tool_call');
-    expect(getByRole('button', { name: /queue/i })).toBeTruthy();
+    // While running, the send button switches to "Queue message".
+    expect(getByRole('button', { name: 'Queue message' })).toBeTruthy();
     expect(getByText('next next-model')).toBeTruthy();
   });
 });

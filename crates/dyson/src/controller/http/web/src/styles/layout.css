@@ -199,6 +199,7 @@
   min-width: 0;
 }
 .topbar .meta .select {
+  appearance: none; -webkit-appearance: none;
   display: inline-flex; align-items: center; gap: 7px;
   height: 28px; padding: 0 10px;
   border: 1px solid var(--line); border-radius: var(--rad-sm);
@@ -208,11 +209,12 @@
   cursor: pointer;
   transition: border-color 120ms ease, color 120ms ease;
 }
-.topbar .meta .select:hover {
+.topbar .meta .select:hover:not(:disabled) {
   border-color: var(--accent-ln);
   color: var(--fg);
   box-shadow: 0 0 0 3px var(--accent-wash);
 }
+.topbar .meta .select:disabled { cursor: default; }
 .topbar .meta .select .label {
   color: var(--mute);
   font-size: 10.5px;
@@ -387,6 +389,12 @@
 }
 .conv:hover .row1 .conv-del { opacity: 0.7; }
 .conv .row1 .conv-del:hover { opacity: 1; background: var(--line); color: var(--fg); }
+/* Touch devices never fire :hover, so the delete control was invisible
+   and unreachable on mobile.  Keep it visible and give it a finger-sized
+   hit area there. */
+@media (hover: none) {
+  .conv .row1 .conv-del { opacity: 0.55; width: 30px; height: 30px; }
+}
 .conv .row2 {
   display: flex; align-items: center; gap: 6px;
   font: 400 11.5px/1.25 var(--font-ui);
@@ -701,7 +709,7 @@
 .modelmenu-scrim { position: fixed; inset: 0; z-index: 19; }
 .modelmenu {
   position: absolute;
-  top: 44px;
+  top: 48px;
   right: 0;
   background: linear-gradient(180deg, var(--panel-2), var(--panel));
   border: 1px solid var(--line-2);

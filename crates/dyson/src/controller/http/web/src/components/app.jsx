@@ -613,7 +613,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
         <div className="crumbs"><span className="c-leaf">{headTitle}</span></div>
         <div className="right">
           <McpSummary servers={mcpServers}/>
-          <button className="btn sm ghost" title="Download ShareGPT export"
+          <button className="btn sm ghost" title="Download ShareGPT export" aria-label="Download ShareGPT export"
                   onClick={onExport} disabled={!conv} style={{padding:'4px 8px'}}>
             <Icon name="download" size={13}/>
           </button>
