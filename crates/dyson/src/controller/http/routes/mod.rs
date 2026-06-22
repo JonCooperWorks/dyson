@@ -65,8 +65,12 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     let path = req.uri().path().to_string();
 
     // Borrowed view of the path segments — `["api", "conversations", id, …]`
-    // — keyed on once and reused by the route match.
-    let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
+    // — keyed on once and reused by the route match.  Auth/CSRF/Host gates
+    // and dispatch intentionally share this same normalized view so path
+    // variants like `//api/...` cannot route to API handlers while bypassing
+    // the gates that previously checked the raw URI string.
+    let segs = path_segments(&path);
+    let is_api_path = segs.first() == Some(&"api");
 
     // `/healthz` is intentionally unauthenticated: external probes
     // (Cube template builder, swarm's health prober, load balancers)
@@ -168,7 +172,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     // to 127.0.0.1 can otherwise hit the API with no credential).
     // Reverse-proxy and bearer/OIDC deployments stay off the gate so
     // the public Host the proxy presents doesn't trip a 421.
-    if state.loopback_only_host_check && path.starts_with("/api/") {
+    if state.loopback_only_host_check && is_api_path {
         let host_value = req
             .headers()
             .get(hyper::header::HOST)
@@ -198,7 +202,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     // credential.  SSE endpoints can't send headers from the browser,
     // so the SPA exchanges its bearer for a one-shot ticket above and
     // we skip the regular gate when it consumed.
-    if path.starts_with("/api/")
+    if is_api_path
         && !ticket_authorized
         && state.auth.validate_request(req.headers()).await.is_err()
     {
@@ -226,7 +230,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         &Method::POST | &Method::DELETE | &Method::PUT | &Method::PATCH,
     );
     let is_csrf_exempt = matches!(segs.as_slice(), ["api", "auth", "sse-ticket"]);
-    if path.starts_with("/api/")
+    if is_api_path
         && is_state_changing
         && !is_csrf_exempt
         && !req.headers().contains_key("x-dyson-csrf")
@@ -360,9 +364,13 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
 
         // ─── static shell + fallback ───────────────────────────────────
         (&Method::GET, _) => static_assets::serve(&path).await,
-        _ if path.starts_with("/api/") => method_not_allowed(),
+        _ if is_api_path => method_not_allowed(),
         _ => method_not_allowed(),
     }
+}
+
+fn path_segments(path: &str) -> Vec<&str> {
+    path.split('/').filter(|seg| !seg.is_empty()).collect()
 }
 
 fn readiness_error(state: &HttpState) -> Option<&'static str> {
@@ -550,10 +558,11 @@ mod tests {
         // Manually re-do the segment split that dispatch_inner does
         // and assert the cases we expect to land on each handler.
         fn segs(p: &str) -> Vec<&str> {
-            p.trim_matches('/').split('/').collect()
+            path_segments(p)
         }
         // /api root
         assert_eq!(segs("/api/conversations"), vec!["api", "conversations"]);
+        assert_eq!(segs("//api/conversations"), vec!["api", "conversations"]);
         assert_eq!(
             segs("/api/conversations/c-1"),
             vec!["api", "conversations", "c-1"]

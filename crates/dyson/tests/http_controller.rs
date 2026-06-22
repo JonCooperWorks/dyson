@@ -2972,6 +2972,18 @@ async fn bearer_auth_rejects_unauthenticated_api_request() {
 }
 
 #[tokio::test]
+async fn bearer_auth_rejects_double_slash_api_request() {
+    let auth = hashed_bearer_for_test("s3cret");
+    let r = rig_with_auth(auth).await;
+    let resp = get(&format!("{}//api/conversations", r.base)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "ambiguous //api paths must not bypass the /api auth gate",
+    );
+}
+
+#[tokio::test]
 async fn bearer_auth_rejects_wrong_token() {
     let auth = hashed_bearer_for_test("correct");
     let r = rig_with_auth(auth).await;
@@ -5464,6 +5476,23 @@ async fn loopback_dangerous_no_auth_rejects_foreign_host_header() {
         resp.status(),
         StatusCode::MISDIRECTED_REQUEST,
         "foreign Host on loopback DangerousNoAuth must be 421",
+    );
+}
+
+#[tokio::test]
+async fn loopback_dangerous_no_auth_rejects_double_slash_api_foreign_host_header() {
+    let r = rig().await;
+    let resp = request_with_headers(
+        &format!("{}//api/conversations", r.base),
+        Method::GET,
+        None,
+        &[("host", "attacker.example.com")],
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::MISDIRECTED_REQUEST,
+        "ambiguous //api paths must not bypass the DNS-rebinding Host gate",
     );
 }
 

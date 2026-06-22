@@ -159,6 +159,13 @@ describe('DysonClient — GET endpoints', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it('loadFileText refuses protocol-relative preview URLs', async () => {
+    const fetch = vi.fn();
+    const client = new DysonClient({ fetch, getToken: () => 'OIDC-TOKEN' });
+    await expect(client.loadFileText('//attacker.example/collect')).rejects.toThrow(/same-origin/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('exportConversation returns the response blob', async () => {
     const blob = new Blob(['{}'], { type: 'application/json' });
     const fetch = vi.fn(async () => ({ ok: true, status: 200, blob: async () => blob }));
@@ -313,6 +320,13 @@ describe('DysonClient._authedFetch — bearer token plumbing', () => {
     });
     const headers = new Headers(fetch.mock.calls[0][1].headers);
     expect(headers.get('authorization')).toBe('Bearer caller-supplied');
+  });
+
+  it('refuses to attach bearer credentials to protocol-relative URLs', async () => {
+    const fetch = vi.fn();
+    const client = new DysonClient({ fetch, getToken: () => 'TOK' });
+    expect(() => client._authedFetch('//attacker.example/api')).toThrow(/cross-origin/);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it('SSE flow mints a ticket cookie before opening EventSource — no token in URL', async () => {

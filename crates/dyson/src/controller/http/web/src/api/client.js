@@ -23,6 +23,44 @@ function fileToBase64(file) {
   });
 }
 
+function browserOrigin() {
+  const loc = globalThis.location;
+  return loc && typeof loc.origin === 'string' && loc.origin ? loc.origin : null;
+}
+
+function looksAbsoluteUrl(url) {
+  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(url);
+}
+
+function assertSameOriginAuthenticatedUrl(url) {
+  const target = String(url || '');
+  if (target.startsWith('//')) {
+    throw new Error('DysonClient: refusing cross-origin authenticated fetch');
+  }
+  if (!looksAbsoluteUrl(target)) return;
+  const origin = browserOrigin();
+  if (!origin) {
+    throw new Error('DysonClient: refusing cross-origin authenticated fetch');
+  }
+  let parsed;
+  try {
+    parsed = new URL(target);
+  } catch {
+    throw new Error('DysonClient: refusing cross-origin authenticated fetch');
+  }
+  if (parsed.origin !== origin) {
+    throw new Error('DysonClient: refusing cross-origin authenticated fetch');
+  }
+}
+
+function sameOriginPreviewPath(url) {
+  const target = String(url || '');
+  if (!target.startsWith('/') || target.startsWith('//')) {
+    throw new Error('file preview requires a same-origin URL');
+  }
+  return target;
+}
+
 export class DysonClient {
   constructor({ fetch: fetchImpl, EventSource: EventSourceImpl, getToken } = {}) {
     // Respect explicit null — tests pass `{ fetch: null }` to assert the
@@ -49,6 +87,7 @@ export class DysonClient {
   // wrapper one-line and means a future GET that becomes mutating
   // doesn't silently 400.
   _authedFetch(url, init) {
+    assertSameOriginAuthenticatedUrl(url);
     const headers = new Headers((init && init.headers) || {});
     if (!headers.has('x-dyson-csrf')) headers.set('x-dyson-csrf', '1');
     const token = this._getToken();
@@ -175,8 +214,7 @@ export class DysonClient {
   }
 
   async loadFileText(url) {
-    const target = String(url || '');
-    if (!target.startsWith('/')) throw new Error('file preview requires a same-origin URL');
+    const target = sameOriginPreviewPath(url);
     const r = await this._authedFetch(target, {
       headers: { Accept: 'text/*, application/json, application/xml, */*;q=0.1' },
     });
