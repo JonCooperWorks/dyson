@@ -149,11 +149,11 @@ pub struct McpSkill {
     // present, the agent splices it into the system prompt under an
     // untrusted-data preamble so the LLM knows how to use the server.
     server_instructions: Option<String>,
-    // LLM settings + workspace, supplied by the agent at load time.  When
-    // present, the skill advertises the `sampling` capability and the
-    // router can run server-originated `sampling/createMessage` requests
-    // through a one-shot LLM client.  `None` for contexts without an LLM
-    // (e.g. the admin connectivity probe).
+    // LLM settings + workspace, supplied by the agent at load time.
+    // Retained for future explicit sampling opt-in; by default we do
+    // not advertise or service server-originated sampling because MCP
+    // servers are untrusted and must not be able to spend model calls
+    // or confuse the workspace-backed agent into acting as their deputy.
     agent_settings: Option<crate::config::AgentSettings>,
     workspace: Option<crate::workspace::WorkspaceHandle>,
 }
@@ -343,14 +343,9 @@ impl McpSkill {
         // Advertise the client capabilities we actually honor.  `roots` is
         // backed by the NotificationRouter's roots/list handler installed
         // below; `listChanged` is false because the agent's working
-        // directory is fixed for the connection's life.  `sampling` is
-        // advertised only when the agent supplied LLM context — otherwise
-        // we'd invite createMessage calls we could only answer -32601.
-        // `elicitation` stays absent until its UI path lands.
+        // directory is fixed for the connection's life.  Server-originated
+        // `sampling` is intentionally absent by default.
         let mut capabilities = serde_json::json!({ "roots": { "listChanged": false } });
-        if self.agent_settings.is_some() {
-            capabilities["sampling"] = serde_json::json!({});
-        }
         // Advertise elicitation only when a UI is present to answer it
         // (set by the HTTP controller at startup); a headless run must not
         // strand a server waiting on a prompt nobody can see.
@@ -414,13 +409,16 @@ impl McpSkill {
         // agent's working directory as the single filesystem root — the
         // same directory MCP stdio servers are spawned in.
         let roots: Vec<PathBuf> = std::env::current_dir().ok().into_iter().collect();
-        let sampling = self.agent_settings.clone().map(|settings| {
-            router::SamplingBackend::new(settings, self.workspace.clone())
-        });
+        if self.agent_settings.is_some() {
+            tracing::debug!(
+                server = server_name,
+                "MCP sampling context present but not advertised without trusted opt-in"
+            );
+        }
         transport.set_inbound_handler(Arc::new(router::NotificationRouter::new(
             server_name,
             roots,
-            sampling,
+            None,
         )));
 
         transport
@@ -813,7 +811,11 @@ impl McpRemoteTool {
     /// delivered to the NotificationRouter by the transport, so an
     /// `input_required` status resolves once the UI answers; we keep
     /// polling through it.  Honors `ctx.cancellation` (issues `tasks/cancel`).
-    async fn run_as_task(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn run_as_task(
+        &self,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput> {
         let mcp_err = |e: String| DysonError::Mcp {
             server: self.server_name.clone(),
             message: e,
@@ -830,7 +832,12 @@ impl McpRemoteTool {
                 })),
             )
             .await
-            .map_err(|e| mcp_err(format!("task tools/call failed for '{}': {e}", self.tool_name)))?;
+            .map_err(|e| {
+                mcp_err(format!(
+                    "task tools/call failed for '{}': {e}",
+                    self.tool_name
+                ))
+            })?;
 
         let task = create.get("task").ok_or_else(|| {
             mcp_err(format!(
@@ -872,7 +879,10 @@ impl McpRemoteTool {
             if tokio::time::Instant::now() >= deadline {
                 let _ = self
                     .transport
-                    .send_request("tasks/cancel", Some(serde_json::json!({ "taskId": task_id })))
+                    .send_request(
+                        "tasks/cancel",
+                        Some(serde_json::json!({ "taskId": task_id })),
+                    )
                     .await;
                 return Ok(ToolOutput::error(format!(
                     "MCP task for '{}' did not complete within {}s",
@@ -904,7 +914,10 @@ impl McpRemoteTool {
 
         let result_json = self
             .transport
-            .send_request("tasks/result", Some(serde_json::json!({ "taskId": task_id })))
+            .send_request(
+                "tasks/result",
+                Some(serde_json::json!({ "taskId": task_id })),
+            )
             .await
             .map_err(|e| mcp_err(format!("tasks/result failed: {e}")))?;
         let tool_result: McpToolResult = serde_json::from_value(result_json)
@@ -967,8 +980,8 @@ impl McpResourcesTool {
                 server: self.server_name.clone(),
                 message: format!("resources/list failed: {e}"),
             })?;
-        let list: protocol::McpResourcesListResult = serde_json::from_value(result_json)
-            .map_err(|e| DysonError::Mcp {
+        let list: protocol::McpResourcesListResult =
+            serde_json::from_value(result_json).map_err(|e| DysonError::Mcp {
                 server: self.server_name.clone(),
                 message: format!("failed to parse resources/list: {e}"),
             })?;
@@ -985,8 +998,16 @@ impl McpResourcesTool {
             lines.push(format!(
                 "- {uri}{name}{mime}{desc}",
                 uri = r.uri,
-                name = if name.is_empty() { String::new() } else { format!("  ({name})") },
-                mime = if mime.is_empty() { String::new() } else { format!("  [{mime}]") },
+                name = if name.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ({name})")
+                },
+                mime = if mime.is_empty() {
+                    String::new()
+                } else {
+                    format!("  [{mime}]")
+                },
                 desc = match desc {
                     Some(d) if !d.is_empty() => format!("  — {d}"),
                     _ => String::new(),
@@ -1009,13 +1030,15 @@ impl McpResourcesTool {
                 server: self.server_name.clone(),
                 message: format!("resources/read failed for '{uri}': {e}"),
             })?;
-        let read: protocol::McpResourcesReadResult = serde_json::from_value(result_json)
-            .map_err(|e| DysonError::Mcp {
+        let read: protocol::McpResourcesReadResult =
+            serde_json::from_value(result_json).map_err(|e| DysonError::Mcp {
                 server: self.server_name.clone(),
                 message: format!("failed to parse resources/read: {e}"),
             })?;
         if read.contents.is_empty() {
-            return Ok(ToolOutput::error(format!("Resource '{uri}' had no contents")));
+            return Ok(ToolOutput::error(format!(
+                "Resource '{uri}' had no contents"
+            )));
         }
         let mut content_parts = Vec::new();
         let mut files = Vec::new();
@@ -1112,8 +1135,8 @@ impl McpPromptsTool {
                 server: self.server_name.clone(),
                 message: format!("prompts/list failed: {e}"),
             })?;
-        let list: protocol::McpPromptsListResult = serde_json::from_value(result_json)
-            .map_err(|e| DysonError::Mcp {
+        let list: protocol::McpPromptsListResult =
+            serde_json::from_value(result_json).map_err(|e| DysonError::Mcp {
                 server: self.server_name.clone(),
                 message: format!("failed to parse prompts/list: {e}"),
             })?;
@@ -1173,8 +1196,8 @@ impl McpPromptsTool {
                 server: self.server_name.clone(),
                 message: format!("prompts/get failed for '{name}': {e}"),
             })?;
-        let got: protocol::McpPromptGetResult = serde_json::from_value(result_json)
-            .map_err(|e| DysonError::Mcp {
+        let got: protocol::McpPromptGetResult =
+            serde_json::from_value(result_json).map_err(|e| DysonError::Mcp {
                 server: self.server_name.clone(),
                 message: format!("failed to parse prompts/get: {e}"),
             })?;
@@ -1332,12 +1355,12 @@ fn save_mcp_resource(
     } else {
         return Err(DysonError::Mcp {
             server: server_name.to_string(),
-            message: format!(
-                "resource from '{tool_name}' has neither blob nor text body"
-            ),
+            message: format!("resource from '{tool_name}' has neither blob nor text body"),
         });
     };
-    let original_name = uri_basename(&resource.uri).unwrap_or("resource").to_string();
+    let original_name = uri_basename(&resource.uri)
+        .unwrap_or("resource")
+        .to_string();
     let safe_name = safe_filename_part(&original_name);
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1952,10 +1975,7 @@ mod tests {
             Err(e) => e,
         };
         let msg = format!("{err}");
-        assert!(
-            msg.contains("neither blob nor text"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("neither blob nor text"), "got: {msg}");
     }
 
     #[tokio::test]
@@ -2034,7 +2054,10 @@ mod tests {
             Err(e) => e,
         };
         let msg = format!("{err}");
-        assert!(msg.contains("64-byte cap") || msg.contains("byte cap"), "got: {msg}");
+        assert!(
+            msg.contains("64-byte cap") || msg.contains("byte cap"),
+            "got: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -2221,7 +2244,10 @@ mod tests {
 
     #[test]
     fn uri_basename_extracts_last_path_component() {
-        assert_eq!(uri_basename("playwright-download://realdl.txt"), Some("realdl.txt"));
+        assert_eq!(
+            uri_basename("playwright-download://realdl.txt"),
+            Some("realdl.txt")
+        );
         assert_eq!(
             uri_basename("https://example.com/files/foo.pdf"),
             Some("foo.pdf")

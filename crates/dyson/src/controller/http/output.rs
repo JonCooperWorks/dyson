@@ -38,7 +38,7 @@ pub(crate) struct SseOutput {
     /// checkpoint.
     pub(crate) replay: Arc<std::sync::Mutex<super::state::EventRing>>,
     /// Shared file store so `send_file` can stash agent-produced bytes
-    /// for the UI to fetch via `/api/files/<id>`.
+    /// for the UI to fetch via `/api/conversations/<chat>/files/<id>`.
     pub(crate) files: Arc<std::sync::Mutex<FileStore>>,
     /// Counter for synthesising file ids when the agent attaches an
     /// unnamed file.  Wraps; collisions are vanishingly unlikely
@@ -232,12 +232,13 @@ impl Output for SseOutput {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         let inline_image = mime.starts_with("image/");
-        let url = format!("/api/files/{id}");
+        let url = format!("/api/conversations/{}/files/{id}", self.chat_id);
         let bytes_len = bytes.len();
         let entry = FileEntry {
             bytes,
             mime: mime.clone(),
             name: name.clone(),
+            chat_id: self.chat_id.clone(),
         };
         // Write-through to disk first so a controller crash between
         // the memory put and the disk write doesn't leak a dangling
@@ -396,27 +397,24 @@ impl Output for SseOutput {
             // Resolve the body bytes the push should carry.  Three
             // cases mirror the reader-side branches the SPA already
             // understands (see send_file at L218):
-            //   * Image / Other-with-URL-body: `content` is the
-            //     `/api/files/<id>` URL — look up the FileEntry's
-            //     bytes from the FileStore so swarm gets the actual
-            //     binary, not the URL string.
+            //   * Image / Other-with-URL-body: `content` is a controller
+            //     file URL — look up the FileEntry's bytes from the
+            //     FileStore so swarm gets the actual binary, not the URL
+            //     string.
             //   * Markdown / SecurityReview / other text: `content`
             //     is the inline body — use it directly.
             //   * Lookup failure: fall back to the content bytes
             //     (best-effort; the swarm side just sees the URL).
-            let push_bytes: Vec<u8> = if artefact.content.starts_with("/api/files/") {
-                let file_id = artefact
-                    .content
-                    .trim_start_matches("/api/files/")
-                    .to_string();
-                let from_store = match self.files.lock() {
-                    Ok(g) => g.items.get(&file_id).map(|e| e.bytes.clone()),
-                    Err(p) => p.into_inner().items.get(&file_id).map(|e| e.bytes.clone()),
+            let push_bytes: Vec<u8> =
+                if let Some(file_id) = file_id_from_controller_url(&artefact.content) {
+                    let from_store = match self.files.lock() {
+                        Ok(g) => g.items.get(&file_id).map(|e| e.bytes.clone()),
+                        Err(p) => p.into_inner().items.get(&file_id).map(|e| e.bytes.clone()),
+                    };
+                    from_store.unwrap_or_else(|| artefact.content.as_bytes().to_vec())
+                } else {
+                    artefact.content.as_bytes().to_vec()
                 };
-                from_store.unwrap_or_else(|| artefact.content.as_bytes().to_vec())
-            } else {
-                artefact.content.as_bytes().to_vec()
-            };
 
             let chat_id = self.chat_id.clone();
             let artefact_id = id.clone();
@@ -532,6 +530,19 @@ impl Output for SseOutput {
         // new id; until then there's no "current" tool.
         self.current_tool_use_id = None;
         Ok(())
+    }
+}
+
+fn file_id_from_controller_url(url: &str) -> Option<String> {
+    let parts: Vec<&str> = url.split('/').collect();
+    match parts.as_slice() {
+        ["", "api", "files", file_id] if !file_id.is_empty() => Some((*file_id).to_string()),
+        ["", "api", "conversations", chat_id, "files", file_id]
+            if !chat_id.is_empty() && !file_id.is_empty() =>
+        {
+            Some((*file_id).to_string())
+        }
+        _ => None,
     }
 }
 
@@ -679,7 +690,7 @@ mod tests {
                     m["mime_type"], "text/markdown",
                     "metadata mime is the promoted markdown mime, not the OS guess"
                 );
-                assert_eq!(m["file_url"], "/api/files/f1");
+                assert_eq!(m["file_url"], "/api/conversations/c-0001/files/f1");
                 assert_eq!(m["bytes"].as_u64(), Some(20));
             }
             other => panic!(
@@ -723,7 +734,7 @@ mod tests {
                 assert_eq!(m["file_name"], "data.bin");
                 // mime fell through to the binary default — what matters
                 // is that the artefact metadata carries a usable file_url.
-                assert_eq!(m["file_url"], "/api/files/f1");
+                assert_eq!(m["file_url"], "/api/conversations/c-0001/files/f1");
             }
             other => panic!(
                 "expected artefact event, got {:?}",
@@ -733,7 +744,10 @@ mod tests {
         let body =
             std::fs::read_to_string(dir.path().join("c-0001").join("artefacts").join("a1.body"))
                 .unwrap();
-        assert_eq!(body, "/api/files/f1", "binary artefact body is the URL");
+        assert_eq!(
+            body, "/api/conversations/c-0001/files/f1",
+            "binary artefact body is the URL"
+        );
     }
 
     #[test]
@@ -936,7 +950,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn send_artefact_push_uses_filestore_bytes_for_url_body() {
         // For Image / Other-with-URL-body artefacts (`content` is the
-        // /api/files/<id> deeplink), the push must resolve the bytes
+        // controller file URL deeplink), the push must resolve the bytes
         // out of the FileStore, not send the URL string.  We seed a
         // FileEntry directly, build an artefact whose content points
         // at it, and verify the recorded push carries the binary
@@ -957,6 +971,7 @@ mod tests {
                 bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
                 mime: "application/octet-stream".into(),
                 name: "blob.bin".into(),
+                chat_id: "c1".into(),
             },
         );
         let art = Artefact {

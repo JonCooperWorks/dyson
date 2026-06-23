@@ -167,8 +167,15 @@ async fn server_originated_roots_list_round_trips() {
         .await
         .expect("get-roots-list should run");
 
-    eprintln!("get-roots-list result (is_error={}):\n{}", out.is_error, out.content);
-    assert!(!out.is_error, "roots/list round-trip should not error: {}", out.content);
+    eprintln!(
+        "get-roots-list result (is_error={}):\n{}",
+        out.is_error, out.content
+    );
+    assert!(
+        !out.is_error,
+        "roots/list round-trip should not error: {}",
+        out.content
+    );
     // The router answers with `file://<cwd>`; the server echoes the roots
     // it received back into the tool result.
     assert!(

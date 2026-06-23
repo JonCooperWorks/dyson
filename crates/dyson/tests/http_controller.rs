@@ -880,6 +880,44 @@ async fn admin_configure_pins_first_secret_and_rejects_wrong_secret() {
     assert_eq!(correct.status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn admin_configure_stale_preseed_blocks_tofu_secret_claim() {
+    let r = rig().await;
+    let configure_root = isolate_configure_workspace(&r);
+    std::fs::write(
+        configure_root.path().join("configure.preseed"),
+        "swarm-supplied-secret",
+    )
+    .unwrap();
+    let url = format!("{}/api/admin/configure", r.base);
+
+    let attacker = post_json_with_headers(
+        &url,
+        &serde_json::json!({ "name": "attacker" }),
+        &[("x-swarm-configure", "attacker-secret")],
+    )
+    .await;
+    assert_eq!(
+        attacker.status(),
+        StatusCode::UNAUTHORIZED,
+        "a stale preseed must prevent an arbitrary first configure secret from winning"
+    );
+    assert!(
+        !configure_root.path().join("configure_secret_hash").exists(),
+        "wrong first secret must not mint the configure hash"
+    );
+
+    let swarm = post_json_with_headers(
+        &url,
+        &serde_json::json!({ "name": "swarm" }),
+        &[("x-swarm-configure", "swarm-supplied-secret")],
+    )
+    .await;
+    assert_eq!(swarm.status(), StatusCode::OK);
+    assert!(configure_root.path().join("configure_secret_hash").exists());
+    assert!(!configure_root.path().join("configure.preseed").exists());
+}
+
 #[cfg(target_os = "linux")]
 fn spawn_config_replace_counter(
     path: &std::path::Path,
@@ -1247,7 +1285,7 @@ async fn admin_state_file_replay_advances_file_and_artefact_ids() {
         &r,
         secret,
         "files/f7.meta.json",
-        br#"{"mime":"text/markdown","name":"legacy.md"}"#,
+        br#"{"mime":"text/markdown","name":"legacy.md","chat_id":"c-old"}"#,
     )
     .await;
     replay_state_file(&r, secret, "c-old/artefacts/a9.body", b"legacy artefact").await;
@@ -1255,7 +1293,7 @@ async fn admin_state_file_replay_advances_file_and_artefact_ids() {
         &r,
         secret,
         "c-old/artefacts/a9.meta.json",
-        br#"{"chat_id":"c-old","kind":"other","title":"legacy.md","mime_type":"text/markdown","created_at":1,"metadata":{"file_url":"/api/files/f7"}}"#,
+        br#"{"chat_id":"c-old","kind":"other","title":"legacy.md","mime_type":"text/markdown","created_at":1,"metadata":{"file_url":"/api/conversations/c-old/files/f7"}}"#,
     )
     .await;
     replay_state_file(&r, secret, "c-0042/transcript.json", b"[]").await;
@@ -2931,6 +2969,61 @@ async fn files_endpoint_404s_for_unknown_id() {
 }
 
 #[tokio::test]
+async fn emitted_file_is_only_served_from_owning_chat_scope() {
+    let r = rig().await;
+    let owner = create_chat(&r, "file owner").await;
+    let sibling = create_chat(&r, "file sibling").await;
+
+    let mut sse = request(
+        &format!("{}/api/conversations/{}/events", r.base, owner),
+        Method::GET,
+        None,
+    )
+    .await;
+    assert_eq!(sse.status(), StatusCode::OK);
+    test_helpers::wait_for_sse_subscriber(r.state.clone(), &owner).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let report_path = dir.path().join("scoped-report.md");
+    std::fs::write(&report_path, b"scoped file body").expect("write file");
+    test_helpers::emit_agent_file(r.state.clone(), &owner, &report_path)
+        .await
+        .expect("emit file");
+
+    let evt = read_sse_event(&mut sse).await;
+    assert_eq!(evt["type"], "file");
+    let scoped_url = evt["url"].as_str().expect("file url");
+    assert!(
+        scoped_url.starts_with(&format!("/api/conversations/{owner}/files/")),
+        "file URL must be scoped to the owning chat: {scoped_url}",
+    );
+    let file_id = scoped_url
+        .rsplit('/')
+        .next()
+        .expect("file id from scoped URL");
+
+    let owner_resp = get(&format!("{}{}", r.base, scoped_url)).await;
+    assert_eq!(owner_resp.status(), StatusCode::OK);
+    let bytes = owner_resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    assert_eq!(&bytes[..], b"scoped file body");
+
+    let global_resp = get(&format!("{}/api/files/{}", r.base, file_id)).await;
+    assert_eq!(global_resp.status(), StatusCode::NOT_FOUND);
+
+    let sibling_resp = get(&format!(
+        "{}/api/conversations/{}/files/{}",
+        r.base, sibling, file_id
+    ))
+    .await;
+    assert_eq!(sibling_resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn root_path_serves_index_html() {
     // GET / must serve the Vite-built index.html, not redirect or 404.
     let r = rig().await;
@@ -3259,7 +3352,10 @@ async fn send_file_inlines_images_and_attaches_everything_else() {
     assert_eq!(evt["mime_type"], "image/png");
     assert_eq!(evt["inline_image"], true, "images must be flagged inline");
     let png_url = evt["url"].as_str().expect("url").to_string();
-    assert!(png_url.starts_with("/api/files/"), "url shape: {png_url}");
+    assert!(
+        png_url.starts_with(&format!("/api/conversations/{id}/files/")),
+        "url shape: {png_url}"
+    );
 
     // Images are also discoverable in the Artefacts tab — consume the
     // follow-up artefact event so subsequent reads see the next file.
@@ -3488,7 +3584,7 @@ async fn browser_artefact_sink_missing_file_is_noop() {
 #[tokio::test]
 async fn agent_artefact_round_trips_through_sse_and_disk() {
     // End-to-end: agent emits an artefact via `Output::send_artefact` →
-    // SSE `artefact` event → `/api/artefacts/<id>` serves the markdown
+    // SSE `artefact` event → the chat-scoped artefact body route serves the markdown
     // body with the right mime → the per-chat listing endpoint shows
     // the entry → a fresh HttpState pointed at the same directory
     // rehydrates the artefact (so the report survives controller
@@ -3538,13 +3634,17 @@ async fn agent_artefact_round_trips_through_sse_and_disk() {
     // The emitted `url` is a shareable SPA deep-link, not the raw
     // bytes endpoint — cmd-click / copy-paste on the chip should land
     // in the reader, not download markdown.  The body still lives at
-    // `/api/artefacts/<id>` and the client fetches it from there.
+    // `/api/conversations/<chat>/artefacts/<id>` and the client fetches it from there.
     let url = evt["url"].as_str().expect("url").to_string();
     assert!(url.starts_with("/#/artefacts/"), "url shape: {url}");
     let art_id = url.trim_start_matches("/#/artefacts/").to_string();
 
     // GET the body — must come back verbatim with text/markdown.
-    let resp = get(&format!("{}/api/artefacts/{}", r.base, art_id)).await;
+    let resp = get(&format!(
+        "{}/api/conversations/{}/artefacts/{}",
+        r.base, id, art_id
+    ))
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
         resp.headers()
@@ -3820,6 +3920,58 @@ async fn list_conversations_flags_chats_with_artefacts() {
 }
 
 #[tokio::test]
+async fn artefact_body_is_only_served_from_owning_chat_scope() {
+    let r = rig().await;
+    let owner = create_chat(&r, "artefact owner").await;
+    let sibling = create_chat(&r, "artefact sibling").await;
+
+    let mut sse = request(
+        &format!("{}/api/conversations/{}/events", r.base, owner),
+        Method::GET,
+        None,
+    )
+    .await;
+    assert_eq!(sse.status(), StatusCode::OK);
+    test_helpers::wait_for_sse_subscriber(r.state.clone(), &owner).await;
+
+    let artefact = dyson::message::Artefact::markdown(
+        dyson::message::ArtefactKind::SecurityReview,
+        "Scoped Report",
+        "scoped artefact body",
+    );
+    test_helpers::emit_agent_artefact(r.state.clone(), &owner, artefact)
+        .await
+        .expect("emit artefact");
+    let evt = read_sse_event(&mut sse).await;
+    assert_eq!(evt["type"], "artefact");
+    let art_id = evt["id"].as_str().expect("artefact id");
+
+    let owner_resp = get(&format!(
+        "{}/api/conversations/{}/artefacts/{}",
+        r.base, owner, art_id
+    ))
+    .await;
+    assert_eq!(owner_resp.status(), StatusCode::OK);
+    let bytes = owner_resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    assert_eq!(&bytes[..], b"scoped artefact body");
+
+    let global_resp = get(&format!("{}/api/artefacts/{}", r.base, art_id)).await;
+    assert_eq!(global_resp.status(), StatusCode::NOT_FOUND);
+
+    let sibling_resp = get(&format!(
+        "{}/api/conversations/{}/artefacts/{}",
+        r.base, sibling, art_id
+    ))
+    .await;
+    assert_eq!(sibling_resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn artefact_deep_link_is_shareable() {
     // Two linked contracts the UI relies on to make artefact URLs
     // "go straight to the artefact":
@@ -3868,8 +4020,12 @@ async fn artefact_deep_link_is_shareable() {
     let loc = redir.headers().get("location").expect("location header");
     assert_eq!(loc.to_str().unwrap(), format!("/#/artefacts/{art_id}"));
 
-    // 2. The raw endpoint carries the chat id.
-    let body = get(&format!("{}/api/artefacts/{}", r.base, art_id)).await;
+    // 2. The scoped raw endpoint carries the chat id.
+    let body = get(&format!(
+        "{}/api/conversations/{}/artefacts/{}",
+        r.base, id, art_id
+    ))
+    .await;
     assert_eq!(body.status(), StatusCode::OK);
     let chat_hdr = body
         .headers()
@@ -4016,13 +4172,13 @@ async fn emitted_images_survive_refresh_via_artefacts() {
 
     // The rebuilt store must have the artefact entry indexed AND the
     // file bytes must be retrievable from the new controller's own
-    // /api/files/<id> (which falls through to disk for IDs the
+    // /api/conversations/<chat>/files/<id> (which falls through to disk for IDs the
     // in-memory FileStore doesn't have yet).
     assert!(
         state2.artefacts_for_test(&art_id).is_some(),
         "image artefact must rehydrate from disk",
     );
-    let file_id = file_url.trim_start_matches("/api/files/");
+    let file_id = file_url.rsplit('/').next().expect("file id");
     assert!(
         state2.file_bytes_for_test(file_id).is_some(),
         "image file bytes must be reachable from fresh state via disk fallback",
@@ -4111,7 +4267,7 @@ async fn image_artefact_stamps_tool_use_id_for_panel_rehydration() {
     assert!(
         artefact_chip["metadata"]["file_url"]
             .as_str()
-            .is_some_and(|s| s.starts_with("/api/files/")),
+            .is_some_and(|s| s.starts_with(&format!("/api/conversations/{id}/files/"))),
         "metadata.file_url missing: {artefact_chip}",
     );
 }
@@ -4214,7 +4370,7 @@ async fn chat_reload_shows_sent_file_download_in_transcript() {
     assert_eq!(file_chip["bytes"], 16);
     let file_url = file_chip["url"].as_str().expect("file url");
     assert!(
-        file_url.starts_with("/api/files/"),
+        file_url.starts_with(&format!("/api/conversations/{id}/files/")),
         "download chip must point at file endpoint: {file_chip}",
     );
     assert_eq!(file_chip["inline_image"], false);

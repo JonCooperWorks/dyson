@@ -280,6 +280,26 @@ async fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> O
     match tokio::fs::read_to_string(&hash_path).await {
         Ok(stored) => verify_configure_secret(&hash_path, secret, stored, state).await,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let preseed_path = hash_dir.join(CONFIGURE_PRESEED_FILENAME);
+            let remove_preseed_after_write = match tokio::fs::read_to_string(&preseed_path).await {
+                Ok(preseed) => {
+                    let preseed = preseed.trim().to_owned();
+                    if preseed.is_empty() {
+                        return Some(bad_request("configure preseed is empty"));
+                    }
+                    if !configure_secret_eq(&secret, &preseed) {
+                        return Some(unauthorized(state));
+                    }
+                    true
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    return Some(bad_request(&format!(
+                        "read {}: {e}",
+                        preseed_path.display()
+                    )));
+                }
+            };
             let hash = match hash_configure_secret(secret.clone()).await {
                 ConfigureHashOutcome::Hashed(hash) => hash,
                 ConfigureHashOutcome::Failed(msg) => {
@@ -310,6 +330,9 @@ async fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> O
                         .await;
                     }
                     remember_configure_verify(&hash_path, &secret, &hash);
+                    if remove_preseed_after_write {
+                        let _ = tokio::fs::remove_file(&preseed_path).await;
+                    }
                     None
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -325,6 +348,11 @@ async fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> O
         }
         Err(e) => Some(bad_request(&format!("read {}: {e}", hash_path.display()))),
     }
+}
+
+fn configure_secret_eq(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    a.len() == b.len() && bool::from(a.as_bytes().ct_eq(b.as_bytes()))
 }
 
 enum ConfigureHashOutcome {
@@ -509,7 +537,11 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     let config_path = state.config_path();
     let has_config = config_path.is_some();
     let want_models = !body.models.is_empty();
-    let want_api_key = has_text(body.proxy_token.as_ref().map(crate::tokens::ProxyToken::as_str));
+    let want_api_key = has_text(
+        body.proxy_token
+            .as_ref()
+            .map(crate::tokens::ProxyToken::as_str),
+    );
     let want_base_url = has_text(body.proxy_base.as_deref());
     let provider_requested = want_models || want_api_key || want_base_url;
     let provider_applied = provider_requested && has_config;
@@ -557,7 +589,9 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
                     None
                 },
                 api_key: if want_api_key {
-                    body.proxy_token.as_ref().map(crate::tokens::ProxyToken::as_str)
+                    body.proxy_token
+                        .as_ref()
+                        .map(crate::tokens::ProxyToken::as_str)
                 } else {
                     None
                 },
@@ -607,12 +641,13 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     let any_config_changed =
         provider_changed || image_changed || skills_changed || mcp_changed || telegram_changed;
 
-    let agent_secrets_patch =
-        agent_secrets_runtime_patch(
-            body.proxy_base.as_deref(),
-            body.proxy_token.as_ref().map(crate::tokens::ProxyToken::as_str),
-            body.instance_id.as_deref(),
-        );
+    let agent_secrets_patch = agent_secrets_runtime_patch(
+        body.proxy_base.as_deref(),
+        body.proxy_token
+            .as_ref()
+            .map(crate::tokens::ProxyToken::as_str),
+        body.instance_id.as_deref(),
+    );
     let agent_secrets_applied = agent_secrets_patch.is_some();
     let agent_secrets_changed = match &agent_secrets_patch {
         Some(AgentSecretsRuntimePatch::Set {
@@ -689,7 +724,9 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     // turned ingest off explicitly).
     let ingest_patch = runtime_patch(
         body.ingest_url.as_deref(),
-        body.ingest_token.as_ref().map(crate::tokens::IngestToken::as_str),
+        body.ingest_token
+            .as_ref()
+            .map(crate::tokens::IngestToken::as_str),
     );
     let ingest_applied = ingest_patch.is_some();
     let ingest_changed = match &ingest_patch {
@@ -713,7 +750,9 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     };
     let state_sync_patch = runtime_patch(
         body.state_sync_url.as_deref(),
-        body.state_sync_token.as_ref().map(crate::tokens::StateSyncToken::as_str),
+        body.state_sync_token
+            .as_ref()
+            .map(crate::tokens::StateSyncToken::as_str),
     );
     let state_sync_applied = state_sync_patch.is_some();
     let state_sync_changed = match &state_sync_patch {
@@ -782,10 +821,7 @@ fn has_text(value: Option<&str>) -> bool {
     value.is_some_and(|s| !s.is_empty())
 }
 
-fn runtime_patch<'a>(
-    url: Option<&'a str>,
-    token: Option<&'a str>,
-) -> Option<RuntimePatch<'a>> {
+fn runtime_patch<'a>(url: Option<&'a str>, token: Option<&'a str>) -> Option<RuntimePatch<'a>> {
     match (url, token) {
         (Some(url), Some(token)) if !url.is_empty() && !token.is_empty() => {
             Some(RuntimePatch::Set { url, token })
@@ -800,11 +836,7 @@ fn agent_secrets_runtime_patch<'a>(
     proxy_token: Option<&'a str>,
     instance_id: Option<&'a str>,
 ) -> Option<AgentSecretsRuntimePatch<'a>> {
-    match (
-        proxy_url,
-        proxy_token,
-        instance_id,
-    ) {
+    match (proxy_url, proxy_token, instance_id) {
         (Some(proxy_url), Some(proxy_token), Some(instance_id))
             if !proxy_url.is_empty() && !proxy_token.is_empty() && !instance_id.is_empty() =>
         {
@@ -2099,14 +2131,8 @@ mod tests {
                 token: "it_123"
             })
         );
-        assert_eq!(
-            runtime_patch(Some(""), Some("")),
-            Some(RuntimePatch::Clear)
-        );
-        assert_eq!(
-            runtime_patch(Some("https://swarm.test/ingest"), None),
-            None
-        );
+        assert_eq!(runtime_patch(Some(""), Some("")), Some(RuntimePatch::Clear));
+        assert_eq!(runtime_patch(Some("https://swarm.test/ingest"), None), None);
         assert_eq!(runtime_patch(None, Some("it_123")), None);
     }
 
@@ -2556,10 +2582,13 @@ mod tests {
         assert!(!preseed.exists(), "preseed file must be deleted after use");
 
         let stored = std::fs::read_to_string(&hash_path).expect("hash file written");
-        assert!(stored.starts_with("$argon2id$"), "hash must be PHC argon2id");
+        assert!(
+            stored.starts_with("$argon2id$"),
+            "hash must be PHC argon2id"
+        );
 
-        use argon2::password_hash::{PasswordHash, PasswordVerifier};
         use argon2::Argon2;
+        use argon2::password_hash::{PasswordHash, PasswordVerifier};
         let parsed = PasswordHash::new(stored.trim()).expect("parse PHC");
         assert!(
             Argon2::default()

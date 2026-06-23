@@ -148,6 +148,10 @@ impl Tool for AgentSecretsTool {
         })
     }
 
+    fn agent_only(&self) -> bool {
+        true
+    }
+
     async fn run(
         &self,
         input: &serde_json::Value,
@@ -347,6 +351,15 @@ mod tests {
         assert!(AgentSecretsConfig::new("https://s", "", "i").is_none());
         assert!(AgentSecretsConfig::new("https://s", "pt", "").is_none());
         assert!(AgentSecretsTool::from_config(config()).is_some());
+    }
+
+    #[test]
+    fn agent_secrets_is_not_exposed_to_cli_mcp_bridges() {
+        let tool = AgentSecretsTool::from_config(config()).expect("tool");
+        assert!(
+            tool.agent_only(),
+            "agent_secrets is a first-party Swarm tool and must not be forwarded to Claude/Codex MCP"
+        );
     }
 
     #[test]

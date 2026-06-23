@@ -160,7 +160,10 @@ mod tests {
                     assert_eq!(p["message"], "name?");
                     assert_eq!(p["server"], "everything");
                     let ok = broker
-                        .resolve(&id, serde_json::json!({ "action": "accept", "content": { "name": "ada" } }))
+                        .resolve(
+                            &id,
+                            serde_json::json!({ "action": "accept", "content": { "name": "ada" } }),
+                        )
                         .await;
                     assert!(ok);
                     break;

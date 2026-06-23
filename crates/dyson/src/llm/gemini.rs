@@ -596,5 +596,4 @@ mod tests {
         let cleaned = sanitize_schema_for_gemini(&schema);
         assert_eq!(cleaned, schema);
     }
-
 }

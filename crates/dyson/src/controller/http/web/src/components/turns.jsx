@@ -535,8 +535,8 @@ function FileBlock({ block }) {
 
 // Rendered in the chat scroll when the agent emits an artefact.
 // For image artefacts we render the actual image inline (the file URL
-// is reached by asking `/api/artefacts/<id>`, which hands back the
-// `/api/files/<id>` URL as plain text).  For markdown / report
+// is reached through the chat-scoped artefact body route, which hands
+// back the scoped file URL as plain text).  For markdown / report
 // artefacts, a compact chip that opens the Artefacts tab on click.
 //
 // `block.url` is an SPA deep-link (`/#/artefacts/<id>`) — set so that
@@ -556,17 +556,17 @@ function ArtefactBlock({ block, chatId }) {
   const [src, setSrc] = useState('');
 
   useEffect(() => {
-    if (block.kind !== 'image' || !block.id) {
+    if (block.kind !== 'image' || !block.id || !chatId) {
       setSrc('');
       return;
     }
     let cancelled = false;
-    fetch(`/api/artefacts/${encodeURIComponent(block.id)}`)
+    fetch(`/api/conversations/${encodeURIComponent(chatId)}/artefacts/${encodeURIComponent(block.id)}`)
       .then(r => r.ok ? r.text() : Promise.reject(r.status))
       .then(text => { if (!cancelled) setSrc(text.trim()); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [block.kind, block.id]);
+  }, [block.kind, block.id, chatId]);
 
   if (block.kind === 'image') {
     // For a zero-hop preview we fetch the file URL once on mount and

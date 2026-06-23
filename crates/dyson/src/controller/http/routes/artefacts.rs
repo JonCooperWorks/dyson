@@ -1,6 +1,5 @@
 // ===========================================================================
 // Artefact endpoints —
-//   GET /api/artefacts/:id                          — body + meta
 //   GET /api/conversations/:id/artefacts             — list per chat
 //   GET /api/conversations/:id/artefacts/:artefact   — body + meta scoped to chat
 //   GET /api/conversations/:id/export                — ShareGPT dump
@@ -15,75 +14,6 @@ use super::super::responses::{
 use super::super::state::HttpState;
 use super::super::stores::ArtefactStore;
 use super::super::wire::ArtefactDto;
-
-/// Serve the raw markdown body of a stored artefact.  The client-side
-/// renderer in `turns.jsx` turns it into HTML; we just hand over the
-/// bytes with the right mime type so "copy" / "download" on the reader
-/// get what they expect.  Returns 404 when the FIFO has evicted the
-/// entry (expected after ~32 reports on a long session) — the UI shows
-/// a "no longer in memory — rerun to regenerate" fallback.
-pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
-    if !safe_store_id(id) {
-        return not_found();
-    }
-    let cached = {
-        let store = match state.artefacts.lock() {
-            Ok(s) => s,
-            Err(p) => p.into_inner(),
-        };
-        store.items.get(id).map(|e| {
-            (
-                e.content.clone().into_bytes(),
-                e.mime_type.clone(),
-                e.title.clone(),
-                e.chat_id.clone(),
-            )
-        })
-    };
-    let (bytes, mime, title, chat_id) = match cached {
-        Some(t) => t,
-        None => {
-            let loaded = state
-                .data_dir
-                .as_ref()
-                .and_then(|dir| ArtefactStore::load_from_disk(dir, id));
-            match loaded {
-                Some(e) => {
-                    let out = (
-                        e.content.clone().into_bytes(),
-                        e.mime_type.clone(),
-                        e.title.clone(),
-                        e.chat_id.clone(),
-                    );
-                    let mut s = match state.artefacts.lock() {
-                        Ok(s) => s,
-                        Err(p) => p.into_inner(),
-                    };
-                    s.put(id.to_string(), e);
-                    drop(s);
-                    out
-                }
-                None => return not_found(),
-            }
-        }
-    };
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", format!("{mime}; charset=utf-8"))
-        .header(
-            "Content-Disposition",
-            format!("inline; filename=\"{}.md\"", sanitize_filename(&title)),
-        )
-        // Surfaces the owning chat to the SPA so a direct deep-link
-        // (`/#/artefacts/<id>` opened cold) can restore the sidebar
-        // context without a second round-trip.  Sanitised before
-        // emission — the chat_id is loaded from disk metadata and a
-        // tampered file shouldn't be able to inject sibling headers.
-        .header("X-Dyson-Chat-Id", sanitize_header_value(&chat_id))
-        .header("Cache-Control", "no-cache")
-        .body(boxed(hyper::body::Bytes::from(bytes)))
-        .unwrap()
-}
 
 /// Serve an artefact body scoped by chat id.  This is the duplicate-safe
 /// form used by the SPA reader and swarm's same-origin share mint path:

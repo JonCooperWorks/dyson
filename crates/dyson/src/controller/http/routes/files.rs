@@ -7,18 +7,27 @@ use hyper::{Response, StatusCode};
 
 use super::super::responses::{Resp, boxed, not_found, safe_store_id, sanitize_filename};
 use super::super::state::HttpState;
-use super::super::stores::FileStore;
+use super::super::stores::{FileEntry, FileStore};
 
-/// Serve a previously-stored agent-produced file (image, PoC, etc.).
-/// Inline content-disposition for images so they preview in `<img>`;
-/// attachment for everything else so the browser downloads.
-pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
+/// Serve a previously-stored agent-produced file (image, PoC, etc.) scoped to
+/// its owning chat.
+pub(super) async fn get_for_chat(state: &HttpState, chat_id: &str, id: &str) -> Resp {
     // Reject anything outside the minted alphabet (dispatch hands us
     // the URL-decoded value; an attacker submitting `%2F../etc/passwd`
     // would otherwise traverse).  Mint-only ids are `f<u64>`.
-    if !safe_store_id(id) {
+    if !safe_store_id(chat_id) || !safe_store_id(id) {
         return not_found();
     }
+    let Some(entry) = load_entry(state, id) else {
+        return not_found();
+    };
+    if entry.chat_id != chat_id {
+        return not_found();
+    }
+    file_response(entry)
+}
+
+fn load_entry(state: &HttpState, id: &str) -> Option<FileEntry> {
     // Check the in-memory cache first, then fall back to disk.  Files
     // evicted from the FIFO cache stay reachable as long as the
     // controller has a data_dir configured — which is always true when
@@ -28,12 +37,14 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
             Ok(s) => s,
             Err(p) => p.into_inner(),
         };
-        store
-            .items
-            .get(id)
-            .map(|e| (e.bytes.clone(), e.mime.clone(), e.name.clone()))
+        store.items.get(id).map(|e| FileEntry {
+            bytes: e.bytes.clone(),
+            mime: e.mime.clone(),
+            name: e.name.clone(),
+            chat_id: e.chat_id.clone(),
+        })
     };
-    let (bytes, mime, name) = match cached {
+    Some(match cached {
         Some(t) => t,
         None => {
             let loaded = state
@@ -47,7 +58,12 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
                     // downloads, etc.).  Recover from poisoning so a
                     // panicked previous holder doesn't silently disable
                     // the cache.
-                    let out = (e.bytes.clone(), e.mime.clone(), e.name.clone());
+                    let out = FileEntry {
+                        bytes: e.bytes.clone(),
+                        mime: e.mime.clone(),
+                        name: e.name.clone(),
+                        chat_id: e.chat_id.clone(),
+                    };
                     let mut s = match state.files.lock() {
                         Ok(s) => s,
                         Err(p) => p.into_inner(),
@@ -56,25 +72,28 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
                     drop(s);
                     out
                 }
-                None => return not_found(),
+                None => return None,
             }
         }
-    };
+    })
+}
+
+fn file_response(entry: FileEntry) -> Resp {
     // sanitize_filename strips `\r`, `\n`, `"`, `/`, `\\` — protects
     // the Content-Disposition header from CRLF injection if a tool
     // ever produced a maliciously-shaped filename.  The previous
     // shape only stripped `"`, leaving CRLF unguarded.
-    let safe = sanitize_filename(&name);
-    let cd = if mime.starts_with("image/") {
+    let safe = sanitize_filename(&entry.name);
+    let cd = if entry.mime.starts_with("image/") {
         format!("inline; filename=\"{safe}\"")
     } else {
         format!("attachment; filename=\"{safe}\"")
     };
     Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", mime)
+        .header("Content-Type", entry.mime)
         .header("Content-Disposition", cd)
         .header("Cache-Control", "no-cache")
-        .body(boxed(hyper::body::Bytes::from(bytes)))
+        .body(boxed(hyper::body::Bytes::from(entry.bytes)))
         .unwrap()
 }

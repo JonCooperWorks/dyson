@@ -14,6 +14,8 @@
 // is shared.
 // ===========================================================================
 
+use std::collections::HashMap;
+
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::ChildStdout;
 
@@ -112,5 +114,57 @@ pub fn filter_tools_for_cli(tools: &[ToolDefinition], has_workspace: bool) -> Ve
         vec![]
     } else {
         tools.iter().filter(|t| !t.agent_only).collect()
+    }
+}
+
+pub(crate) fn sanitized_child_env<I>(env: I) -> HashMap<String, String>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    env.into_iter()
+        .filter(|(k, _)| !is_secret_env_name(k))
+        .collect()
+}
+
+fn is_secret_env_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.starts_with("SWARM_")
+        || upper.starts_with("DYSON_")
+        || matches!(
+            upper.as_str(),
+            "ANTHROPIC_API_KEY"
+                | "OPENAI_API_KEY"
+                | "OPENROUTER_API_KEY"
+                | "GEMINI_API_KEY"
+                | "GOOGLE_API_KEY"
+                | "OLLAMA_API_KEY"
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn sanitized_child_env_removes_swarm_and_provider_secrets() {
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), "/usr/bin".to_string());
+        env.insert("HOME".to_string(), "/home/dyson".to_string());
+        env.insert("SWARM_PROXY_TOKEN".to_string(), "pt_secret".to_string());
+        env.insert("SWARM_INGEST_TOKEN".to_string(), "it_secret".to_string());
+        env.insert("ANTHROPIC_API_KEY".to_string(), "sk-ant-secret".to_string());
+        env.insert("OPENAI_API_KEY".to_string(), "sk-openai-secret".to_string());
+
+        let sanitized = sanitized_child_env(env);
+        assert_eq!(sanitized.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(
+            sanitized.get("HOME").map(String::as_str),
+            Some("/home/dyson")
+        );
+        assert!(!sanitized.contains_key("SWARM_PROXY_TOKEN"));
+        assert!(!sanitized.contains_key("SWARM_INGEST_TOKEN"));
+        assert!(!sanitized.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!sanitized.contains_key("OPENAI_API_KEY"));
     }
 }

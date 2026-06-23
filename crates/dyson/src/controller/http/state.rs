@@ -1422,11 +1422,12 @@ impl HttpState {
             self.file_id
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
-        let file_url = format!("/api/files/{file_id}");
+        let file_url = format!("/api/conversations/{chat_id}/files/{file_id}");
         let file_entry = FileEntry {
             bytes,
             mime: mime.clone(),
             name: name.clone(),
+            chat_id: chat_id.to_string(),
         };
         if let Some(dir) = self.data_dir.as_ref() {
             FileStore::persist_static(dir, &file_id, &file_entry);

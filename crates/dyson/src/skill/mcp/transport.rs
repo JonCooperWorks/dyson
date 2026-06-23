@@ -260,8 +260,15 @@ impl InboundHandler for UnsupportedInboundHandler {
 /// server may use string ids; we only need to echo the id back verbatim.
 enum Inbound {
     Response,
-    Request { id: Value, method: String, params: Option<Value> },
-    Notification { method: String, params: Option<Value> },
+    Request {
+        id: Value,
+        method: String,
+        params: Option<Value>,
+    },
+    Notification {
+        method: String,
+        params: Option<Value>,
+    },
 }
 
 fn classify_inbound(value: &Value) -> Inbound {
@@ -1167,7 +1174,10 @@ mod tests {
         // Null id + method is a notification, not a request (JSON-RPC
         // forbids null request ids).
         let null_id = serde_json::json!({"jsonrpc":"2.0","id":null,"method":"x"});
-        assert!(matches!(classify_inbound(&null_id), Inbound::Notification { .. }));
+        assert!(matches!(
+            classify_inbound(&null_id),
+            Inbound::Notification { .. }
+        ));
     }
 
     #[test]
@@ -1183,7 +1193,11 @@ mod tests {
 
         let err = build_response_line(
             &serde_json::json!(7),
-            Err(JsonRpcError { code: -32601, message: "nope".into(), data: None }),
+            Err(JsonRpcError {
+                code: -32601,
+                message: "nope".into(),
+                data: None,
+            }),
         );
         let v: serde_json::Value = serde_json::from_str(&err).unwrap();
         assert_eq!(v["id"], 7);
@@ -1329,7 +1343,10 @@ mod tests {
     fn extract_all_sse_frames_returns_every_frame_in_order() {
         let body = "event: message\ndata: {\"a\":1}\n\nevent: message\ndata: {\"b\":2}\n\n";
         let frames = extract_all_sse_frames(body);
-        assert_eq!(frames, vec!["{\"a\":1}".to_string(), "{\"b\":2}".to_string()]);
+        assert_eq!(
+            frames,
+            vec!["{\"a\":1}".to_string(), "{\"b\":2}".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -1379,8 +1396,8 @@ mod tests {
                             serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
                         // The inbound answer is a JSON-RPC response —
                         // id present, no method.
-                        let is_inbound_answer = req_value.get("method").is_none()
-                            && req_value.get("id").is_some();
+                        let is_inbound_answer =
+                            req_value.get("method").is_none() && req_value.get("id").is_some();
                         // Single stream type for both branches so
                         // their `Response<...>` types unify.
                         let body_stream = async_stream::stream! {
@@ -1649,10 +1666,12 @@ mod tests {
     // falling back to a direct unsandboxed spawn.
     #[test]
     fn resolve_exec_refuses_silent_fallback_when_bwrap_missing() {
-        let err = StdioTransport::resolve_exec_with(
-            "uvx", &["mcp-test".to_string()], true, false, false,
+        let err =
+            StdioTransport::resolve_exec_with("uvx", &["mcp-test".to_string()], true, false, false);
+        assert!(
+            err.is_err(),
+            "must refuse when sandbox requested and no bwrap"
         );
-        assert!(err.is_err(), "must refuse when sandbox requested and no bwrap");
         let msg = format!("{}", err.unwrap_err());
         assert!(
             msg.to_lowercase().contains("sandbox") || msg.to_lowercase().contains("bwrap"),
@@ -1662,10 +1681,9 @@ mod tests {
 
     #[test]
     fn resolve_exec_wraps_with_bwrap_when_available() {
-        let (exec, argv) = StdioTransport::resolve_exec_with(
-            "uvx", &["mcp-test".to_string()], true, true, false,
-        )
-        .expect("bwrap-available path");
+        let (exec, argv) =
+            StdioTransport::resolve_exec_with("uvx", &["mcp-test".to_string()], true, true, false)
+                .expect("bwrap-available path");
         assert_eq!(exec, "bwrap");
         assert!(argv.iter().any(|a| a == "uvx"), "uvx must appear in argv");
     }
@@ -1673,7 +1691,11 @@ mod tests {
     #[test]
     fn resolve_exec_passthrough_when_sandbox_disabled() {
         let (exec, argv) = StdioTransport::resolve_exec_with(
-            "uvx", &["mcp-test".to_string()], false, false, false,
+            "uvx",
+            &["mcp-test".to_string()],
+            false,
+            false,
+            false,
         )
         .expect("passthrough path");
         assert_eq!(exec, "uvx");

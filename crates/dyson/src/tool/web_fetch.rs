@@ -251,8 +251,7 @@ impl Tool for WebFetchTool {
         // PDF is checked first (by header and by magic bytes) so misconfigured
         // servers that return `application/octet-stream` or no content-type
         // still get text-extracted instead of dropping into the UTF-8 paths.
-        let is_pdf =
-            content_type.contains("application/pdf") || body_bytes.starts_with(b"%PDF-");
+        let is_pdf = content_type.contains("application/pdf") || body_bytes.starts_with(b"%PDF-");
 
         let text = if is_pdf {
             let bytes = std::mem::take(&mut body_bytes);
@@ -293,8 +292,9 @@ impl Tool for WebFetchTool {
             } else if content_type.contains("application/json") {
                 // Try to pretty-print; fall back to raw.
                 match serde_json::from_str::<serde_json::Value>(&body_str) {
-                    Ok(val) => serde_json::to_string_pretty(&val)
-                        .unwrap_or_else(|_| body_str.into_owned()),
+                    Ok(val) => {
+                        serde_json::to_string_pretty(&val).unwrap_or_else(|_| body_str.into_owned())
+                    }
                     Err(_) => body_str.into_owned(),
                 }
             } else if content_type.contains("text/") {
@@ -466,13 +466,19 @@ mod tests {
     #[test]
     fn should_pin_for_ip_literal_v4() {
         let url = reqwest::Url::parse("http://198.51.100.7/").unwrap();
-        assert!(should_pin_for(&url), "IPv4 literal must use the pinned client");
+        assert!(
+            should_pin_for(&url),
+            "IPv4 literal must use the pinned client"
+        );
     }
 
     #[test]
     fn should_pin_for_ip_literal_v6() {
         let url = reqwest::Url::parse("http://[2001:db8::1]/").unwrap();
-        assert!(should_pin_for(&url), "IPv6 literal must use the pinned client");
+        assert!(
+            should_pin_for(&url),
+            "IPv6 literal must use the pinned client"
+        );
     }
 
     #[test]

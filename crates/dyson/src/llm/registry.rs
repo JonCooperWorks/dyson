@@ -198,7 +198,9 @@ pub fn registry() -> &'static [ProviderEntry] {
                 aliases: &["openrouter", "open-router", "open_router"],
                 env_var: Some("OPENROUTER_API_KEY"),
                 requires_api_key: true,
-                create_client: |c| Box::new(openai_compat::OpenAiCompatClient::openrouter(c.api_key)),
+                create_client: |c| {
+                    Box::new(openai_compat::OpenAiCompatClient::openrouter(c.api_key))
+                },
             },
             ProviderEntry {
                 provider: LlmProvider::ClaudeCode,

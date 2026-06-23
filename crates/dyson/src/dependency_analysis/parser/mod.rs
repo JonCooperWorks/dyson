@@ -84,8 +84,7 @@ pub(crate) fn from_toml<T: serde::de::DeserializeOwned>(
     text: &str,
     label: &str,
 ) -> Result<T, ParseError> {
-    toml::from_str(text)
-        .map_err(|e| ParseError::malformed(path, format!("{label} decode: {e}")))
+    toml::from_str(text).map_err(|e| ParseError::malformed(path, format!("{label} decode: {e}")))
 }
 
 /// Shared constructor for the ubiquitous `Dependency { … }` block.

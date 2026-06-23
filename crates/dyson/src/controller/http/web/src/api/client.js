@@ -199,13 +199,11 @@ export class DysonClient {
   }
 
   // Artefact bodies are text: markdown for reports, the served file URL
-  // for images (stored verbatim).  The `X-Dyson-Chat-Id` response header
-  // lets a cold deep-link (/#/artefacts/<id> pasted into a fresh tab)
-  // restore the sidebar context without a second round-trip.
+  // for images (stored verbatim). Body loads require the owning chat id
+  // because artefact ids are only unique within a chat.
   async loadArtefact(id, scopeChatId = null) {
-    const path = scopeChatId
-      ? `/api/conversations/${encodeURIComponent(scopeChatId)}/artefacts/${encodeURIComponent(id)}`
-      : `/api/artefacts/${encodeURIComponent(id)}`;
+    if (!scopeChatId) throw new Error('artefact chat id required');
+    const path = `/api/conversations/${encodeURIComponent(scopeChatId)}/artefacts/${encodeURIComponent(id)}`;
     const r = await this._authedFetch(path);
     if (!r.ok) throw new Error(`artefact load failed: ${r.status}`);
     const body = await r.text();

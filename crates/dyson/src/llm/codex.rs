@@ -74,6 +74,8 @@
 //   in `llm/mod.rs`.
 // ===========================================================================
 
+use std::io::Write as _;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -124,6 +126,57 @@ pub struct CodexClient {
     mcp_tools: std::sync::Mutex<std::collections::HashMap<String, Arc<dyn Tool>>>,
 }
 
+struct TempCodexProfile {
+    _file: tempfile::NamedTempFile,
+    name: String,
+}
+
+impl TempCodexProfile {
+    fn new(token: &str) -> Result<Self> {
+        let home = codex_home_dir()?;
+        std::fs::create_dir_all(&home).map_err(DysonError::Io)?;
+        let mut file = tempfile::Builder::new()
+            .prefix("dyson-mcp-")
+            .suffix(".config.toml")
+            .tempfile_in(&home)
+            .map_err(DysonError::Io)?;
+        let body = format!(
+            "[mcp_servers.dyson-workspace.http_headers]\nAuthorization = \"Bearer {}\"\n",
+            toml_escape(token)
+        );
+        file.write_all(body.as_bytes()).map_err(DysonError::Io)?;
+        file.flush().map_err(DysonError::Io)?;
+        let filename = file
+            .path()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| DysonError::Llm("failed to build Codex MCP profile name".into()))?;
+        let name = filename
+            .strip_suffix(".config.toml")
+            .ok_or_else(|| DysonError::Llm("unexpected Codex MCP profile suffix".into()))?
+            .to_owned();
+        Ok(Self { _file: file, name })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+fn codex_home_dir() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("CODEX_HOME") {
+        return Ok(PathBuf::from(path));
+    }
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        DysonError::Llm("HOME is not set; cannot create Codex MCP profile".into())
+    })?;
+    Ok(PathBuf::from(home).join(".codex"))
+}
+
+fn toml_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 impl CodexClient {
     /// Create a new Codex CLI client.
     ///
@@ -165,7 +218,7 @@ impl CodexClient {
         system: &str,
         prompt: &str,
         mcp_url: Option<&str>,
-        mcp_bearer_token: Option<&str>,
+        mcp_profile: Option<&str>,
     ) -> Vec<String> {
         let mut args = vec![
             "exec".to_string(),
@@ -189,6 +242,11 @@ impl CodexClient {
         args.push("--model".to_string());
         args.push(model.to_string());
 
+        if let Some(profile) = mcp_profile {
+            args.push("--profile".to_string());
+            args.push(profile.to_string());
+        }
+
         if !system.is_empty() {
             args.push("-c".to_string());
             args.push(format!("developer_instructions={system}"));
@@ -197,18 +255,9 @@ impl CodexClient {
         if let Some(url) = mcp_url {
             args.push("-c".to_string());
             args.push(format!("mcp_servers.dyson-workspace.url={url}"));
-
-            if let Some(token) = mcp_bearer_token {
-                args.push("-c".to_string());
-                // Codex serialises streamable-HTTP MCP auth under `http_headers`
-                // (see `codex mcp get`); a bare `headers` key is ignored, which
-                // makes Codex hit the workspace MCP server unauthenticated.
-                args.push(format!(
-                    "mcp_servers.dyson-workspace.http_headers.Authorization=Bearer {token}"
-                ));
-            }
         }
 
+        args.push("--".to_string());
         args.push(prompt.to_string());
 
         args
@@ -244,7 +293,7 @@ impl LlmClient for CodexClient {
         // -- Start MCP server if workspace is available --
         let mut _mcp_server_handle: Option<tokio::task::JoinHandle<()>> = None;
         let mut mcp_url: Option<String> = None;
-        let mut mcp_token: Option<String> = None;
+        let mut mcp_profile: Option<TempCodexProfile> = None;
 
         if let Some(ref workspace) = self.workspace {
             let extra = self
@@ -255,7 +304,7 @@ impl LlmClient for CodexClient {
             let info = super::start_mcp_server(workspace, extra).await?;
             tracing::info!(port = info.port, "MCP server started for Codex");
             mcp_url = Some(info.url);
-            mcp_token = Some(info.token);
+            mcp_profile = Some(TempCodexProfile::new(&info.token)?);
             _mcp_server_handle = Some(info.handle);
         }
 
@@ -266,7 +315,7 @@ impl LlmClient for CodexClient {
             &full_system,
             &prompt,
             mcp_url.as_deref(),
-            mcp_token.as_deref(),
+            mcp_profile.as_ref().map(TempCodexProfile::name),
         );
 
         let mut cmd = tokio::process::Command::new(&self.codex_path);
@@ -275,7 +324,9 @@ impl LlmClient for CodexClient {
         }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            .env_clear()
+            .envs(cli_subprocess::sanitized_child_env(std::env::vars()));
 
         // -- Spawn the process --
         let mut child = cmd.spawn().map_err(|e| {
@@ -296,6 +347,9 @@ impl LlmClient for CodexClient {
         let mut keep_alive: Vec<Box<dyn std::any::Any + Send>> = vec![Box::new(child)];
         if let Some(handle) = _mcp_server_handle {
             keep_alive.push(Box::new(handle));
+        }
+        if let Some(profile) = mcp_profile {
+            keep_alive.push(Box::new(profile));
         }
 
         let event_stream = cli_event_stream(stdout, StreamParserState::new(), keep_alive);
@@ -850,32 +904,20 @@ mod tests {
     }
 
     #[test]
-    fn build_args_includes_mcp_bearer_token() {
+    fn build_args_does_not_expose_mcp_bearer_token_in_argv() {
         let client = CodexClient::new(Some("codex"), None, false);
         let args = client.build_args(
             "o3",
             "",
             "test",
             Some("http://127.0.0.1:9999/mcp"),
-            Some("secret-token-123"),
-        );
-        // Codex's streamable-HTTP MCP config carries static headers under
-        // `http_headers` (verified via `codex mcp get`); there is no bare
-        // `headers` key, so emitting `headers.Authorization` makes Codex call
-        // the server unauthenticated. Mirror the sidecar's `apply_codex_mcp`,
-        // which already uses `http_headers`.
-        assert!(
-            args.contains(
-                &"mcp_servers.dyson-workspace.http_headers.Authorization=Bearer secret-token-123"
-                    .to_string()
-            ),
-            "bearer must be set under http_headers, got: {args:?}"
+            Some("dyson-mcp-random-profile"),
         );
         assert!(
             !args
                 .iter()
-                .any(|a| a.starts_with("mcp_servers.dyson-workspace.headers.")),
-            "must not use the bare `headers` key — Codex ignores it"
+                .any(|a| a.contains("Bearer") || a.contains("Authorization")),
+            "MCP bearer material must be loaded from a transient profile, not argv: {args:?}"
         );
     }
 
@@ -894,5 +936,26 @@ mod tests {
         let client = CodexClient::new(Some("codex"), None, false);
         let args = client.build_args("o3", "sys", "my prompt", None, None);
         assert_eq!(args.last().unwrap(), "my prompt");
+    }
+
+    #[test]
+    fn build_args_terminates_flags_before_prompt() {
+        let client = CodexClient::new(Some("codex"), None, false);
+        let args = client.build_args(
+            "o3",
+            "sys",
+            "--dangerously-bypass-approvals-and-sandbox",
+            None,
+            None,
+        );
+        let prompt_idx = args
+            .iter()
+            .position(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
+            .expect("prompt should be present verbatim");
+        assert_eq!(
+            args.get(prompt_idx - 1).map(String::as_str),
+            Some("--"),
+            "prompt-like flags must be separated from Codex CLI options"
+        );
     }
 }

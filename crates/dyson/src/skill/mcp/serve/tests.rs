@@ -178,7 +178,10 @@ async fn resources_list_exposes_workspace_files() {
     let server = make_server();
     let resp = server.dispatch(Some(1), "resources/list", None).await;
     assert!(resp.error.is_none());
-    let resources = resp.result.unwrap()["resources"].as_array().unwrap().clone();
+    let resources = resp.result.unwrap()["resources"]
+        .as_array()
+        .unwrap()
+        .clone();
     assert_eq!(resources.len(), 1);
     assert_eq!(resources[0]["uri"], "workspace://identity");
     assert_eq!(resources[0]["name"], "identity");
@@ -189,7 +192,9 @@ async fn resources_list_exposes_workspace_files() {
 async fn resources_read_returns_file_content() {
     let server = make_server();
     let params = serde_json::json!({ "uri": "workspace://identity" });
-    let resp = server.dispatch(Some(2), "resources/read", Some(params)).await;
+    let resp = server
+        .dispatch(Some(2), "resources/read", Some(params))
+        .await;
     assert!(resp.error.is_none());
     let contents = resp.result.unwrap()["contents"][0].clone();
     assert_eq!(contents["uri"], "workspace://identity");
@@ -201,7 +206,9 @@ async fn resources_read_returns_file_content() {
 async fn resources_read_unknown_uri_is_not_found() {
     let server = make_server();
     let params = serde_json::json!({ "uri": "workspace://does-not-exist" });
-    let resp = server.dispatch(Some(3), "resources/read", Some(params)).await;
+    let resp = server
+        .dispatch(Some(3), "resources/read", Some(params))
+        .await;
     assert_eq!(resp.error.unwrap().code, -32002);
 }
 
@@ -210,7 +217,9 @@ async fn resources_read_unknown_uri_is_not_found() {
 async fn resources_read_foreign_scheme_is_invalid_params() {
     let server = make_server();
     let params = serde_json::json!({ "uri": "file:///etc/passwd" });
-    let resp = server.dispatch(Some(4), "resources/read", Some(params)).await;
+    let resp = server
+        .dispatch(Some(4), "resources/read", Some(params))
+        .await;
     assert_eq!(resp.error.unwrap().code, -32602);
 }
 
@@ -222,10 +231,12 @@ async fn resource_templates_list_is_empty() {
         .dispatch(Some(5), "resources/templates/list", None)
         .await;
     assert!(resp.error.is_none());
-    assert!(resp.result.unwrap()["resourceTemplates"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert!(
+        resp.result.unwrap()["resourceTemplates"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// `completion/complete` for a resource URI prefix-matches workspace files.
@@ -258,10 +269,12 @@ async fn completion_complete_prompt_ref_is_empty() {
         .dispatch(Some(7), "completion/complete", Some(params))
         .await;
     assert!(resp.error.is_none());
-    assert!(resp.result.unwrap()["completion"]["values"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert!(
+        resp.result.unwrap()["completion"]["values"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -288,10 +301,12 @@ async fn prompts_list_is_empty_without_skills() {
     let server = make_server();
     let resp = server.dispatch(Some(1), "prompts/list", None).await;
     assert!(resp.error.is_none());
-    assert!(resp.result.unwrap()["prompts"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert!(
+        resp.result.unwrap()["prompts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

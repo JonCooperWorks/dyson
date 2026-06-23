@@ -126,6 +126,7 @@
 // ===========================================================================
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -193,6 +194,26 @@ pub struct ClaudeCodeClient {
 
     /// Dyson tools exposed via MCP (set by agent via `set_mcp_tools`).
     mcp_tools: std::sync::Mutex<HashMap<String, Arc<dyn Tool>>>,
+}
+
+struct TempMcpConfig(tempfile::NamedTempFile);
+
+impl TempMcpConfig {
+    fn new(json: &serde_json::Value) -> Result<Self> {
+        let mut file = tempfile::Builder::new()
+            .prefix("dyson-claude-mcp-")
+            .suffix(".json")
+            .tempfile()
+            .map_err(DysonError::Io)?;
+        file.write_all(json.to_string().as_bytes())
+            .map_err(DysonError::Io)?;
+        file.flush().map_err(DysonError::Io)?;
+        Ok(Self(file))
+    }
+
+    fn path_arg(&self) -> String {
+        self.0.path().display().to_string()
+    }
 }
 
 impl ClaudeCodeClient {
@@ -329,6 +350,7 @@ impl LlmClient for ClaudeCodeClient {
         // When the stream is dropped, the handle is dropped, stopping the server.
         let mut _mcp_server_handle: Option<tokio::task::JoinHandle<()>> = None;
         let mut mcp_config_json: Option<String> = None;
+        let mut mcp_config_file: Option<TempMcpConfig> = None;
 
         if let Some(ref workspace) = self.workspace {
             let extra = self
@@ -353,7 +375,9 @@ impl LlmClient for ClaudeCodeClient {
 
             tracing::info!(port = info.port, "MCP server started for Claude Code");
 
-            mcp_config_json = Some(config.to_string());
+            let file = TempMcpConfig::new(&config)?;
+            mcp_config_json = Some(file.path_arg());
+            mcp_config_file = Some(file);
             _mcp_server_handle = Some(info.handle);
         }
 
@@ -369,7 +393,9 @@ impl LlmClient for ClaudeCodeClient {
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            .env_clear()
+            .envs(cli_subprocess::sanitized_child_env(std::env::vars()));
 
         // -- Spawn the process --
         let mut child = cmd.spawn().map_err(|e| {
@@ -408,6 +434,9 @@ impl LlmClient for ClaudeCodeClient {
         let mut keep_alive: Vec<Box<dyn std::any::Any + Send>> = vec![Box::new(child)];
         if let Some(handle) = _mcp_server_handle {
             keep_alive.push(Box::new(handle));
+        }
+        if let Some(file) = mcp_config_file {
+            keep_alive.push(Box::new(file));
         }
 
         let event_stream = cli_event_stream(stdout, StreamParserState::new(), keep_alive);

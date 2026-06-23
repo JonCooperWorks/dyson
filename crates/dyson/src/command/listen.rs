@@ -37,13 +37,7 @@ pub async fn run(
     let config_path = super::resolve_config_path(config);
 
     let mut settings = dyson::config::loader::load_settings(config_path.as_deref())?;
-    super::apply_overrides(
-        &mut settings,
-        sandbox_bypass,
-        provider,
-        base_url,
-        workspace,
-    )?;
+    super::apply_overrides(&mut settings, sandbox_bypass, provider, base_url, workspace)?;
 
     tracing::info!(
         model = settings.agent.model,

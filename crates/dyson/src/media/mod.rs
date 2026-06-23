@@ -242,4 +242,3 @@ pub fn is_text_extension(ext: &str) -> bool {
             | "gql"
     )
 }
-

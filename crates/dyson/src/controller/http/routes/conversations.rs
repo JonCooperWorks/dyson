@@ -463,7 +463,7 @@ fn sent_file_block_for_artefact(a: &ArtefactDto) -> Option<BlockDto> {
     }
     let meta = a.metadata.as_ref()?;
     let url = meta.get("file_url").and_then(|v| v.as_str())?;
-    if !url.starts_with("/api/files/") {
+    if !is_chat_scoped_file_url(url) {
         return None;
     }
     let name = meta
@@ -488,6 +488,15 @@ fn sent_file_block_for_artefact(a: &ArtefactDto) -> Option<BlockDto> {
         url: url.to_string(),
         inline_image: mime.starts_with("image/"),
     })
+}
+
+fn is_chat_scoped_file_url(url: &str) -> bool {
+    let parts: Vec<&str> = url.split('/').collect();
+    matches!(
+        parts.as_slice(),
+        ["", "api", "conversations", chat_id, "files", file_id]
+            if !chat_id.is_empty() && !file_id.is_empty()
+    )
 }
 
 /// Pluck the first user-text block from a message list — used as a chat

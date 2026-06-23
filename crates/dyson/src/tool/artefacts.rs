@@ -55,9 +55,10 @@ impl Tool for ArtefactsTool {
     }
 
     fn description(&self) -> &str {
-        "List or read artifacts produced anywhere in this Dyson instance. Use this when the user \
+        "List or read artifacts produced in the current chat by default. Use this when the user \
          asks to inspect an artifact, report, generated image record, or document-shaped \
-         output that was emitted as an artifact instead of regular chat text."
+         output that was emitted as an artifact instead of regular chat text. Pass chat_id \
+         explicitly only when the user asks for a different chat."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -67,7 +68,7 @@ impl Tool for ArtefactsTool {
                 "operation": {
                     "type": "string",
                     "enum": ["list", "read"],
-                    "description": "Use 'list' to discover artifacts across the instance, or 'read' to load one artifact body. Defaults to 'read' when id is present, otherwise 'list'."
+                    "description": "Use 'list' to discover artifacts for the current chat, or 'read' to load one artifact body. Defaults to 'read' when id is present, otherwise 'list'."
                 },
                 "id": {
                     "type": "string",
@@ -75,7 +76,7 @@ impl Tool for ArtefactsTool {
                 },
                 "chat_id": {
                     "type": "string",
-                    "description": "Optional chat id to filter list results or disambiguate a read when the same artifact id appears in multiple chats."
+                    "description": "Optional chat id to filter list results or disambiguate a read when the same artifact id appears in multiple chats. Defaults to the active chat."
                 },
                 "limit": {
                     "type": "integer",
@@ -99,7 +100,13 @@ impl Tool for ArtefactsTool {
         let chat_id = input["chat_id"]
             .as_str()
             .map(str::trim)
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                ctx.current_chat_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            });
         if let Some(chat_id) = chat_id
             && !safe_store_id(chat_id)
         {
@@ -353,17 +360,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lists_whole_instance_by_default() {
+    async fn lists_current_chat_by_default() {
         let out = ArtefactsTool
             .run(&json!({"operation": "list"}), &ctx())
             .await
             .unwrap();
 
         assert!(!out.is_error);
+        assert!(out.content.contains("Artifacts for chat c1"));
         assert!(out.content.contains("Current chat report"));
-        assert!(out.content.contains("Other chat report"));
         assert!(out.content.contains("chat:c1"));
-        assert!(out.content.contains("chat:c2"));
+        assert!(!out.content.contains("Other chat report"));
+        assert!(!out.content.contains("chat:c2"));
     }
 
     #[tokio::test]
@@ -380,8 +388,10 @@ mod tests {
 
     #[tokio::test]
     async fn read_ambiguous_instance_id_explains_chat_id_disambiguation() {
+        let mut ctx = ctx();
+        ctx.current_chat_id = None;
         let out = ArtefactsTool
-            .run(&json!({"operation": "read", "id": "a1"}), &ctx())
+            .run(&json!({"operation": "read", "id": "a1"}), &ctx)
             .await
             .unwrap();
 
@@ -389,6 +399,19 @@ mod tests {
         assert!(out.content.contains("exists in multiple chats"));
         assert!(out.content.contains("chat:c1"));
         assert!(out.content.contains("chat:c2"));
+    }
+
+    #[tokio::test]
+    async fn read_defaults_to_current_chat_id() {
+        let out = ArtefactsTool
+            .run(&json!({"operation": "read", "id": "a1"}), &ctx())
+            .await
+            .unwrap();
+
+        assert!(!out.is_error);
+        assert!(out.content.contains("# Current chat report"));
+        assert!(out.content.contains("Chat: c1"));
+        assert!(!out.content.contains("Other chat report"));
     }
 
     #[tokio::test]
@@ -409,15 +432,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_unique_artefact_across_instance_without_chat_id() {
+    async fn read_does_not_cross_chat_by_default() {
         let out = ArtefactsTool
             .run(&json!({"operation": "read", "id": "a2"}), &ctx())
             .await
             .unwrap();
 
-        assert!(!out.is_error);
-        assert!(out.content.contains("# Unique other chat report"));
-        assert!(out.content.contains("Chat: c2"));
+        assert!(out.is_error);
+        assert!(
+            out.content
+                .contains("artifact 'a2' was not found in chat c1")
+        );
     }
 
     #[tokio::test]

@@ -268,4 +268,3 @@ pub fn create_channel_workspace(
 
     Ok(Box::new(ws))
 }
-

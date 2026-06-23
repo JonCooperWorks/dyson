@@ -1820,11 +1820,10 @@ mod tests {
             crate::skill::builtin::BuiltinSkill::new_filtered(None, None, None, &filter),
         )];
 
-        let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> = std::sync::Arc::new(
-            crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+        let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
+            std::sync::Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
                 crate::sandbox::SandboxBypassGuard::for_test(),
-            ),
-        );
+            ));
         let client =
             crate::llm::create_client(&crate::config::AgentSettings::default(), None, None);
         let client = crate::agent::rate_limiter::RateLimitedHandle::unlimited(client);

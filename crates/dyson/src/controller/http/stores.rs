@@ -81,6 +81,7 @@ pub(crate) struct FileEntry {
     pub(crate) bytes: Vec<u8>,
     pub(crate) mime: String,
     pub(crate) name: String,
+    pub(crate) chat_id: String,
 }
 
 impl FileStore {
@@ -108,6 +109,7 @@ impl FileStore {
                 .and_then(|v| v.as_str())
                 .unwrap_or("file")
                 .to_string(),
+            chat_id: meta.get("chat_id").and_then(|v| v.as_str())?.to_string(),
         })
     }
 
@@ -130,6 +132,7 @@ impl FileStore {
         let meta = serde_json::json!({
             "mime": entry.mime,
             "name": entry.name,
+            "chat_id": entry.chat_id,
         });
         if let Err(e) = std::fs::write(&meta_path, meta.to_string()) {
             tracing::warn!(error = %e, id, "failed to persist file metadata");
@@ -403,6 +406,7 @@ mod tests {
             bytes: format!("body-{name}").into_bytes(),
             mime: "text/plain".to_string(),
             name: name.to_string(),
+            chat_id: "c1".to_string(),
         }
     }
 

@@ -56,4 +56,3 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState,
         }
     }
 }
-

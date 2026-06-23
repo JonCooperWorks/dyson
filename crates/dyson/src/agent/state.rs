@@ -12,7 +12,11 @@ use super::token_budget::TokenBudget;
 /// Estimate the token cost of a single tool definition as sent to the LLM:
 /// word counts for the name and description, the schema's estimated JSON
 /// tokens, plus a small constant for per-tool JSON framing overhead.
-fn estimate_tool_def_tokens(name: &str, description: &str, input_schema: &serde_json::Value) -> usize {
+fn estimate_tool_def_tokens(
+    name: &str,
+    description: &str,
+    input_schema: &serde_json::Value,
+) -> usize {
     name.split_whitespace().count()
         + description.split_whitespace().count()
         + crate::message::estimate_json_tokens(input_schema)

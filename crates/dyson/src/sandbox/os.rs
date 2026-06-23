@@ -56,7 +56,7 @@ use std::path::{Path, PathBuf};
 ///
 /// Always mounted read-only when file_read is restricted, so that shell
 /// builtins, coreutils, and shared libraries are available.
-const ESSENTIAL_SYSTEM_DIRS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
+const ESSENTIAL_SYSTEM_DIRS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MountSpec {
@@ -514,8 +514,8 @@ mod tests {
             "should bind /bin: {cmd}"
         );
         assert!(
-            cmd.contains("--ro-bind /etc /etc"),
-            "should bind /etc: {cmd}"
+            !cmd.contains("--ro-bind /etc /etc"),
+            "restricted bash must not bind all of /etc: {cmd}"
         );
         // Should have read-only bind for allowed read path.
         assert!(

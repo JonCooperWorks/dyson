@@ -155,7 +155,9 @@ async fn subagent_child_agent_returns_result_via_capture_output() {
     // Child gets no tools (just responds with text).
     let skills: Vec<Box<dyn Skill>> =
         vec![Box::new(dyson::skill::subagent::FilteredSkill::new(vec![]))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox::new(dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox::new(
+        dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap(),
+    ));
     let mut agent = Agent::new(
         RateLimitedHandle::unlimited(Box::new(child_llm)),
         sandbox,
@@ -287,7 +289,9 @@ async fn subagent_conversation_isolated_from_parent() {
         ..Default::default()
     };
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox::new(dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox::new(
+        dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap(),
+    ));
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(dyson::skill::builtin::BuiltinSkill::new(
         None, None, None,
     ))];
@@ -343,7 +347,9 @@ async fn subagent_conversation_isolated_from_parent() {
 
 #[tokio::test]
 async fn depth_propagates_to_child_tool_context() {
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox::new(dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox::new(
+        dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap(),
+    ));
     let settings = AgentSettings {
         api_key: "test".into(),
         ..Default::default()

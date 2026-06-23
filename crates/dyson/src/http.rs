@@ -118,6 +118,40 @@ pub fn safe_redirect_policy() -> Policy {
     })
 }
 
+pub fn strict_untrusted_redirect_policy() -> Policy {
+    Policy::custom(|attempt: Attempt| -> Action {
+        if attempt.previous().len() >= MAX_REDIRECTS {
+            return attempt.error("too many redirects");
+        }
+        match redirect_url_is_safe_for_untrusted_fetch(attempt.url()) {
+            Ok(()) => attempt.follow(),
+            Err(err) => attempt.error(err),
+        }
+    })
+}
+
+pub fn redirect_url_is_safe_for_untrusted_fetch(url: &reqwest::Url) -> Result<(), String> {
+    let Some(host) = url.host_str() else {
+        return Err("redirect without host blocked".into());
+    };
+    let raw = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) if is_private_v4(v4) => {
+                Err("redirect into private IPv4 address blocked".into())
+            }
+            std::net::IpAddr::V6(v6) if is_private_v6(v6) => {
+                Err("redirect into private IPv6 address blocked".into())
+            }
+            _ => Ok(()),
+        };
+    }
+    if is_metadata_host(host) {
+        return Err("redirect into cloud metadata host blocked".into());
+    }
+    Err(format!("redirect to hostname {host} blocked"))
+}
+
 // SSRF / internal-network predicates live in dyson-common::net so dyson and
 // dyson-swarm can't drift on what "internal" means.  Re-exported under the
 // historical `crate::http::*` paths the rest of the codebase already imports
@@ -238,7 +272,7 @@ pub enum UrlSafetyError {
 pub fn pinned_client_for_validated_url(
     validated: &ValidatedSafeUrl,
 ) -> Result<reqwest::Client, reqwest::Error> {
-    let mut builder = configured_client_builder();
+    let mut builder = configured_client_builder().redirect(strict_untrusted_redirect_policy());
     if let Some(host) = validated.url.host_str() {
         builder = builder.resolve_to_addrs(host, &validated.resolved_addrs);
     }
@@ -406,7 +440,8 @@ mod tests {
         let item = tokio_stream::StreamExt::next(&mut stream).await;
         let elapsed = started.elapsed();
 
-        let item = item.expect("stalled body should yield a timeout error item, not end the stream");
+        let item =
+            item.expect("stalled body should yield a timeout error item, not end the stream");
         let err = item.expect_err("a stalled body read must surface as Err, not Ok");
         assert!(
             err.is_timeout(),
@@ -417,5 +452,12 @@ mod tests {
             "read timeout (300ms) should fire promptly, not hang; took {elapsed:?}"
         );
         server.abort();
+    }
+
+    #[test]
+    fn redirect_policy_rejects_untrusted_hostname_redirects() {
+        let url = reqwest::Url::parse("http://internal.example.test/metadata").unwrap();
+        let err = redirect_url_is_safe_for_untrusted_fetch(&url).expect_err("hostname redirect");
+        assert!(err.contains("redirect to hostname"));
     }
 }

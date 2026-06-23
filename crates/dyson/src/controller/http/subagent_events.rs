@@ -244,7 +244,9 @@ mod tests {
         // chat's replay ring so the SSE reconnect path replays them.
         let (bus, mut rx, ring) = ringed_fixture();
         bus.checkpoint("security_engineer: hunt");
-        bus.checkpoint("security_engineer: hunt: class injection_unsafe_execution hunted (5 findings)");
+        bus.checkpoint(
+            "security_engineer: hunt: class injection_unsafe_execution hunted (5 findings)",
+        );
 
         // Live broadcast still delivered every event.
         for expected in [
@@ -290,11 +292,7 @@ mod tests {
         // persisted.
         let (bus, _rx, ring) = ringed_fixture();
         bus.tool_start("parent_42", "child_7", "bash");
-        bus.tool_result(
-            "parent_42",
-            Some("child_7"),
-            &ToolOutput::success("output"),
-        );
+        bus.tool_result("parent_42", Some("child_7"), &ToolOutput::success("output"));
         let snapshot = ring.lock().unwrap().since(0);
         assert!(
             snapshot.is_empty(),

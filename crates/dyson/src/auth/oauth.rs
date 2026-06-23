@@ -32,8 +32,10 @@ use crate::error::{DysonError, Result};
 // signatures the MCP skill layer already calls, fold in the async SSRF guard
 // (which the SSRF-agnostic shared transport deliberately does NOT do), and map
 // the shared `OAuthError` into a `DysonError` with per-step context.
-pub use dyson_common::oauth::{AuthMetadata, DcrRequest, DcrResponse, PkceChallenge, TokenResponse};
 use dyson_common::oauth::client;
+pub use dyson_common::oauth::{
+    AuthMetadata, DcrRequest, DcrResponse, PkceChallenge, TokenResponse,
+};
 
 pub use client::{generate_pkce, generate_state};
 

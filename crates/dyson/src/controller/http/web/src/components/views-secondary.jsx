@@ -527,9 +527,8 @@ export function ArtefactsView({ conv, setConv }) {
   };
 
   // Deep-link: `#/artefacts/<id>` opened cold (no chat known yet).
-  // Render the reader anyway — the fetch response header will tell
-  // App which chat owns the artefact and setConv will populate the
-  // tree on the round-trip.
+  // Render the reader shell while chat context hydrates; body fetches
+  // stay scoped to the owning chat once known.
   const hasChats = chats.length > 0;
   const showDeepLinkPlaceholder = !conv && selected && !hasChats;
 
@@ -634,7 +633,8 @@ function findArtefactMeta(id, chatId = null) {
   return null;
 }
 
-// Full-page markdown reader.  Fetches the body from /api/artefacts/:id,
+// Full-page markdown reader.  Fetches the body from the chat-scoped
+// artefact API route,
 // renders it through the shared `markdown()` helper, and surfaces the
 // metadata header (model, target, tokens, cost) in a sticky top bar.
 // `client` (optional) overrides the React context — ArtefactsView
@@ -673,6 +673,10 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
     setMeta(hit);
     const scopedChatId = requestedChatId || (hit && hit.chat_id) || null;
     setChatId(scopedChatId);
+    if (!scopedChatId) {
+      setErr('Loading conversation context...');
+      return;
+    }
     client.loadArtefact(id, scopedChatId)
       .then(({ body, chatId: cid }) => {
         setBody(body);

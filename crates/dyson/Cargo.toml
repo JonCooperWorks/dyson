@@ -122,12 +122,12 @@ jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pe
 libc = "0.2"
 undoc = "0.2.0"
 unpdf = { version = "0.4.5", default-features = false, features = ["fast-parse"] }
+tempfile = "3"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"
 
 [dev-dependencies]
-tempfile = "3"
 proptest = "1"
 wiremock = "0.6"
 # `test-util` enables tokio::time::pause / start_paused so retry-backoff

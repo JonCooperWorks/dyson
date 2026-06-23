@@ -1105,7 +1105,9 @@ mod tests {
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(
             crate::skill::local::LocalSkill::from_dir(&skill_dir).unwrap(),
         )];
-        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        ));
         let mut agent = crate::agent::Agent::new(
             RateLimitedHandle::unlimited(Box::new(PanicLlm)),
             sandbox,
@@ -1140,7 +1142,9 @@ mod tests {
         let mut settings = Settings::default();
         settings.workspace.connection_string =
             Credential::new(tmp.path().to_string_lossy().to_string());
-        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        ));
         let mut agent = crate::agent::Agent::new(
             RateLimitedHandle::unlimited(Box::new(PanicLlm)),
             sandbox,

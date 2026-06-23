@@ -253,6 +253,17 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         (&Method::GET, ["api", "conversations", id, "events"]) => {
             sse::events(&state, id, &req).await
         }
+        (&Method::GET, ["api", "conversations", id, "files", file_id]) => {
+            let id = match url_decode_strict(id) {
+                Some(id) => id,
+                None => return not_found(),
+            };
+            let file_id = match url_decode_strict(file_id) {
+                Some(id) => id,
+                None => return not_found(),
+            };
+            files::get_for_chat(&state, &id, &file_id).await
+        }
         (&Method::GET, ["api", "conversations", id, "feedback"]) => feedback::get(&state, id).await,
         (&Method::POST, ["api", "conversations", id, "feedback"]) => {
             feedback::post(req, &state, id).await
@@ -335,11 +346,11 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         // percent-escape that the lossy `url_decode` would silently
         // pass through as `%ZZ` should 404 instead.
         (&Method::GET, ["api", "files", id]) => match url_decode_strict(id) {
-            Some(id) => files::get(&state, &id).await,
+            Some(_) => not_found(),
             None => not_found(),
         },
         (&Method::GET, ["api", "artefacts", id]) => match url_decode_strict(id) {
-            Some(id) => artefacts::get(&state, &id).await,
+            Some(_) => not_found(),
             None => not_found(),
         },
         // Naked `/artefacts/<id>` is a shareable permalink: bounce it

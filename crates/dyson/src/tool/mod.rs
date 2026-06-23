@@ -756,10 +756,7 @@ pub(crate) fn canonical_or_self(p: &std::path::Path) -> PathBuf {
 /// Render `(key, snippet)` search hits as the shared memory/KB search output:
 /// a `### {key}\n{snippet}` block per hit followed by an `(n result(s))`
 /// footer.  Returns `empty_message` when there are no hits.
-pub(crate) fn format_search_results(
-    results: &[(String, String)],
-    empty_message: &str,
-) -> String {
+pub(crate) fn format_search_results(results: &[(String, String)], empty_message: &str) -> String {
     use std::fmt::Write;
     if results.is_empty() {
         return empty_message.to_string();

@@ -22,7 +22,8 @@ pub mod taint;
 
 pub use languages::{
     LanguageConfig, MAX_FILE_SIZE, MAX_FILES, ParsedFile, config_for_extension, config_for_glob,
-    config_for_language_name, supported_language_names, try_parse_file, walk_dir, walk_dir_filtered,
+    config_for_language_name, supported_language_names, try_parse_file, walk_dir,
+    walk_dir_filtered,
 };
 
 use tree_sitter::{Node, Tree};

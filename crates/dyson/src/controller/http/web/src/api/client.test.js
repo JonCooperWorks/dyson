@@ -113,7 +113,7 @@ describe('DysonClient — GET endpoints', () => {
     expect(args(fetch)[0]).toBe('/api/conversations/c1/artefacts');
   });
 
-  it('loadArtefact returns body + chat id from X-Dyson-Chat-Id', async () => {
+  it('loadArtefact returns body from the chat-scoped body route', async () => {
     const fetch = vi.fn(async () => ({
       ok: true,
       status: 200,
@@ -121,9 +121,16 @@ describe('DysonClient — GET endpoints', () => {
       text: async () => '# report',
     }));
     const client = new DysonClient({ fetch });
-    const out = await client.loadArtefact('a1');
+    const out = await client.loadArtefact('a1', 'c1');
     expect(out).toEqual({ body: '# report', chatId: 'c1' });
-    expect(args(fetch)[0]).toBe('/api/artefacts/a1');
+    expect(args(fetch)[0]).toBe('/api/conversations/c1/artefacts/a1');
+  });
+
+  it('loadArtefact refuses unscoped body loads', async () => {
+    const fetch = vi.fn();
+    const client = new DysonClient({ fetch });
+    await expect(client.loadArtefact('a1')).rejects.toThrow(/chat id required/);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it('loadArtefact uses chat-scoped body route when chat id is known', async () => {
