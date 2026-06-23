@@ -272,6 +272,45 @@ describe('pushUserMessage — idle / queue / coalesce', () => {
     expect(next.liveTurns[1].blocks).toEqual([{ type: 'text', text: '' }]);
   });
 
+  it('idle send after a completed turn clears nextAgentNew so the delta fills the placeholder (no empty bubble)', () => {
+    // Reproduces the post-Done state: the previous turn finished, so
+    // onDone left nextAgentNew=true while running flipped to false. The
+    // user then sends another message in the same conversation while idle.
+    const s = {
+      ...makeSession(),
+      running: false,
+      nextAgentNew: true,
+      liveTurns: [
+        { role: 'user', ts: '11:00:00', blocks: blocks('first ask') },
+        { role: 'agent', ts: '11:00:01', blocks: blocks('first reply') },
+      ],
+    };
+    const pushed = pushUserMessage(s, { ts: '11:00:05', blocks: blocks('second ask') });
+    // The idle branch owns its own placeholder, so the queue-drain flag
+    // must be cleared here — otherwise the next delta mints a SECOND
+    // fresh agent turn and strands this placeholder as an empty bubble.
+    expect(pushed.nextAgentNew).toBe(false);
+    expect(pushed.liveTurns).toHaveLength(4);
+    expect(pushed.liveTurns[2].role).toBe('user');
+    expect(pushed.liveTurns[3].role).toBe('agent');
+    expect(pushed.liveTurns[3].blocks).toEqual([{ type: 'text', text: '' }]);
+
+    // The first streamed delta must land IN the placeholder, not append a
+    // 5th turn that leaves the placeholder empty.
+    const streamed = mapAgentTail(pushed, t => ({
+      ...t, blocks: [{ type: 'text', text: 'second reply' }],
+    }));
+    expect(streamed.liveTurns).toHaveLength(4);
+    expect(streamed.liveTurns[3].blocks[0].text).toBe('second reply');
+    const emptyAgentBubbles = streamed.liveTurns.filter(
+      t => t.role === 'agent'
+        && t.blocks.length === 1
+        && t.blocks[0].type === 'text'
+        && t.blocks[0].text === '',
+    );
+    expect(emptyAgentBubbles).toHaveLength(0);
+  });
+
   it('first send while running pushes a queued user turn with no agent placeholder', () => {
     const s = {
       ...makeSession(),

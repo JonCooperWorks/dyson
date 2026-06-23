@@ -211,6 +211,13 @@ export const pushUserMessage = (s, { ts, blocks, queueMode = 'normal', nextRunMo
       phase: 'thinking',
       runStartedAt: Date.now(),
       thinkingRef: null,
+      // We push our own empty agent placeholder below, so the next delta
+      // must land IN it via the lastAgentIndex path. A leftover
+      // `nextAgentNew` from the previous turn's Done would make
+      // `mapAgentTail` mint a SECOND fresh agent turn instead, stranding
+      // this placeholder as an empty bubble. The flag only applies to the
+      // queue-drain case (running, no placeholder), so clear it here.
+      nextAgentNew: false,
       liveTurns: [
         ...s.liveTurns,
         { role: 'user', ts, blocks },
