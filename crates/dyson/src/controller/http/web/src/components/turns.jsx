@@ -416,7 +416,11 @@ function Turn({ turn, tools, onOpenTool, expandedTools, turnIndex, rating, onRat
         </button>
         <div className="who">
           <span className="name">{isUser ? 'you' : agentName}</span>
-          {turn.model && <span className="model">{turn.model}</span>}
+          {/* The model rides on the per-turn cost metadata (cost.model),
+              which hydrated transcripts carry. The old `turn.model` field
+              was never populated anywhere, so this label was dead on
+              loaded history — render it from the cost the turn already has. */}
+          {!isUser && turn.cost?.model && <span className="model">{turn.cost.model}</span>}
           {!isUser ? <CostPill cost={turn.cost}/> : null}
           {turn.queued && (
             <span

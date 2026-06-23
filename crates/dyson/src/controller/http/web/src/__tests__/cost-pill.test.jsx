@@ -55,3 +55,37 @@ describe('assistant message cost pill', () => {
     expect(pending.container.textContent).not.toMatch(/cost unavailable|cost pending|-{2,}/i);
   });
 });
+
+describe('per-turn model label', () => {
+  // Regression: the `.model` label was bound to `turn.model`, which is
+  // never populated, so it was dead on hydrated transcripts. The model
+  // actually rides on cost.model (the same field the cost-pill tooltip
+  // reads), so a hydrated agent turn must surface it as a visible label.
+  it('shows the model from cost.model on an assistant turn', () => {
+    const { container } = render(
+      <Turn
+        turn={assistantTurn({ display_cost_usd: 0.002, model: 'deepseek/deepseek-v4-pro' })}
+        tools={{}}
+        onOpenTool={() => {}}
+      />
+    );
+    const label = container.querySelector('.model');
+    expect(label).toBeTruthy();
+    expect(label.textContent).toBe('deepseek/deepseek-v4-pro');
+  });
+
+  it('renders no model label when cost has no model', () => {
+    const { container } = render(
+      <Turn turn={assistantTurn({ display_cost_usd: 0.002 })} tools={{}} onOpenTool={() => {}}/>
+    );
+    expect(container.querySelector('.model')).toBeNull();
+  });
+
+  it('renders no model label on a user turn', () => {
+    const userTurn = { role: 'user', ts: '12:00:00', blocks: [{ type: 'text', text: 'hi' }] };
+    const { container } = render(
+      <Turn turn={userTurn} tools={{}} onOpenTool={() => {}}/>
+    );
+    expect(container.querySelector('.model')).toBeNull();
+  });
+});
