@@ -27,7 +27,7 @@ import {
 } from '../store/app.js';
 import {
   ensureSession, updateSession, getSession, getResources, mintToolRef,
-  mapLastTurn, appendBlock, mapAgentTail, appendAgentBlock,
+  mapLastTurn, appendBlock, mapAgentTail, appendAgentBlock, settleRun,
   pushUserMessage, admitUserMessage, openPanel, closePanel,
   closeAllPanels, setComposerDraft, setQueueMode, setNextRunModel,
 } from '../store/sessions.js';
@@ -575,7 +575,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     if (conv) client.cancel(conv).catch(() => {});
     const r = getResources(conv);
     if (r.es) { try { r.es.close(); } catch { /* already closed */ } r.es = null; }
-    mutate(s => s.running ? { ...s, running: false, runStartedAt: null } : s);
+    mutate(s => settleRun(s, { done: false }));
   };
 
   const onRate = (turnIndex, emoji) => {
@@ -976,9 +976,7 @@ function streamCallbacks(conv) {
       // next queued message right after this Done.  `mapAgentTail`
       // mints a fresh agent turn when it sees `nextAgentNew`, so the
       // drain reply doesn't graft onto the just-finished turn.
-      updateSession(conv, s => s.running
-        ? { ...s, running: false, runStartedAt: null, thinkingRef: null, nextAgentNew: true }
-        : s);
+      updateSession(conv, s => settleRun(s, { done: true }));
       getResources(conv).es = null;
     },
   };

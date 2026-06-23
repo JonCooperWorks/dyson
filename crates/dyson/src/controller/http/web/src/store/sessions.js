@@ -188,6 +188,32 @@ export const mapAgentTail = (s, fn) => {
 export const appendAgentBlock = (s, block) =>
   mapAgentTail(s, t => ({ ...t, blocks: [...t.blocks, block] }));
 
+// A run terminated. Clear the per-run scratch state so it can't leak into
+// the next turn:
+//   - nextRunModel: a model picked from the top-bar WHILE running is
+//     stashed (not POSTed) for the in-flight run. If the run ends before
+//     the user sends a queued message, a lingering value would strand the
+//     top-bar "next <model>" badge AND silently override the model of a
+//     later, unrelated message (sendMsg reads nextRunModel).
+//   - liveToolRef / tname: the in-flight tool panel ref + name. A stale
+//     ref makes "jump to latest" scroll to the PREVIOUS turn's tool chip
+//     during the next turn's thinking phase.
+// `done=true` (server Done) also arms nextAgentNew for the queue-drain
+// path (see pushUserMessage / mapAgentTail); cancel does not.
+export const settleRun = (s, { done }) => {
+  if (!s.running) return s;
+  return {
+    ...s,
+    running: false,
+    runStartedAt: null,
+    thinkingRef: null,
+    liveToolRef: null,
+    tname: '',
+    nextRunModel: null,
+    ...(done ? { nextAgentNew: true } : {}),
+  };
+};
+
 // Push a new user message into the session.  Three cases:
 //
 //   1. Idle (no in-flight turn) — push user turn + empty agent

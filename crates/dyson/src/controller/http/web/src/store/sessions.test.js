@@ -12,6 +12,7 @@ import {
   appendBlock,
   mapAgentTail,
   appendAgentBlock,
+  settleRun,
   admitUserMessage,
   lastAgentIndex,
   pushUserMessage,
@@ -253,6 +254,48 @@ describe('queue-aware agent-tail reducers', () => {
     expect(next.liveTurns[1].blocks).toHaveLength(2);
     expect(next.liveTurns[1].blocks[1]).toEqual({ type: 'tool', ref: 'r1' });
     expect(next.liveTurns[2].blocks).toHaveLength(1);
+  });
+});
+
+describe('settleRun — clears per-run scratch on Done/cancel', () => {
+  const runningSession = (over = {}) => ({
+    ...makeSession(),
+    running: true,
+    runStartedAt: 123,
+    thinkingRef: 'think-1',
+    liveToolRef: 'tool-7',
+    tname: 'bash',
+    nextRunModel: { provider: 'openrouter', model: 'anthropic/claude' },
+    ...over,
+  });
+
+  it('Done clears nextRunModel/liveToolRef/tname and arms nextAgentNew', () => {
+    const next = settleRun(runningSession(), { done: true });
+    expect(next.running).toBe(false);
+    expect(next.runStartedAt).toBeNull();
+    // A mid-run model pick must not strand the "next" badge or silently
+    // override a later message's model.
+    expect(next.nextRunModel).toBeNull();
+    // A stale tool ref must not misdirect "jump to latest".
+    expect(next.liveToolRef).toBeNull();
+    expect(next.tname).toBe('');
+    expect(next.thinkingRef).toBeNull();
+    // Queue-drain path still relies on this flag.
+    expect(next.nextAgentNew).toBe(true);
+  });
+
+  it('cancel clears the same scratch but does NOT arm nextAgentNew', () => {
+    const next = settleRun(runningSession(), { done: false });
+    expect(next.running).toBe(false);
+    expect(next.nextRunModel).toBeNull();
+    expect(next.liveToolRef).toBeNull();
+    expect(next.tname).toBe('');
+    expect(next.nextAgentNew).toBeFalsy();
+  });
+
+  it('is a no-op when the session is already idle', () => {
+    const idle = { ...makeSession(), nextRunModel: { provider: 'p', model: 'm' } };
+    expect(settleRun(idle, { done: true })).toBe(idle);
   });
 });
 
