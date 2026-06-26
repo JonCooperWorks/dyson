@@ -31,8 +31,10 @@
 // so the agent loop accepts that posture.
 // ===========================================================================
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::json;
 
 use dyson::auth::HashedBearerAuth;
@@ -113,6 +115,16 @@ pub async fn run() -> Result<()> {
             let body = build_identity_md(&name, &instance_id, &task);
             let _ = std::fs::write(&identity, body);
         }
+    }
+
+    // Materialize the box's SSH identity into ~/.ssh from the SWARM_SSH_*
+    // envelope so the agent has a stable key to push to git / SSH out with.
+    // Written to the process HOME (dyson runs as root → /root/.ssh), not
+    // DYSON_HOME, since ssh/git read $HOME/.ssh. Idempotent: a rotation or
+    // a user-placed key always wins. Best-effort — a bad key must not block
+    // boot.
+    if let Err(e) = seed_ssh_key_from_env() {
+        tracing::warn!(error = %e, "swarm: failed to seed ~/.ssh from SWARM_SSH_*");
     }
 
     let auth_block = if warmup {
@@ -198,6 +210,50 @@ pub async fn run() -> Result<()> {
     // `--dangerous-no-sandbox` on the CLI.
     let sandbox_bypass = dyson::sandbox::sandbox_bypass_from_cli_flag(true);
     super::listen::run(Some(cfg_path), sandbox_bypass, None, None, None).await
+}
+
+/// Write the box's SSH keypair into `$HOME/.ssh` from the swarm env
+/// envelope (`SWARM_SSH_PRIVATE_KEY_B64` is base64 of an OpenSSH private
+/// key; `SWARM_SSH_PUBLIC_KEY` is the public line). Mirrors the sidecar's
+/// `seed_ssh_key_from_env`. Idempotent: never clobbers an existing key.
+fn seed_ssh_key_from_env() -> std::io::Result<()> {
+    let private_b64 = std::env::var("SWARM_SSH_PRIVATE_KEY_B64").unwrap_or_default();
+    if private_b64.trim().is_empty() {
+        return Ok(());
+    }
+    let public = std::env::var("SWARM_SSH_PUBLIC_KEY").unwrap_or_default();
+    // dyson runs as root in the cube; ssh/git read $HOME/.ssh.
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    seed_ssh_key(Path::new(&home), &private_b64, &public)
+}
+
+fn seed_ssh_key(home_dir: &Path, private_b64: &str, public: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if private_b64.trim().is_empty() {
+        return Ok(());
+    }
+    let ssh_dir = home_dir.join(".ssh");
+    let key_path = ssh_dir.join("id_ed25519");
+    if key_path.exists() {
+        return Ok(());
+    }
+    let private = B64
+        .decode(private_b64.trim())
+        .map_err(std::io::Error::other)?;
+
+    std::fs::create_dir_all(&ssh_dir)?;
+    std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(&key_path, &private)?;
+    std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+    if !public.trim().is_empty() {
+        let pub_path = ssh_dir.join("id_ed25519.pub");
+        let mut body = public.trim_end().to_owned();
+        body.push('\n');
+        std::fs::write(&pub_path, body)?;
+        std::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o644))?;
+    }
+    Ok(())
 }
 
 fn build_identity_md(name: &str, instance_id: &str, task: &str) -> String {
@@ -385,6 +441,38 @@ mod tests {
     fn build_identity_md_keeps_full_identity_doc_exact() {
         let full = "# IDENTITY.md — Who Am I?\n\n- **Name:** axelrod";
         assert_eq!(build_identity_md("Bob", "u1", full), full);
+    }
+
+    #[test]
+    fn seeds_ssh_key_with_strict_perms_and_never_clobbers() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n";
+        let b64 = B64.encode(pem.as_bytes());
+
+        seed_ssh_key(home.path(), &b64, "ssh-ed25519 AAAA dyson-i1").unwrap();
+        let key = home.path().join(".ssh/id_ed25519");
+        assert_eq!(std::fs::read(&key).unwrap(), pem.as_bytes());
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(".ssh/id_ed25519.pub")).unwrap(),
+            "ssh-ed25519 AAAA dyson-i1\n"
+        );
+        assert_eq!(std::fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(home.path().join(".ssh")).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        // Idempotent: a second seed with a different key does not overwrite.
+        seed_ssh_key(home.path(), &B64.encode(b"OTHER"), "ssh-ed25519 ZZZ x").unwrap();
+        assert_eq!(std::fs::read(&key).unwrap(), pem.as_bytes());
+    }
+
+    #[test]
+    fn seed_ssh_key_skips_without_private_key() {
+        let home = tempfile::tempdir().unwrap();
+        seed_ssh_key(home.path(), "   ", "ssh-ed25519 AAAA x").unwrap();
+        assert!(!home.path().join(".ssh/id_ed25519").exists());
     }
 
     #[test]
