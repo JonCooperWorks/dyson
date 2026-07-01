@@ -35,9 +35,9 @@ export function brandMark(agentName) {
   return name.replace(/\s+/g, '').slice(0, 1).toUpperCase() || 'D';
 }
 
-// Swaps light ⇄ dark.  Bare icon, no label — the glyph is the current theme
-// (moon = dark, sun = light); clicking flips to the other.
-const THEME_ICON = { light: 'sun', dark: 'moon' };
+// Swaps light ⇄ dark.  Bare icon, no label — the glyph shows the theme a
+// click switches TO (moon while light, sun while dark).
+const THEME_ICON = { light: 'moon', dark: 'sun' };
 function ThemeToggle() {
   const [theme, setTheme] = useState(resolvedTheme);
   const label = `Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`;
