@@ -1776,6 +1776,48 @@ textarea {
 .artefact-chat-block.image > .fileblock {
   flex: 0 1 auto;
 }
+.artefact-share-inline {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.artefact-row-share {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-left: auto;
+}
+.artefact-share-reader-result {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.artefact-share-status {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font: 500 11px/1.2 var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artefact-share-status.err {
+  color: var(--err);
+}
+.artefact-share-link {
+  max-width: min(520px, 100%);
+  overflow: hidden;
+  color: var(--accent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .att-card {
   display: flex;
   gap: 12px;
@@ -2444,6 +2486,10 @@ textarea {
     padding-left: 8px;
   }
   .artefact-chat-block {
+    width: 100%;
+  }
+  .artefact-share-inline,
+  .artefact-row-share {
     width: 100%;
   }
   .fileblock.image,

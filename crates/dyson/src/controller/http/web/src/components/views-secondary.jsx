@@ -14,6 +14,7 @@ import { copyToClipboard } from '../lib/clipboard.js';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession } from '../hooks/useSession.js';
+import { ShareMenu } from './share-menu.jsx';
 import { useEscapeKey } from 'dyson-common-ui';
 import {
   setActivity,
@@ -605,11 +606,70 @@ function ChatBranch({ chat, isActive, open, onToggle, selected, selectedChatId, 
               <Icon name="file" size={11} style={{color:'var(--mute)'}}/>
               <span className="title">{a.title}</span>
               <span className="mono size">{prettySize(a.bytes || 0)}</span>
+              <ArtefactRowShareControl artefact={a} chatId={chat.id}/>
             </div>
           ))
         )
       )}
     </div>
+  );
+}
+
+function ArtefactRowShareControl({ artefact, chatId }) {
+  const canShare = Boolean(artefact?.id && chatId);
+  const [busy, setBusy] = useState(false);
+  const [shareUrl, setShareUrl] = useState('');
+  const [shareErr, setShareErr] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  const mintShare = async (ttl) => {
+    if (!canShare) return;
+    setBusy(true);
+    setShareErr('');
+    setShareUrl('');
+    setCopied(false);
+    try {
+      const r = await fetch('/_swarm/share-mint', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artefact_id: artefact.id,
+          chat_id: chatId,
+          ttl,
+        }),
+      });
+      if (!r.ok) {
+        const text = await r.text().catch(() => '');
+        throw new Error(`HTTP ${r.status}: ${text || 'mint failed'}`);
+      }
+      const minted = await r.json();
+      setShareUrl(minted.url || '');
+    } catch (e) {
+      setShareErr(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyShareUrl = async () => {
+    if (!shareUrl) return;
+    if (await copyToClipboard(shareUrl)) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
+  };
+
+  return (
+    <span className="artefact-row-share" onClick={(e) => e.stopPropagation()}>
+      <ShareMenu canShare={canShare} busy={busy} onMint={mintShare}/>
+      {shareErr ? <span className="artefact-share-status err" title={shareErr}>share failed</span> : null}
+      {shareUrl ? (
+        <button className="btn xs ghost" onClick={copyShareUrl}>
+          {copied ? 'copied' : 'copy link'}
+        </button>
+      ) : null}
+    </span>
   );
 }
 
@@ -648,6 +708,10 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
   const [meta, setMeta] = useState(null);
   const [err, setErr]  = useState('');
   const [copied, setCopied] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareUrl, setShareUrl] = useState('');
+  const [shareErr, setShareErr] = useState('');
+  const [shareCopied, setShareCopied] = useState(false);
 
   useEffect(() => {
     if (!id || !client) { setBody(''); setMeta(null); setErr(''); return; }
@@ -778,6 +842,44 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
   const downloadLabel = isImage ? 'download image'
     : isFile ? 'download'
     : 'download .md';
+  const shareChatId = requestedChatId || (meta && meta.chat_id) || null;
+  const canShare = Boolean(id && shareChatId);
+  const mintShare = async (ttl) => {
+    if (!canShare) return;
+    setShareBusy(true);
+    setShareErr('');
+    setShareUrl('');
+    setShareCopied(false);
+    try {
+      const r = await fetch('/_swarm/share-mint', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artefact_id: id,
+          chat_id: shareChatId,
+          ttl,
+        }),
+      });
+      if (!r.ok) {
+        const text = await r.text().catch(() => '');
+        throw new Error(`HTTP ${r.status}: ${text || 'mint failed'}`);
+      }
+      const minted = await r.json();
+      setShareUrl(minted.url || '');
+    } catch (e) {
+      setShareErr(String(e.message || e));
+    } finally {
+      setShareBusy(false);
+    }
+  };
+  const copyShareUrl = async () => {
+    if (!shareUrl) return;
+    if (await copyToClipboard(shareUrl)) {
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 1500);
+    }
+  };
 
   return (
     <section className="mind-pane">
@@ -788,6 +890,7 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
         {meta && meta.kind && <span className="chip mono">{meta.kind.replace(/_/g, ' ')}</span>}
         {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
         <span className="artefact-reader-spacer" style={{flex:1}}/>
+        <ShareMenu canShare={canShare} busy={shareBusy} onMint={mintShare}/>
         <button className="btn sm ghost" onClick={copy} disabled={isImage ? !imageUrl : isBinaryFile ? !fileUrl : isPreviewableFile ? !previewBody : !body}>
           <Icon name="copy" size={12}/>
           <span className="btn-label">{copied ? 'copied' : (isImage || isBinaryFile ? 'copy url' : 'copy')}</span>
@@ -797,6 +900,25 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
           <span className="btn-label">{downloadLabel}</span>
         </button>
       </div>
+      {(shareUrl || shareErr) ? (
+        <div className="artefact-share-reader-result">
+          {shareErr ? (
+            <span className="artefact-share-status err" role="alert" title={shareErr}>
+              share failed
+            </span>
+          ) : (
+            <>
+              <a className="artefact-share-link mono" href={shareUrl} target="_blank" rel="noopener">
+                share link
+              </a>
+              <button className="btn xs ghost" onClick={copyShareUrl}>
+                {shareCopied ? 'copied' : 'copy link'}
+              </button>
+              <button className="btn xs ghost" onClick={() => setShareUrl('')}>dismiss</button>
+            </>
+          )}
+        </div>
+      ) : null}
       {meta && meta.metadata && !isImage && !isFile && (
         <div style={{display:'flex', flexWrap:'wrap', gap:14, padding:'8px 18px',
                      borderBottom:'1px solid var(--line)', background:'var(--panel)', fontSize:11.5}}>

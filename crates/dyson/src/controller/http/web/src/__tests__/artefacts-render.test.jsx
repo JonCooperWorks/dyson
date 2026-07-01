@@ -377,7 +377,7 @@ describe('ArtefactReader — sent files', () => {
     expect(container.querySelector('.prose')).toBeNull();
   });
 
-  it('uses chat-scoped identity when loading duplicate artefact ids without share controls', async () => {
+  it('uses chat-scoped identity when loading duplicate artefact ids with share controls', async () => {
     seedChatArtefacts('c-tsmc', [{
       id: 'a1',
       title: 'TSMC report',
@@ -411,14 +411,14 @@ describe('ArtefactReader — sent files', () => {
 
       expect(loadArtefact).toHaveBeenCalledWith('a1', 'c-ntnx');
       expect(container.textContent).toContain('NTNX report');
-      expect(queryByRole('button', { name: /share/i })).toBeNull();
+      expect(queryByRole('button', { name: /share/i })).toBeTruthy();
       expect(global.fetch).not.toHaveBeenCalled();
     } finally {
       global.fetch = oldFetch;
     }
   });
 
-  it('renders transcript artefact chips without share controls', async () => {
+  it('renders transcript artefact chips with inline share controls', async () => {
     const oldFetch = global.fetch;
     global.fetch = vi.fn();
     try {
@@ -437,7 +437,7 @@ describe('ArtefactReader — sent files', () => {
       );
 
       expect(getByText('NTNX report')).toBeTruthy();
-      expect(queryByRole('button', { name: /share/i })).toBeNull();
+      expect(queryByRole('button', { name: /share/i })).toBeTruthy();
       expect(global.fetch).not.toHaveBeenCalled();
     } finally {
       global.fetch = oldFetch;
