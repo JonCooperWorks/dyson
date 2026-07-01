@@ -66,6 +66,14 @@ pub use subagent_events::SubagentEventBus;
 // here doesn't expand the surface beyond what's already on the wire.
 use state::ChatHandle;
 use wire::AuthMode;
+
+/// How long a chat's cached agent may sit idle (no turn activity) before
+/// the eviction sweep drops it.  Rebuilding from the on-disk transcript is
+/// cheap next to holding every opened chat's full history in memory.
+const AGENT_IDLE_EVICTION: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Cadence of the idle-agent eviction sweep.
+const AGENT_EVICT_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 pub use wire::SseEvent;
 
 // ---------------------------------------------------------------------------
@@ -478,6 +486,27 @@ impl Controller for HttpController {
                         *guard = (*fresh).clone();
                     }
                     tracing::info!("http controller: settings hot-reloaded");
+                }
+            });
+        }
+
+        // Idle-agent eviction sweep.  Every opened chat lazily builds and
+        // then caches a full Agent — whole in-memory history including
+        // restored base64 images — which previously lived until chat
+        // deletion or process restart.  Reap agents idle past the
+        // threshold; the next turn rebuilds transparently from the
+        // on-disk transcript.
+        {
+            let state_for_evict = Arc::clone(&state);
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(AGENT_EVICT_SWEEP_INTERVAL);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    let evicted = state_for_evict.evict_idle_agents(AGENT_IDLE_EVICTION).await;
+                    if evicted > 0 {
+                        tracing::info!(evicted, "idle per-chat agents evicted");
+                    }
                 }
             });
         }

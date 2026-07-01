@@ -143,6 +143,21 @@ impl ToolRegistry {
     }
 }
 
+/// Running cache for `estimate_context_tokens`: messages are immutable
+/// once pushed, so only the suffix appended since the last call needs
+/// estimating.  Without this, every agent-loop iteration rescanned the
+/// entire history — O(n²) token counting per turn.
+///
+/// Invariant: `total` is the summed estimate of `messages[..counted]`.
+/// Any mutation that isn't a pure append (pop, strip, compaction
+/// reassembly, wholesale replacement) must call
+/// [`Conversation::invalidate_token_estimates`].
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct TokenEstimateCache {
+    counted: usize,
+    total: usize,
+}
+
 /// Mutable conversation state — the session-scoped data that changes during
 /// `run()` calls.
 pub(crate) struct Conversation {
@@ -161,6 +176,9 @@ pub(crate) struct Conversation {
     /// warning band (shouldn't happen in practice, but the flag is
     /// cheap insurance).  Reset at the start of each `run()`.
     pub(crate) budget_warning_fired: bool,
+
+    /// Prefix cache for message token estimates.  See [`TokenEstimateCache`].
+    token_estimates: TokenEstimateCache,
 }
 
 impl Conversation {
@@ -170,7 +188,29 @@ impl Conversation {
             turn_count: 0,
             token_budget: TokenBudget::default(),
             budget_warning_fired: false,
+            token_estimates: TokenEstimateCache::default(),
         }
+    }
+
+    /// Drop the cached per-message estimates.  Required after any
+    /// non-append mutation of `messages`.
+    pub(crate) fn invalidate_token_estimates(&mut self) {
+        self.token_estimates = TokenEstimateCache::default();
+    }
+
+    /// Summed token estimate of all messages, incrementally maintained:
+    /// only messages appended since the previous call are estimated.
+    pub(crate) fn estimated_message_tokens(&mut self) -> usize {
+        // Defensive: a shrink without invalidation means the cached
+        // prefix no longer exists — recount from scratch.
+        if self.token_estimates.counted > self.messages.len() {
+            self.token_estimates = TokenEstimateCache::default();
+        }
+        for msg in &self.messages[self.token_estimates.counted..] {
+            self.token_estimates.total += msg.estimate_tokens();
+        }
+        self.token_estimates.counted = self.messages.len();
+        self.token_estimates.total
     }
 }
 

@@ -195,6 +195,12 @@ pub(crate) struct ChatHandle {
     pub(crate) cancel: Mutex<Option<CancellationToken>>,
     /// `true` while a turn is in flight.
     pub(crate) busy: std::sync::atomic::AtomicBool,
+    /// Instant of the last turn activity on this chat.  Drives idle
+    /// eviction of the cached `agent` (see
+    /// [`HttpState::evict_idle_agents`]) — without it, every chat ever
+    /// opened kept its full in-memory history (including restored
+    /// base64 images) resident until deletion or restart.
+    pub(crate) last_used: std::sync::Mutex<std::time::Instant>,
 }
 
 /// Per-chat replay ring buffer.  Capacity is small and fixed so the
@@ -562,7 +568,25 @@ impl ChatHandle {
             replay: Arc::new(std::sync::Mutex::new(EventRing::new())),
             cancel: Mutex::new(None),
             busy: std::sync::atomic::AtomicBool::new(false),
+            last_used: std::sync::Mutex::new(std::time::Instant::now()),
         }
+    }
+
+    /// Record turn activity for idle-eviction accounting.
+    pub(crate) fn touch(&self) {
+        let mut guard = self
+            .last_used
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = std::time::Instant::now();
+    }
+
+    /// How long since the last recorded turn activity.
+    pub(crate) fn idle_for(&self) -> std::time::Duration {
+        self.last_used
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .elapsed()
     }
 
     pub(crate) fn title(&self) -> String {
@@ -1136,6 +1160,42 @@ impl HttpState {
         }
     }
 
+    /// Evict cached per-chat agents that have been idle longer than
+    /// `max_idle`.  The agent is dropped (freeing its full in-memory
+    /// history, including any restored base64 images); the next turn for
+    /// that chat rebuilds it transparently from the on-disk transcript
+    /// (the `guard.is_none()` branch of the turn dispatcher).
+    ///
+    /// Only chats with no active turn are considered: `busy` gates
+    /// admission, and `try_lock` skips any agent a racing turn already
+    /// holds.  Returns the number of agents evicted.
+    pub(crate) async fn evict_idle_agents(&self, max_idle: std::time::Duration) -> usize {
+        let handles: Vec<Arc<ChatHandle>> = self.chats.lock().await.values().cloned().collect();
+        let mut evicted = 0usize;
+        for handle in handles {
+            if handle.busy.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
+            if handle.idle_for() < max_idle {
+                continue;
+            }
+            let Ok(mut guard) = handle.agent.try_lock() else {
+                continue; // a turn is racing us — leave it alone
+            };
+            // Re-check busy under the agent lock: a POST that latched
+            // busy between our first check and try_lock is now blocked
+            // on this very lock and expects the agent state it left.
+            if handle.busy.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
+            if guard.take().is_some() {
+                evicted += 1;
+                tracing::info!(chat_id = %handle.chat_id, "evicted idle per-chat agent");
+            }
+        }
+        evicted
+    }
+
     pub(crate) async fn in_flight_chats(&self) -> u32 {
         let chats = self.chats.lock().await;
         let count = chats
@@ -1549,6 +1609,121 @@ fn ct_eq_identity(a: &str, b: &str) -> bool {
         return false;
     }
     bool::from(a.ct_eq(b))
+}
+
+#[cfg(test)]
+mod eviction_tests {
+    use super::*;
+    use crate::agent::Agent;
+
+    struct NoopLlm;
+
+    #[async_trait::async_trait]
+    impl crate::llm::LlmClient for NoopLlm {
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _system_suffix: &str,
+            _tools: &[crate::llm::ToolDefinition],
+            _config: &crate::llm::CompletionConfig,
+        ) -> crate::error::Result<crate::llm::StreamResponse> {
+            Err(crate::error::DysonError::Llm("noop".into()))
+        }
+    }
+
+    fn make_agent() -> Agent {
+        let settings = crate::config::AgentSettings {
+            api_key: "test".into(),
+            ..Default::default()
+        };
+        let sandbox: Arc<dyn crate::sandbox::Sandbox> =
+            Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+                crate::sandbox::SandboxBypassGuard::for_test(),
+            ));
+        Agent::new(
+            crate::agent::rate_limiter::RateLimitedHandle::unlimited(
+                Box::new(NoopLlm) as Box<dyn crate::llm::LlmClient>
+            ),
+            sandbox,
+            Vec::new(),
+            &settings,
+            None,
+            0,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn build_test_state() -> Arc<HttpState> {
+        let settings = Settings::default();
+        let registry = Arc::new(ClientRegistry::new(&settings, None));
+        super::super::test_helpers::build_state(
+            settings,
+            registry,
+            None,
+            None,
+            Arc::new(crate::auth::DangerousNoAuth),
+        )
+    }
+
+    // Regression: the per-chat Agent cache never evicted — every chat
+    // ever opened kept its full in-memory history (including restored
+    // base64 images) until deletion or process restart.
+    #[tokio::test]
+    async fn idle_agents_are_evicted_but_busy_and_fresh_ones_are_kept() {
+        let state = build_test_state();
+
+        let idle = Arc::new(ChatHandle::new("c-idle".into(), "t".into(), None));
+        *idle.agent.lock().await = Some(make_agent());
+        let busy = Arc::new(ChatHandle::new("c-busy".into(), "t".into(), None));
+        *busy.agent.lock().await = Some(make_agent());
+        busy.busy.store(true, std::sync::atomic::Ordering::SeqCst);
+        let fresh = Arc::new(ChatHandle::new("c-fresh".into(), "t".into(), None));
+        *fresh.agent.lock().await = Some(make_agent());
+
+        {
+            let mut chats = state.chats.lock().await;
+            chats.insert("c-idle".into(), Arc::clone(&idle));
+            chats.insert("c-busy".into(), Arc::clone(&busy));
+            chats.insert("c-fresh".into(), Arc::clone(&fresh));
+        }
+
+        // Age the idle and busy chats past the threshold; keep `fresh`
+        // recent by touching it.
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        *idle.last_used.lock().unwrap() = past;
+        *busy.last_used.lock().unwrap() = past;
+        fresh.touch();
+
+        let evicted = state
+            .evict_idle_agents(std::time::Duration::from_secs(30 * 60))
+            .await;
+
+        assert_eq!(evicted, 1, "exactly the idle, non-busy agent is evicted");
+        assert!(
+            idle.agent.lock().await.is_none(),
+            "idle agent must be dropped — the next turn rebuilds it from disk \
+             (the guard.is_none() branch of the turn dispatcher)"
+        );
+        assert!(
+            busy.agent.lock().await.is_some(),
+            "a chat with an in-flight turn must never lose its agent"
+        );
+        assert!(
+            fresh.agent.lock().await.is_some(),
+            "recently-used agents stay cached"
+        );
+
+        // Idempotent: a second sweep finds nothing new.
+        assert_eq!(
+            state
+                .evict_idle_agents(std::time::Duration::from_secs(30 * 60))
+                .await,
+            0
+        );
+    }
 }
 
 #[cfg(test)]

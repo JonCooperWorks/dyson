@@ -3747,6 +3747,7 @@ async fn chat_reload_rehydrates_user_uploaded_images_as_file_blocks() {
         let history = r.state.history_for_test().expect("disk history");
         let msgs = vec![Message {
             role: Role::User,
+            context_summary: false,
             content: vec![
                 ContentBlock::Text {
                     text: "what's in this image?".into(),

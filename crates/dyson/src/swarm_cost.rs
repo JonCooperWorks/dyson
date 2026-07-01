@@ -93,14 +93,34 @@ pub fn config_snapshot_or_env() -> Option<CostLookupConfig> {
     config_snapshot().or_else(CostLookupConfig::from_env)
 }
 
+/// Budget for the per-message display-cost lookup.  This runs inline in the
+/// agent loop between iterations; without its own cap it inherits the shared
+/// client's 300s total timeout and a hung swarm stalls every turn.  The data
+/// is display-only, so timing out and showing no price is always acceptable.
+const COST_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub async fn lookup_runtime_display_metadata(
     audit_id: i64,
 ) -> crate::Result<Option<MessageCostMetadata>> {
     let Some(config) = config_snapshot_or_env() else {
         return Ok(None);
     };
-    let Some(call) = fetch_cost_call(crate::http::client(), &config, audit_id).await? else {
-        return Ok(None);
+    let call = match tokio::time::timeout(
+        COST_LOOKUP_TIMEOUT,
+        fetch_cost_call(crate::http::client(), &config, audit_id),
+    )
+    .await
+    {
+        Ok(Ok(Some(call))) => call,
+        Ok(Ok(None)) => return Ok(None),
+        Ok(Err(e)) => return Err(e),
+        Err(_elapsed) => {
+            tracing::debug!(
+                audit_id,
+                "Swarm cost lookup timed out — skipping display metadata"
+            );
+            return Ok(None);
+        }
     };
     Ok(metadata_from_cost_call(call, Some(now_secs())))
 }
@@ -251,6 +271,15 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Serialises tests that mutate the process-wide runtime cost config so
+/// parallel test threads can't observe each other's endpoint.  Async-aware
+/// because the guarded tests await while holding it.
+#[cfg(test)]
+pub(crate) async fn test_config_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    LOCK.lock().await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +302,61 @@ mod tests {
             public_api_base("https://swarm.test/v1").unwrap(),
             "https://swarm.test/v1"
         );
+    }
+
+    // Regression: the per-iteration display-cost lookup used to inherit
+    // the shared client's 300s total timeout — a hung swarm stalled the
+    // agent loop between iterations.  The lookup is display-only, so it
+    // must be bounded to a couple of seconds and fail soft.
+    #[tokio::test]
+    async fn runtime_cost_lookup_is_bounded_when_swarm_hangs() {
+        let _guard = test_config_guard().await;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                set_runtime_config(None);
+            }
+        }
+        let _reset = Reset;
+
+        // A server that accepts connections and never responds.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((sock, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let _hold = sock;
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                });
+            }
+        });
+
+        set_runtime_config(CostLookupConfig::public_api(
+            &format!("http://{addr}"),
+            None,
+        ));
+
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            lookup_runtime_display_metadata(7),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "cost lookup must be bounded (~2s), not hang on a silent swarm \
+             (still pending after {:?})",
+            started.elapsed()
+        );
+        let inner = result.unwrap();
+        assert!(
+            matches!(inner, Ok(None)),
+            "a timed-out lookup is best-effort and must resolve to no metadata, got {inner:?}"
+        );
+        server.abort();
     }
 
     #[test]

@@ -394,6 +394,10 @@ impl LlmClient for ClaudeCodeClient {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            // The child lives inside the stream's keep_alive bag; when a
+            // cancelled turn drops the stream, kill the CLI instead of
+            // orphaning it (it would otherwise keep burning tokens).
+            .kill_on_drop(true)
             .env_clear()
             .envs(cli_subprocess::sanitized_child_env(std::env::vars()));
 

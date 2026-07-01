@@ -325,6 +325,7 @@ pub async fn seed_transcript(
                     text: (*text).to_string(),
                 }],
                 cost: None,
+                context_summary: false,
             }
         })
         .collect();

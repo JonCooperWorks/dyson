@@ -207,6 +207,8 @@ pub(super) async fn post(
         Some(h) => h,
         None => return not_found(),
     };
+    // Turn activity — resets the idle clock used by agent eviction.
+    handle.touch();
 
     if state.is_quiesced() {
         return service_unavailable("instance is quiesced for maintenance");
@@ -572,18 +574,24 @@ pub(super) async fn post(
             super::super::SubagentEventBus::new(chat_handle.events.clone())
                 .with_replay_ring(Arc::clone(&chat_handle.replay)),
         );
-        // Checkpoint-save the transcript to disk after every message
-        // push.  Without this, a process kill during a long subagent
-        // run (e.g. security_engineer streams for minutes) loses the
-        // whole conversation — the end-of-turn save below is
-        // unreachable if the tokio task is aborted mid-run.
-        if let Some(h) = history.as_ref() {
-            let h = Arc::clone(h);
-            let chat_id_for_hook = chat_id.clone();
+        // Best-effort checkpoint the transcript after message pushes.
+        // `schedule()` is intentionally non-blocking and latest-wins so
+        // long histories don't re-serialize synchronously on the async
+        // runtime for every committed message.  Durable safe-points use
+        // `checkpoint()` below before `Done`/busy release.
+        //
+        // The hook goes through a CoalescingPersister: rapid pushes
+        // coalesce latest-wins and the serialize+write runs on the
+        // blocking pool, so a long history doesn't re-serialize
+        // synchronously on the runtime for every message (O(n²) per
+        // turn).  The end-of-turn `checkpoint()` below guarantees the
+        // final state is on disk before `Done` is emitted.
+        let persister = history.as_ref().map(|h| {
+            crate::chat_history::coalesce::CoalescingPersister::new(Arc::clone(h), chat_id.clone())
+        });
+        if let Some(p) = persister.clone() {
             agent.set_persist_hook(std::sync::Arc::new(move |messages| {
-                if let Err(e) = h.save(&chat_id_for_hook, messages) {
-                    tracing::warn!(error = %e, chat_id = %chat_id_for_hook, "persist hook failed to save chat history");
-                }
+                p.schedule(messages.to_vec());
             }));
         }
 
@@ -593,11 +601,8 @@ pub(super) async fn post(
         //
         // Wrap in `tokio::select!` so POST /cancel aborts the run at
         // the next await point instead of waiting for the current LLM
-        // stream / tool call to finish on its own.  The persist hook
-        // installed above has already checkpointed every message the
-        // agent committed to its conversation, so dropping the future
-        // mid-run is safe: the state that survives is exactly what
-        // the agent had decided on.
+        // stream / tool call to finish on its own.  The durable checkpoint
+        // after the select persists the state that survived the abort.
         //
         // After the initial run we drain any POSTs that arrived while
         // busy and run them as one coalesced sub-turn; if more arrive
@@ -654,10 +659,11 @@ pub(super) async fn post(
 
             // Persist the conversation to disk after every (sub-)turn.
             // Canonical save point — controllers/telegram does the same.
-            if let Some(h) = history.as_ref()
-                && let Err(e) = h.save(&chat_id, agent.messages())
-            {
-                tracing::warn!(error = %e, chat_id = %chat_id, "failed to save chat history");
+            // Scheduled through the same coalescing writer as the persist
+            // hook and flushed so the transcript is guaranteed current
+            // before `Done` is emitted (and before `busy` is released).
+            if let Some(p) = persister.as_ref() {
+                p.checkpoint(agent.messages().to_vec()).await;
             }
 
             chat_handle.emit(SseEvent::Done);
@@ -692,6 +698,9 @@ pub(super) async fn post(
             next_attachments = combined_attachments;
         }
 
+        // Mark end-of-turn activity so a long turn doesn't count
+        // against the idle-eviction clock.
+        chat_handle.touch();
         chat_handle
             .busy
             .store(false, std::sync::atomic::Ordering::SeqCst);

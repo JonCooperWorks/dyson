@@ -410,15 +410,12 @@ impl SseLineBuffer {
         let mut payloads = Vec::new();
 
         while let Some(newline_pos) = self.buffer.iter().position(|&b| b == b'\n') {
-            // Decode the line in-place from the buffer without allocating a
-            // separate Vec — just borrow the slice and drain afterward.
-            let line = std::str::from_utf8(&self.buffer[..newline_pos])
-                .map(str::trim)
-                .unwrap_or_else(|_| {
-                    // Fallback for invalid UTF-8: use lossy conversion.
-                    // This path is rare for SSE streams.
-                    ""
-                });
+            // Decode the line from the buffer.  Lossy: an invalid UTF-8
+            // byte becomes U+FFFD instead of dropping the whole payload
+            // (the Cow borrows for the valid-UTF8 common case, so no
+            // allocation happens unless the line is actually malformed).
+            let line = String::from_utf8_lossy(&self.buffer[..newline_pos]);
+            let line = line.trim();
 
             // Skip empty lines, comments, and event: lines.
             if !(line.is_empty() || line.starts_with(':') || line.starts_with("event:"))
@@ -1090,6 +1087,35 @@ mod tests {
         let p2 = buf.feed(chunk2).unwrap();
         assert_eq!(p2.len(), 1);
         assert_eq!(p2[0], "{\"text\":\"├──\"}");
+    }
+
+    // Regression: a line containing invalid UTF-8 used to be replaced
+    // with "" — the whole SSE payload silently vanished.  Decode must
+    // be lossy (replacement char) so the payload survives.
+    #[test]
+    fn sse_line_buffer_keeps_invalid_utf8_payloads_lossily() {
+        let mut buf = SseLineBuffer::new();
+        let mut bytes = b"data: {\"text\":\"a".to_vec();
+        bytes.push(0xFF); // invalid UTF-8 byte mid-payload
+        bytes.extend_from_slice(b"b\"}\n");
+
+        let payloads = buf.feed(&bytes).unwrap();
+        assert_eq!(
+            payloads.len(),
+            1,
+            "an invalid byte must not drop the whole payload"
+        );
+        assert!(
+            payloads[0].starts_with("{\"text\":\"a"),
+            "payload prefix must survive: {:?}",
+            payloads[0]
+        );
+        assert!(
+            payloads[0].contains('\u{FFFD}'),
+            "invalid byte should decode to the replacement char: {:?}",
+            payloads[0]
+        );
+        assert!(payloads[0].ends_with("b\"}"), "payload tail must survive");
     }
 
     #[test]

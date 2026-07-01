@@ -1776,35 +1776,6 @@ textarea {
 .artefact-chat-block.image > .fileblock {
   flex: 0 1 auto;
 }
-.artefact-share-inline {
-  display: inline-flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-width: 0;
-  max-width: 100%;
-}
-.artefact-share-status {
-  max-width: 220px;
-  overflow: hidden;
-  color: var(--fg-muted);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.artefact-share-status.err {
-  color: var(--err);
-}
-.artefact-share-link {
-  max-width: 100%;
-  overflow: hidden;
-  color: var(--accent);
-  font-size: 11px;
-  text-decoration: none;
-  text-shadow: none;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .att-card {
   display: flex;
   gap: 12px;
@@ -2472,8 +2443,7 @@ textarea {
     margin-left: 0;
     padding-left: 8px;
   }
-  .artefact-chat-block,
-  .artefact-share-inline {
+  .artefact-chat-block {
     width: 100%;
   }
   .fileblock.image,

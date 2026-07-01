@@ -377,7 +377,7 @@ describe('ArtefactReader — sent files', () => {
     expect(container.querySelector('.prose')).toBeNull();
   });
 
-  it('uses chat-scoped identity when sharing duplicate artefact ids', async () => {
+  it('uses chat-scoped identity when loading duplicate artefact ids without share controls', async () => {
     seedChatArtefacts('c-tsmc', [{
       id: 'a1',
       title: 'TSMC report',
@@ -401,13 +401,9 @@ describe('ArtefactReader — sent files', () => {
       loadArtefact,
     };
     const oldFetch = global.fetch;
-    global.fetch = vi.fn(async () => ({
-      ok: true,
-      status: 201,
-      json: async () => ({ url: 'https://share.example.test/ntnx' }),
-    }));
+    global.fetch = vi.fn();
     try {
-      const { container, getByText } = renderWithApi(
+      const { container, queryByRole } = renderWithApi(
         <ArtefactReader id="a1" chatId="c-ntnx"/>,
         client,
       );
@@ -415,31 +411,18 @@ describe('ArtefactReader — sent files', () => {
 
       expect(loadArtefact).toHaveBeenCalledWith('a1', 'c-ntnx');
       expect(container.textContent).toContain('NTNX report');
-
-      fireEvent.click(getByText(/share/i));
-      await act(async () => { fireEvent.click(getByText('7 days')); });
-
-      expect(global.fetch).toHaveBeenCalledTimes(1);
-      const body = JSON.parse(global.fetch.mock.calls[0][1].body);
-      expect(body).toMatchObject({
-        artefact_id: 'a1',
-        chat_id: 'c-ntnx',
-        ttl: '7d',
-      });
+      expect(queryByRole('button', { name: /share/i })).toBeNull();
+      expect(global.fetch).not.toHaveBeenCalled();
     } finally {
       global.fetch = oldFetch;
     }
   });
 
-  it('uses the current chat when sharing an artefact from the transcript chip', async () => {
+  it('renders transcript artefact chips without share controls', async () => {
     const oldFetch = global.fetch;
-    global.fetch = vi.fn(async () => ({
-      ok: true,
-      status: 201,
-      json: async () => ({ url: 'https://share.example.test/ntnx-chat' }),
-    }));
+    global.fetch = vi.fn();
     try {
-      const { getByText, getByRole } = render(
+      const { getByText, queryByRole } = render(
         <ArtefactBlock
           chatId="c-ntnx"
           block={{
@@ -453,18 +436,9 @@ describe('ArtefactReader — sent files', () => {
         />,
       );
 
-      fireEvent.click(getByRole('button', { name: /share/i }));
-      await act(async () => { fireEvent.click(getByText('7 days')); });
-
-      expect(global.fetch).toHaveBeenCalledTimes(1);
-      expect(global.fetch.mock.calls[0][0]).toBe('/_swarm/share-mint');
-      const body = JSON.parse(global.fetch.mock.calls[0][1].body);
-      expect(body).toMatchObject({
-        artefact_id: 'a1',
-        chat_id: 'c-ntnx',
-        ttl: '7d',
-      });
-      expect(getByText('share link')).toBeTruthy();
+      expect(getByText('NTNX report')).toBeTruthy();
+      expect(queryByRole('button', { name: /share/i })).toBeNull();
+      expect(global.fetch).not.toHaveBeenCalled();
     } finally {
       global.fetch = oldFetch;
     }

@@ -10,7 +10,6 @@
 import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { markdown, prettySize } from './turns.jsx';
-import { ShareMenu } from './share-menu.jsx';
 import { copyToClipboard } from '../lib/clipboard.js';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
@@ -649,30 +648,16 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
   const [meta, setMeta] = useState(null);
   const [err, setErr]  = useState('');
   const [copied, setCopied] = useState(false);
-  const [chatId, setChatId] = useState(null);
-  // Share affordance state.  All useState/useEffect for the share
-  // flow MUST live above the `if (!id)` early-return so React's
-  // hook count stays stable across the empty-state and loaded-state
-  // renders — otherwise we'd hit "Rendered more hooks than during
-  // the previous render" the moment the user navigates away from a
-  // selected artefact.
-  const [shareBusy, setShareBusy] = useState(false);
-  const [shareUrl, setShareUrl] = useState(null);
-  const [shareErr, setShareErr] = useState('');
-  const [shareCopied, setShareCopied] = useState(false);
 
   useEffect(() => {
-    if (!id || !client) { setBody(''); setMeta(null); setErr(''); setChatId(null); return; }
+    if (!id || !client) { setBody(''); setMeta(null); setErr(''); return; }
     setErr('');
     setBody('');
     setFilePreview('');
     setFilePreviewErr('');
-    setShareUrl(null);
-    setShareErr('');
     const hit = findArtefactMeta(id, requestedChatId);
     setMeta(hit);
     const scopedChatId = requestedChatId || (hit && hit.chat_id) || null;
-    setChatId(scopedChatId);
     if (!scopedChatId) {
       setErr('Loading conversation context...');
       return;
@@ -681,7 +666,6 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
       .then(({ body, chatId: cid }) => {
         setBody(body);
         if (cid) {
-          setChatId(cid);
           if (!requestedChatId) requestOpenArtefact(id);
         }
       })
@@ -795,48 +779,6 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
     : isFile ? 'download'
     : 'download .md';
 
-  // Anonymous share — mint same-origin via the swarm escape route on
-  // dyson_proxy.  `<id>.<apex>/_swarm/share-mint` is intercepted
-  // before the request reaches the cube; swarm uses the user identity
-  // already resolved on the way in (cookie or Authorization) and
-  // calls ShareService::mint server-side.  No cross-origin fetch
-  // needed; the URL lands in `shareUrl` for one-click copy.
-  const canShare = Boolean(id && chatId);
-  const mintShare = async (ttl) => {
-    if (!canShare) return;
-    setShareBusy(true);
-    setShareErr('');
-    try {
-      const r = await fetch('/_swarm/share-mint', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          artefact_id: id,
-          chat_id: chatId,
-          ttl,
-        }),
-      });
-      if (!r.ok) {
-        const text = await r.text().catch(() => '');
-        throw new Error(`HTTP ${r.status}: ${text || 'mint failed'}`);
-      }
-      const m = await r.json();
-      setShareUrl(m.url || null);
-    } catch (e) {
-      setShareErr(String(e.message || e));
-    } finally {
-      setShareBusy(false);
-    }
-  };
-  const copyShareUrl = async () => {
-    if (!shareUrl) return;
-    if (await copyToClipboard(shareUrl)) {
-      setShareCopied(true);
-      setTimeout(() => setShareCopied(false), 1500);
-    }
-  };
-
   return (
     <section className="mind-pane">
       <div className="artefact-reader-head"
@@ -846,11 +788,6 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
         {meta && meta.kind && <span className="chip mono">{meta.kind.replace(/_/g, ' ')}</span>}
         {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
         <span className="artefact-reader-spacer" style={{flex:1}}/>
-        <ShareMenu
-          canShare={canShare}
-          busy={shareBusy}
-          onMint={mintShare}
-        />
         <button className="btn sm ghost" onClick={copy} disabled={isImage ? !imageUrl : isBinaryFile ? !fileUrl : isPreviewableFile ? !previewBody : !body}>
           <Icon name="copy" size={12}/>
           <span className="btn-label">{copied ? 'copied' : (isImage || isBinaryFile ? 'copy url' : 'copy')}</span>
@@ -860,33 +797,6 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
           <span className="btn-label">{downloadLabel}</span>
         </button>
       </div>
-      {(shareUrl || shareErr) && (
-        <div style={{
-          padding: '10px 18px', borderBottom: '1px solid var(--line)',
-          background: 'var(--panel)', display: 'flex', flexWrap: 'wrap',
-          alignItems: 'center', gap: 10, fontSize: 12,
-        }}>
-          {shareErr ? (
-            <>
-              <span style={{ color: 'var(--err)' }}>share failed: {shareErr}</span>
-              <button className="btn xs ghost" onClick={() => setShareErr('')}>dismiss</button>
-            </>
-          ) : (
-            <>
-              <span style={{ color: 'var(--mute)' }}>anonymous share URL:</span>
-              <code className="mono" style={{
-                flex: 1, minWidth: 0,
-                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                color: 'var(--fg)',
-              }} title={shareUrl}>{shareUrl}</code>
-              <button className="btn xs primary" onClick={copyShareUrl}>
-                {shareCopied ? 'copied' : 'copy'}
-              </button>
-              <button className="btn xs ghost" onClick={() => setShareUrl(null)}>dismiss</button>
-            </>
-          )}
-        </div>
-      )}
       {meta && meta.metadata && !isImage && !isFile && (
         <div style={{display:'flex', flexWrap:'wrap', gap:14, padding:'8px 18px',
                      borderBottom:'1px solid var(--line)', background:'var(--panel)', fontSize:11.5}}>

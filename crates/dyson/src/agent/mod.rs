@@ -659,6 +659,7 @@ impl Agent {
     pub fn clear(&mut self) {
         self.fire_dreams(DreamEvent::SessionEnd);
         self.conversation.messages.clear();
+        self.conversation.invalidate_token_estimates();
     }
 
     /// Get the current conversation messages (for persistence).
@@ -670,6 +671,7 @@ impl Agent {
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.conversation.turn_count = restored_turn_count(&messages);
         self.conversation.messages = messages;
+        self.conversation.invalidate_token_estimates();
     }
 
     /// Append a direct controller-handled turn, such as an executable
@@ -724,7 +726,9 @@ impl Agent {
 
     /// Remove and return the last message in the conversation history.
     fn pop_last_message(&mut self) -> Option<Message> {
-        self.conversation.messages.pop()
+        let popped = self.conversation.messages.pop();
+        self.conversation.invalidate_token_estimates();
+        popped
     }
 
     /// Replace all `ContentBlock::Image` blocks in the conversation history
@@ -732,6 +736,7 @@ impl Agent {
     /// not support vision — sanitises the entire history so subsequent
     /// turns don't replay rejected image data.
     fn strip_images(&mut self) {
+        self.conversation.invalidate_token_estimates();
         for msg in &mut self.conversation.messages {
             for block in &mut msg.content {
                 if matches!(block, ContentBlock::Image { .. }) {
@@ -757,6 +762,7 @@ impl Agent {
     /// `tool_calls` arrays that providers reject when no tool definitions
     /// are provided.
     fn strip_tool_history(&mut self) {
+        self.conversation.invalidate_token_estimates();
         for msg in &mut self.conversation.messages {
             for block in &mut msg.content {
                 match block {

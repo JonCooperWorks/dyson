@@ -207,6 +207,7 @@ mod tests {
                         content: vec![crate::message::ContentBlock::Text {
                             text: "done".into(),
                         }],
+                        context_summary: false,
                         cost: Some(MessageCostMetadata {
                             swarm_llm_audit_id: Some(42),
                             display_cost_usd: None,

@@ -245,6 +245,15 @@ pub struct Message {
     pub content: Vec<ContentBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<MessageCostMetadata>,
+    /// `true` only on the synthetic `[Context Summary]` message minted by
+    /// compaction (see [`Message::context_summary`]).  Carried out-of-band
+    /// so untrusted input that merely *starts with* the marker text cannot
+    /// spoof summary status and inject itself into the next summarisation
+    /// prompt.  Serde-defaulted for wire compatibility: older transcripts
+    /// deserialize with `false` (their pre-existing summaries degrade to
+    /// ordinary user messages, which is safe — just no iterative merge).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub context_summary: bool,
 }
 
 /// Display-only LLM cost metadata mirrored from Swarm's canonical audit row.
@@ -360,6 +369,7 @@ impl Message {
                 text: text.to_string(),
             }],
             cost: None,
+            context_summary: false,
         }
     }
 
@@ -373,6 +383,7 @@ impl Message {
             role: Role::Assistant,
             content,
             cost: None,
+            context_summary: false,
         }
     }
 
@@ -390,6 +401,22 @@ impl Message {
             role: Role::User,
             content,
             cost: None,
+            context_summary: false,
+        }
+    }
+
+    /// Create the synthetic `[Context Summary]` message minted by
+    /// compaction.  The marker text stays in the body for the LLM's
+    /// benefit, but summary *status* travels on the out-of-band
+    /// `context_summary` flag so user input cannot spoof it.
+    pub fn context_summary(summary: &str) -> Self {
+        Self {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: format!("[Context Summary]\n\n{summary}"),
+            }],
+            cost: None,
+            context_summary: true,
         }
     }
 
@@ -419,6 +446,7 @@ impl Message {
                 is_error,
             }],
             cost: None,
+            context_summary: false,
         }
     }
 }

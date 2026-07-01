@@ -457,9 +457,16 @@ mod tests {
             std::fs::read_to_string(home.path().join(".ssh/id_ed25519.pub")).unwrap(),
             "ssh-ed25519 AAAA dyson-i1\n"
         );
-        assert_eq!(std::fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(
-            std::fs::metadata(home.path().join(".ssh")).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(home.path().join(".ssh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o700
         );
 

@@ -29,7 +29,7 @@
 // ===========================================================================
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::chat_history::ChatHistory;
 use crate::error::Result;
@@ -114,13 +114,20 @@ impl ChatHistory for DiskChatHistory {
         let root = self.chat_root(chat_id);
         std::fs::create_dir_all(&root)?;
 
+        // `None` means no message carried inline media — serialize the
+        // borrowed slice directly instead of cloning the whole history.
         let media_dir = self.media_dir(chat_id);
-        let messages = externalize_images(messages, &media_dir)?;
+        let externalized = externalize_images(messages, &media_dir)?;
+        let to_write: &[Message] = externalized.as_deref().unwrap_or(messages);
 
+        // Temp-file + rename so a crash mid-write can't destroy the
+        // previous good transcript (which the state-sync worker would
+        // otherwise happily push half-written to swarm).
         let path = self.transcript_path(chat_id);
-        let file = std::fs::File::create(&path)?;
-        let writer = std::io::BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, &messages)?;
+        write_atomically(&path, |writer| {
+            serde_json::to_writer_pretty(writer, to_write)?;
+            Ok(())
+        })?;
         tracing::debug!(chat_id = chat_id, path = %path.display(), "chat history saved");
         Ok(())
     }
@@ -237,6 +244,71 @@ impl ChatHistory for DiskChatHistory {
 }
 
 // ---------------------------------------------------------------------------
+// Atomic file replacement — crash-safe transcript writes.
+// ---------------------------------------------------------------------------
+
+/// Write a file atomically: stream into a temp file in the same directory,
+/// fsync, then rename over the target.  A reader (including the state-sync
+/// worker) only ever observes either the previous complete file or the new
+/// complete file; a crash mid-write leaves the previous file untouched.
+fn write_atomically(
+    path: &std::path::Path,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<()>,
+) -> Result<()> {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Unique per process + call so concurrent writers can't stomp each
+    // other's temp file.  Leading dot keeps it out of the state-sync
+    // allowlist (hidden components are never synced).
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("file");
+    let tmp = path.with_file_name(format!(".{file_name}.tmp.{}.{n}", std::process::id()));
+
+    let result = (|| {
+        let file = create_replacement_file(&tmp, path)?;
+        let mut writer = std::io::BufWriter::new(file);
+        write(&mut writer)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn create_replacement_file(tmp: &Path, target: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mode = std::fs::metadata(target)
+        .map(|meta| meta.permissions().mode() & 0o777)
+        .unwrap_or(0o600);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(tmp)?;
+    // `mode()` still flows through umask; restore the exact target mode
+    // before rename so replacing a private transcript cannot widen it.
+    std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(mode))?;
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn create_replacement_file(tmp: &Path, _target: &Path) -> Result<std::fs::File> {
+    Ok(std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp)?)
+}
+
+// ---------------------------------------------------------------------------
 // Image externalization — keep chat JSON small.
 // ---------------------------------------------------------------------------
 
@@ -245,7 +317,12 @@ impl ChatHistory for DiskChatHistory {
 /// Hashes the data, writes it to `{media_dir}/{hash}.b64`, and replaces
 /// the `data` field with `@media/{hash}`.  Skips images that are already
 /// externalized.
-fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<Message>> {
+///
+/// Returns `None` when no message carries inline media — the caller can
+/// then serialize the original slice without cloning the whole history
+/// (this runs on every persist-hook checkpoint, so the no-op path must
+/// stay allocation-free).
+fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Option<Vec<Message>>> {
     let mut hash_cache: HashMap<*const str, String> = HashMap::new();
     let mut to_write: HashMap<String, &str> = HashMap::new();
     let mut needs_externalization = false;
@@ -270,7 +347,7 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
     }
 
     if !needs_externalization {
-        return Ok(messages.to_vec());
+        return Ok(None);
     }
 
     std::fs::create_dir_all(media_dir)?;
@@ -316,6 +393,7 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
                 role: msg.role.clone(),
                 content,
                 cost: msg.cost.clone(),
+                context_summary: msg.context_summary,
             }
         })
         .collect();
@@ -326,7 +404,7 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
         "externalized image data"
     );
 
-    Ok(messages)
+    Ok(Some(messages))
 }
 
 fn restore_images(messages: &mut [Message], media_dir: &std::path::Path) {
@@ -404,6 +482,91 @@ mod tests {
         // Per-chat layout: transcript lives in chat_1/transcript.json
         assert!(dir.join("chat_1").join("transcript.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Regression: save() used to File::create (truncate) the previous
+    // good transcript in place and stream JSON into it — a crash
+    // mid-write destroyed the chat, and the state-sync worker could push
+    // the half-written file to swarm.  The save must go through a temp
+    // file + rename in the same directory so a reader only ever observes
+    // either the old complete transcript or the new complete one.
+    #[test]
+    fn save_replaces_transcript_atomically_not_in_place() {
+        use std::os::unix::fs::MetadataExt;
+        let (dir, store) = temp_store("atomic_save");
+
+        store.save("c", &[Message::user("v1")]).unwrap();
+        let path = dir.join("c").join("transcript.json");
+        let ino_v1 = std::fs::metadata(&path).unwrap().ino();
+
+        store.save("c", &[Message::user("v2")]).unwrap();
+        let ino_v2 = std::fs::metadata(&path).unwrap().ino();
+
+        assert_ne!(
+            ino_v1, ino_v2,
+            "save must write a temp file and rename it over the transcript \
+             (atomic replace), never truncate the previous transcript in place"
+        );
+
+        // No temp-file litter left behind in the chat dir.
+        let leftovers: Vec<String> = std::fs::read_dir(dir.join("c"))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp litter: {leftovers:?}");
+
+        let loaded = store.load("c").unwrap();
+        assert_eq!(loaded.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Fault injection on the atomic-write helper: a writer that fails
+    // partway must leave the original file byte-for-byte intact.
+    #[test]
+    fn failed_write_leaves_original_transcript_intact() {
+        let dir = std::env::temp_dir().join(format!(
+            "dyson_chat_test_atomic_fault_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("transcript.json");
+        std::fs::write(&path, b"[\"good old content\"]").unwrap();
+
+        let result = write_atomically(&path, |w| {
+            use std::io::Write as _;
+            w.write_all(b"[\"partial garba")?;
+            Err(crate::error::DysonError::Llm("simulated crash".into()))
+        });
+        assert!(result.is_err(), "the injected failure must propagate");
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"[\"good old content\"]",
+            "a failed write must never damage the previous transcript"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Persist-hook checkpoints save on every message push — the common
+    // no-media path must not deep-clone the whole history first.
+    #[test]
+    fn externalize_is_a_no_op_without_inline_media() {
+        let media_dir =
+            std::env::temp_dir().join(format!("dyson_chat_test_no_media_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&media_dir);
+        let messages = vec![
+            Message::user("plain text"),
+            Message::assistant(vec![ContentBlock::Text { text: "ok".into() }]),
+        ];
+        let result = externalize_images(&messages, &media_dir).unwrap();
+        assert!(
+            result.is_none(),
+            "text-only history must not be cloned on save"
+        );
+        assert!(!media_dir.exists(), "no media dir for text-only history");
     }
 
     #[test]
@@ -525,6 +688,27 @@ mod tests {
             .collect();
         assert_eq!(archives.len(), 1);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_preserves_private_transcript_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, store) = temp_store("mode");
+        store
+            .save("chat_private", &[Message::user("first")])
+            .unwrap();
+        let transcript = dir.join("chat_private").join("transcript.json");
+        std::fs::set_permissions(&transcript, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        store
+            .save("chat_private", &[Message::user("second")])
+            .unwrap();
+
+        let mode = std::fs::metadata(&transcript).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "atomic replacement must preserve 0600");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

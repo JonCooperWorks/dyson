@@ -61,9 +61,10 @@ impl super::Agent {
         // Fire compaction-triggered dreams (learning synthesis) in the background.
         self.fire_dreams(super::dream::DreamEvent::Compaction);
 
+        let system_prompt = std::sync::Arc::clone(&self.system_prompt);
         tracing::info!(
             messages = self.conversation.messages.len(),
-            estimated_tokens = self.estimate_context_tokens(&self.system_prompt),
+            estimated_tokens = self.estimate_context_tokens(&system_prompt),
             "compacting conversation context"
         );
 
@@ -107,6 +108,7 @@ impl super::Agent {
             .map(|msg| Message {
                 role: msg.role.clone(),
                 cost: msg.cost.clone(),
+                context_summary: msg.context_summary,
                 content: msg
                     .content
                     .iter()
@@ -149,18 +151,17 @@ impl super::Agent {
         let mut new_messages = Vec::with_capacity(head_end + 1 + (messages.len() - tail_start));
 
         // Head: keep first N messages, but skip any old [Context Summary].
+        // Summary status is the out-of-band `context_summary` flag, NOT the
+        // text prefix — a user message spoofing the marker must survive
+        // here (and must not have been merged as the previous summary).
         for msg in &messages[..head_end] {
-            let is_old_summary = msg.content.iter().any(|b| {
-                matches!(b, ContentBlock::Text { text }
-                    if text.starts_with("[Context Summary]"))
-            });
-            if !is_old_summary {
+            if !msg.context_summary {
                 new_messages.push(msg.clone());
             }
         }
 
         // Insert new summary.
-        new_messages.push(Message::user(&format!("[Context Summary]\n\n{summary}")));
+        new_messages.push(Message::context_summary(&summary));
 
         // Tail: verbatim.
         new_messages.extend_from_slice(&messages[tail_start..]);
@@ -169,6 +170,10 @@ impl super::Agent {
 
         // Phase 5: fix orphaned tool_use/tool_result pairs.
         self.fix_orphaned_tool_pairs();
+
+        // The history was rebuilt wholesale — cached per-message token
+        // estimates no longer describe a prefix of it.
+        self.conversation.invalidate_token_estimates();
 
         self.conversation.token_budget.reset();
 
@@ -207,12 +212,18 @@ impl super::Agent {
     }
 
     /// Find an existing `[Context Summary]` in the head region.
+    ///
+    /// Only messages minted by compaction itself qualify (the out-of-band
+    /// `context_summary` flag) — matching on the text prefix would let an
+    /// untrusted user/channel message inject itself into the next
+    /// summarisation prompt as "the previous summary".
     pub(super) fn find_existing_summary(&self, head_end: usize) -> Option<String> {
         for msg in &self.conversation.messages[..head_end] {
+            if !msg.context_summary {
+                continue;
+            }
             for block in &msg.content {
-                if let ContentBlock::Text { text } = block
-                    && text.starts_with("[Context Summary]")
-                {
+                if let ContentBlock::Text { text } = block {
                     return Some(
                         text.strip_prefix("[Context Summary]")
                             .unwrap_or(text)
@@ -352,16 +363,14 @@ impl super::Agent {
     ///
     /// This is a local/offline estimate using whitespace splitting — no API
     /// call needed.  Used to decide whether to compact before the next call.
-    pub(super) fn estimate_context_tokens(&self, system_prompt: &str) -> usize {
+    ///
+    /// Message estimates are cached incrementally (`&mut self`): messages
+    /// are immutable once pushed, so each agent-loop iteration only pays
+    /// for the messages appended since the previous iteration instead of
+    /// rescanning the entire history.
+    pub(super) fn estimate_context_tokens(&mut self, system_prompt: &str) -> usize {
         let system_tokens = system_prompt.split_whitespace().count();
-
-        let message_tokens: usize = self
-            .conversation
-            .messages
-            .iter()
-            .map(super::super::message::Message::estimate_tokens)
-            .sum();
-
+        let message_tokens = self.conversation.estimated_message_tokens();
         system_tokens + message_tokens + self.tool_registry.cached_tokens
     }
 }

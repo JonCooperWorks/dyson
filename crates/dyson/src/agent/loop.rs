@@ -609,9 +609,53 @@ impl Agent {
     ) -> StreamResult {
         let tools_for_llm = self.tool_registry.definitions_for_llm();
 
-        let client = match self.client.access() {
-            Ok(c) => c,
-            Err(e) => return StreamResult::Error(e),
+        // The agent's own sliding-window limiter is not a provider error:
+        // we know locally when the window frees, so wait it out (bounded)
+        // instead of hard-failing the whole turn.  Provider-side 429s are
+        // handled separately by RetryingLlmClient.
+        let client = {
+            let mut waited = std::time::Duration::ZERO;
+            loop {
+                match self.client.access() {
+                    Ok(c) => break c,
+                    Err(crate::error::DysonError::RateLimit { limit, window_secs }) => {
+                        // The oldest event ages out of the sliding window
+                        // after at most `window_secs`, so a bound of one
+                        // full window (plus slack, capped for sanity)
+                        // guarantees a slot frees — unless another caller
+                        // keeps stealing it, at which point we give up.
+                        let max_wait = std::time::Duration::from_secs(window_secs.max(1))
+                            .saturating_add(std::time::Duration::from_secs(1))
+                            .min(std::time::Duration::from_secs(300));
+                        if waited >= max_wait {
+                            return StreamResult::Error(crate::error::DysonError::RateLimit {
+                                limit,
+                                window_secs,
+                            });
+                        }
+                        let poll = std::time::Duration::from_millis(
+                            (window_secs.saturating_mul(1000) / 10).clamp(50, 1000),
+                        );
+                        tracing::info!(
+                            window_secs,
+                            waited_ms = waited.as_millis() as u64,
+                            "self-imposed rate limit hit — waiting for the window to free"
+                        );
+                        tokio::select! {
+                            _ = tokio::time::sleep(poll) => {}
+                            _ = self.tool_context.cancellation.cancelled() => {
+                                tracing::info!("rate-limit wait interrupted — agent cancelled");
+                                return StreamResult::Error(crate::error::DysonError::RateLimit {
+                                    limit,
+                                    window_secs,
+                                });
+                            }
+                        }
+                        waited += poll;
+                    }
+                    Err(e) => return StreamResult::Error(e),
+                }
+            }
         };
 
         let err = match client

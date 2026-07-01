@@ -249,6 +249,7 @@ mod tests {
                 thinking: "nope".into(),
             }],
             cost: None,
+            context_summary: false,
         }];
         let mut json = vec![
             serde_json::json!({"role": "system", "content": "sys"}),

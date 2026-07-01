@@ -2,7 +2,6 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Icon, Kbd } from './icons.jsx';
-import { ShareMenu } from './share-menu.jsx';
 // The clipboard dance (modern API → legacy textarea + execCommand
 // fallback → swallow) used to live inline here and was copy-pasted
 // across panels.jsx / views-secondary.jsx.  One implementation now.
@@ -586,7 +585,6 @@ function ArtefactBlock({ block, chatId }) {
             : <div style={{width:220, height:160, background:'var(--panel)', borderRadius:4}}/>}
           <span className="cap">{block.title || 'image'}</span>
         </a>
-        <ArtefactShareControl block={block} chatId={chatId}/>
       </div>
     );
   }
@@ -603,76 +601,7 @@ function ArtefactBlock({ block, chatId }) {
         )}
         <span className="dl mono">open →</span>
       </a>
-      <ArtefactShareControl block={block} chatId={chatId}/>
     </div>
-  );
-}
-
-function ArtefactShareControl({ block, chatId }) {
-  const scopedChatId = chatId || block.chat_id || block.chatId || null;
-  const canShare = Boolean(block.id && scopedChatId);
-  const [busy, setBusy] = useState(false);
-  const [shareUrl, setShareUrl] = useState('');
-  const [shareErr, setShareErr] = useState('');
-  const [copied, setCopied] = useState(false);
-
-  const mintShare = async (ttl) => {
-    if (!canShare) return;
-    setBusy(true);
-    setShareErr('');
-    setShareUrl('');
-    setCopied(false);
-    try {
-      const r = await fetch('/_swarm/share-mint', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          artefact_id: block.id,
-          chat_id: scopedChatId,
-          ttl,
-        }),
-      });
-      if (!r.ok) {
-        const text = await r.text().catch(() => '');
-        throw new Error(`HTTP ${r.status}: ${text || 'mint failed'}`);
-      }
-      const minted = await r.json();
-      setShareUrl(minted.url || '');
-    } catch (e) {
-      setShareErr(String(e.message || e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const copyShareUrl = async () => {
-    if (!shareUrl) return;
-    if (await copyToClipboard(shareUrl)) {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    }
-  };
-
-  return (
-    <span className="artefact-share-inline">
-      <ShareMenu canShare={canShare} busy={busy} onMint={mintShare}/>
-      {shareErr && (
-        <span className="artefact-share-status err" role="alert" title={shareErr}>
-          share failed
-        </span>
-      )}
-      {shareUrl && (
-        <>
-          <a className="artefact-share-link mono" href={shareUrl} target="_blank" rel="noopener">
-            share link
-          </a>
-          <button className="btn xs ghost" onClick={copyShareUrl}>
-            {copied ? 'copied' : 'copy link'}
-          </button>
-        </>
-      )}
-    </span>
   );
 }
 
