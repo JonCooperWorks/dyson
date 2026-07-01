@@ -5,7 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"/>
   <meta name="description" content="Dyson — AI agent controller."/>
   <meta name="color-scheme" content="dark light"/>
+  <meta name="theme-color" content="#161922"/>
   <title>Dyson — controller</title>
+  <script>
+    /* Apply the saved theme before first paint to avoid a flash. "system"
+       (or no value) leaves data-theme unset so the CSS follows the OS. */
+    try {
+      var m = localStorage.getItem('dyson-theme');
+      if (m === 'light' || m === 'dark') document.documentElement.setAttribute('data-theme', m);
+    } catch (e) {}
+  </script>
 </head>
 <body>
   <div id="root"></div>

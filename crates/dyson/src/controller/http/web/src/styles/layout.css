@@ -797,7 +797,7 @@
   position: fixed;
   inset: 0;
   z-index: 60;
-  background: oklch(0 0 0 / 0.42);
+  background: var(--scrim);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -923,7 +923,7 @@
   }
   .scrim {
     position: fixed; inset: 48px 0 0 0;
-    background: oklch(0 0 0 / 0.55);
+    background: var(--scrim);
     backdrop-filter: blur(2px);
     z-index: 25;
   }
@@ -959,7 +959,7 @@
     display: block;
     position: absolute;
     top: 0; left: 0; right: 0; bottom: 0;
-    background: oklch(0 0 0 / 0.45);
+    background: var(--scrim);
     z-index: 4;
   }
   .mind-editor { padding: 16px 20px; }

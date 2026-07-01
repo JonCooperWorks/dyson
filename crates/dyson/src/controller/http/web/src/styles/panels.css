@@ -362,7 +362,7 @@
 .elicit-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -370,15 +370,15 @@
   padding: 16px;
 }
 .elicit-modal {
-  background: var(--panel-bg, #1b1d22);
-  color: var(--fg, #e6e6e6);
-  border: 1px solid var(--border, #34363c);
+  background: var(--bg-1);
+  color: var(--fg);
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 20px;
   width: min(480px, 100%);
   max-height: calc(100vh - 32px);
   overflow-y: auto;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-3);
 }
 .elicit-header {
   display: flex;
@@ -428,7 +428,7 @@
 }
 .elicit-err {
   font-size: 11px;
-  color: #ff7a7a;
+  color: var(--danger);
   margin-top: 2px;
 }
 .elicit-field input[type="text"],
@@ -438,9 +438,9 @@
 .elicit-field input[type="datetime-local"],
 .elicit-field input[type="number"],
 .elicit-field select {
-  background: var(--input-bg, #0f1013);
+  background: var(--bg-2);
   color: inherit;
-  border: 1px solid var(--border, #34363c);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 7px 9px;
   font-size: 13px;
@@ -450,12 +450,12 @@
 }
 .elicit-field input:focus,
 .elicit-field select:focus {
-  border-color: var(--accent, #3b82f6);
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.18);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 .elicit-field-error input,
 .elicit-field-error select {
-  border-color: #ff7a7a;
+  border-color: var(--danger);
 }
 .elicit-actions {
   display: flex;
@@ -474,9 +474,9 @@
   color: inherit;
 }
 .elicit-actions button.elicit-accept {
-  background: var(--accent, #3b82f6);
-  color: #fff;
-  border-color: var(--accent, #3b82f6);
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
 }
 .elicit-actions button:disabled { opacity: 0.5; cursor: default; }
 .elicit-actions button:hover:not(:disabled) { filter: brightness(1.1); }
