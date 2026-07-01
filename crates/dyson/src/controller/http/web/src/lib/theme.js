@@ -47,9 +47,10 @@ export function setMode(mode) {
   return next;
 }
 
-export function cycleMode() {
-  const i = MODES.indexOf(getMode());
-  return setMode(MODES[(i + 1) % MODES.length]);
+/* Binary swap: flip to the opposite of whatever is showing now (resolving
+   "system" against the OS first).  Always writes an explicit light/dark. */
+export function toggleTheme() {
+  return setMode(resolvedTheme() === 'dark' ? 'light' : 'dark');
 }
 
 /* Call once at boot: re-apply the saved mode (the inline script already set

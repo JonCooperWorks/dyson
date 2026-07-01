@@ -40,7 +40,6 @@ function Icon({ name, size = 14, style, className }) {
     case 'gauge':     return <svg {...common}><path d="M2.5 12a6 6 0 1 1 11 0"/><path d="M8 8.5 11 6"/><circle cx="8" cy="11.5" r="0.8" fill="currentColor"/></svg>;
     case 'sun':       return <svg {...common}><circle cx="8" cy="8" r="3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6 13 13M13 3l-1.4 1.4M4.4 11.6 3 13"/></svg>;
     case 'moon':      return <svg {...common}><path d="M13 9.5A5.5 5.5 0 0 1 6.5 3a5.5 5.5 0 1 0 6.5 6.5z"/></svg>;
-    case 'monitor':   return <svg {...common}><rect x="1.5" y="2.5" width="13" height="9" rx="1"/><path d="M6 14h4M8 11.5V14"/></svg>;
     default: return null;
   }
 }

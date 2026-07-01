@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { MODES, getMode, resolvedTheme, applyMode, setMode, cycleMode } from '../lib/theme.js';
+import { MODES, getMode, resolvedTheme, applyMode, setMode, toggleTheme } from '../lib/theme.js';
 
 // jsdom has no matchMedia; stub it so "system" resolution has something to read.
 function stubMatchMedia(prefersLight) {
@@ -47,11 +47,16 @@ describe('theme controller', () => {
     expect(getMode()).toBe('light');
   });
 
-  test('cycles system -> light -> dark -> system', () => {
-    expect(getMode()).toBe('system');
-    expect(cycleMode()).toBe('light');
-    expect(cycleMode()).toBe('dark');
-    expect(cycleMode()).toBe('system');
+  test('toggle swaps against the resolved theme (system=dark -> light -> dark)', () => {
+    expect(getMode()).toBe('system'); // resolves to dark (OS stub = dark)
+    expect(toggleTheme()).toBe('light');
+    expect(toggleTheme()).toBe('dark');
+    expect(toggleTheme()).toBe('light');
+  });
+
+  test('toggle from system=light flips to dark', () => {
+    stubMatchMedia(true); // OS = light, no stored pref -> resolves light
+    expect(toggleTheme()).toBe('dark');
   });
 
   test('resolvedTheme follows the OS in system mode', () => {

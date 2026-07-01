@@ -6,7 +6,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
-import { getMode, cycleMode } from '../lib/theme.js';
+import { resolvedTheme, toggleTheme } from '../lib/theme.js';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useEscapeKey } from 'dyson-common-ui';
@@ -35,17 +35,16 @@ export function brandMark(agentName) {
   return name.replace(/\s+/g, '').slice(0, 1).toUpperCase() || 'D';
 }
 
-// Cycles theme System → Light → Dark.  Bare icon, no label — the glyph is the
-// current mode (monitor/sun/moon); the tooltip names what a click switches to.
-const THEME_ICON = { system: 'monitor', light: 'sun', dark: 'moon' };
-const THEME_NEXT = { system: 'Light', light: 'Dark', dark: 'System' };
+// Swaps light ⇄ dark.  Bare icon, no label — the glyph is the current theme
+// (moon = dark, sun = light); clicking flips to the other.
+const THEME_ICON = { light: 'sun', dark: 'moon' };
 function ThemeToggle() {
-  const [mode, setMode] = useState(getMode);
-  const label = `Theme: ${mode} — switch to ${THEME_NEXT[mode]}`;
+  const [theme, setTheme] = useState(resolvedTheme);
+  const label = `Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`;
   return (
     <button type="button" className="btn ghost icon sm" title={label} aria-label={label}
-            onClick={() => setMode(cycleMode())}>
-      <Icon name={THEME_ICON[mode]} size={15}/>
+            onClick={() => setTheme(toggleTheme())}>
+      <Icon name={THEME_ICON[theme]} size={15}/>
     </button>
   );
 }
