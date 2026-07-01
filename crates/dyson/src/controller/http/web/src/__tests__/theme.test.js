@@ -14,6 +14,7 @@ function stubMatchMedia(prefersLight) {
 
 beforeEach(() => {
   localStorage.clear();
+  document.cookie = 'dyson-theme=; Path=/; Max-Age=0';
   document.documentElement.removeAttribute('data-theme');
   stubMatchMedia(false); // OS = dark
 });
@@ -69,6 +70,14 @@ describe('theme controller', () => {
   test('invalid stored value falls back to system', () => {
     localStorage.setItem('dyson-theme', 'chartreuse');
     expect(getMode()).toBe('system');
+  });
+
+  test('setMode writes a shared cookie that getMode prefers over localStorage', () => {
+    setMode('light');
+    expect(document.cookie).toContain('dyson-theme=light');
+    // A stale localStorage value must not win over the shared cookie.
+    localStorage.setItem('dyson-theme', 'dark');
+    expect(getMode()).toBe('light');
   });
 
   test('MODES lists the three supported modes', () => {

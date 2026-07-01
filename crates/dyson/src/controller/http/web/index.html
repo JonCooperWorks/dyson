@@ -8,10 +8,13 @@
   <meta name="theme-color" content="#161922"/>
   <title>Dyson — controller</title>
   <script>
-    /* Apply the saved theme before first paint to avoid a flash. "system"
-       (or no value) leaves data-theme unset so the CSS follows the OS. */
+    /* Apply the saved theme before first paint to avoid a flash. Prefer the
+       cross-subdomain cookie (shared with the swarm + sibling dysons), then
+       fall back to localStorage. "system"/no value leaves data-theme unset so
+       the CSS follows the OS. */
     try {
-      var m = localStorage.getItem('dyson-theme');
+      var c = (document.cookie.match(/(?:^|;\s*)dyson-theme=([^;]*)/) || [])[1];
+      var m = c || localStorage.getItem('dyson-theme');
       if (m === 'light' || m === 'dark') document.documentElement.setAttribute('data-theme', m);
     } catch (e) {}
   </script>
