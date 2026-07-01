@@ -382,14 +382,14 @@ textarea {
 .topbar .brand {
   display: flex;
   align-items: center;
-  gap: 0;
+  gap: 8px;
   height: auto;
   margin: 0;
   padding: 0;
   flex: 0 1 auto;
   min-width: 0;
 }
-.topbar .brand .mark { display: none; }
+.topbar .brand .brand-logo { display: block; flex: 0 0 auto; }
 .topbar .brand .name {
   display: block;
   min-width: 0;

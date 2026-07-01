@@ -6,6 +6,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
+import { DysonMark } from './DysonMark.jsx';
 import { resolvedTheme, toggleTheme } from '../lib/theme.js';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
@@ -29,10 +30,6 @@ const NAVS = [
 // header uses.  Exported for tests so the fallback rule stays pinned.
 export function brandLabel(agentName) {
   return (agentName || '').trim() || 'Dyson';
-}
-export function brandMark(agentName) {
-  const name = brandLabel(agentName);
-  return name.replace(/\s+/g, '').slice(0, 1).toUpperCase() || 'D';
 }
 
 // Swaps light ⇄ dark.  Bare icon, no label — the glyph shows the theme a
@@ -97,7 +94,7 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
           <Icon name="compose" size={15}/>
         </button>
       )}
-      <div className="brand"><div className="mark">{brandMark(agentName)}</div><div className="name">{brandLabel(agentName)}</div></div>
+      <div className="brand"><DysonMark className="brand-logo" size={22} aria-hidden="true"/><div className="name">{brandLabel(agentName)}</div></div>
       <nav>
         {NAVS.map(n => (
           <button key={n.id} className={view === n.id ? 'active' : ''} onClick={() => setView(n.id)}
