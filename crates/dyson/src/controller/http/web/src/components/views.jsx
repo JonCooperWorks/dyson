@@ -6,7 +6,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
-import { DysonMark } from './DysonMark.jsx';
+import { DysonMark } from 'dyson-common-ui';
 import { resolvedTheme, toggleTheme } from '../lib/theme.js';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
