@@ -327,11 +327,12 @@ pub(crate) fn not_found() -> Resp {
 /// after dispatch so every route (API, static, SSE) gets the same
 /// floor — nosniff, no Referer leak, never embeddable in a frame, and
 /// a tight Content-Security-Policy that locks `script-src` to the
-/// origin (no inline JS — Vite ships hashed chunks; the CSS gate is
-/// loose because Vite inlines CSS into a `<style>` tag, which would
-/// otherwise need a nonce per build).  Pre-existing values for any of
-/// these headers pass through, so per-route customisation can override
-/// later if needed.
+/// origin plus the exact hash of the tiny theme prepaint script in
+/// `index.html` (no broad `unsafe-inline`; Vite ships hashed chunks).
+/// The CSS gate is loose because Vite inlines CSS into a `<style>` tag,
+/// which would otherwise need a nonce per build. Pre-existing values
+/// for any of these headers pass through, so per-route customisation
+/// can override later if needed.
 pub(crate) fn apply_security_headers(resp: &mut Resp) {
     use hyper::header::HeaderValue;
     let h = resp.headers_mut();
@@ -351,7 +352,8 @@ pub(crate) fn apply_security_headers(resp: &mut Resp) {
         h.insert(
             "Content-Security-Policy",
             HeaderValue::from_static(
-                "default-src 'self'; script-src 'self'; \
+                "default-src 'self'; script-src 'self' \
+                 'sha256-vDONLTi2/Q+mrmF7jzel1kBuvBvOtnQ/pIMcYtaI8tg='; \
                  style-src 'self' 'unsafe-inline'; \
                  img-src 'self' data: blob:; connect-src 'self'; \
                  frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
