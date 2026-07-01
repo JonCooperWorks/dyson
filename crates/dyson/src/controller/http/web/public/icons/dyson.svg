@@ -1,38 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Dyson">
-  <defs>
-    <radialGradient id="core" cx="42%" cy="40%" r="62%">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset=".5" stop-color="#93c5fd"/>
-      <stop offset="1" stop-color="#2563eb"/>
-    </radialGradient>
-    <radialGradient id="glow" cx="50%" cy="46%" r="62%">
-      <stop offset="0" stop-color="#38bdf8" stop-opacity=".40"/>
-      <stop offset=".6" stop-color="#2563eb" stop-opacity=".14"/>
-      <stop offset="1" stop-color="#0f1115" stop-opacity="0"/>
-    </radialGradient>
-  </defs>
-  <rect width="512" height="512" rx="112" fill="#0f1115"/>
-  <circle cx="256" cy="248" r="210" fill="url(#glow)"/>
-  <g transform="translate(256,248) scale(1.9)" fill="none" stroke="#3b82f6" stroke-width="1.1" stroke-dasharray="2 9" opacity=".55">
-    <circle r="128"/>
-  </g>
-  <g transform="translate(256,248) scale(1.9)">
-    <circle cx="0" cy="-128" r="4.5" fill="#7dd3fc"/>
-    <circle cx="112" cy="62" r="3.5" fill="#7dd3fc"/>
-    <circle cx="-118" cy="-48" r="3" fill="#60a5fa"/>
-    <path fill="#3b82f6" d="M56.9,-11.1 L94.2,-18.3 L94.2,18.3 L56.9,11.1Z"/>
-    <path fill="#1d4ed8" d="M54.8,18.9 L90.8,31.3 L72.5,63.0 L43.8,38.1Z"/>
-    <path fill="#3b82f6" d="M38.1,43.8 L63.0,72.5 L31.3,90.8 L18.9,54.8Z"/>
-    <path fill="#1d4ed8" d="M11.1,56.9 L18.3,94.2 L-18.3,94.2 L-11.1,56.9Z"/>
-    <path fill="#3b82f6" d="M-18.9,54.8 L-31.3,90.8 L-63.0,72.5 L-38.1,43.8Z"/>
-    <path fill="#1d4ed8" d="M-43.8,38.1 L-72.5,63.0 L-90.8,31.3 L-54.8,18.9Z"/>
-    <path fill="#3b82f6" d="M-56.9,11.1 L-94.2,18.3 L-94.2,-18.3 L-56.9,-11.1Z"/>
-    <path fill="#1d4ed8" d="M-54.8,-18.9 L-90.8,-31.3 L-72.5,-63.0 L-43.8,-38.1Z"/>
-    <path fill="#3b82f6" d="M-38.1,-43.8 L-63.0,-72.5 L-31.3,-90.8 L-18.9,-54.8Z"/>
-    <path fill="#1d4ed8" d="M-11.1,-56.9 L-18.3,-94.2 L18.3,-94.2 L11.1,-56.9Z"/>
-    <path fill="#38bdf8" d="M22.8,-66.2 L35.2,-102.1 L70.9,-81.5 L45.9,-52.8Z"/>
-    <path fill="#38bdf8" d="M52.8,-45.9 L81.5,-70.9 L102.1,-35.2 L66.2,-22.8Z"/>
-    <circle r="40" fill="url(#core)" stroke="#1e40af" stroke-width="4"/>
-    <circle cx="-8" cy="-8" r="7" fill="#ffffff" opacity=".9"/>
+  <rect width="512" height="512" rx="112" fill="#2563eb"/>
+  <g transform="translate(256,256) scale(1.9)" fill="#ffffff">
+    <path d="M56.9,-11.1 L94.2,-18.3 L94.2,18.3 L56.9,11.1Z M54.8,18.9 L90.8,31.3 L72.5,63.0 L43.8,38.1Z M38.1,43.8 L63.0,72.5 L31.3,90.8 L18.9,54.8Z M11.1,56.9 L18.3,94.2 L-18.3,94.2 L-11.1,56.9Z M-18.9,54.8 L-31.3,90.8 L-63.0,72.5 L-38.1,43.8Z M-43.8,38.1 L-72.5,63.0 L-90.8,31.3 L-54.8,18.9Z M-56.9,11.1 L-94.2,18.3 L-94.2,-18.3 L-56.9,-11.1Z M-54.8,-18.9 L-90.8,-31.3 L-72.5,-63.0 L-43.8,-38.1Z M-38.1,-43.8 L-63.0,-72.5 L-31.3,-90.8 L-18.9,-54.8Z M-11.1,-56.9 L-18.3,-94.2 L18.3,-94.2 L11.1,-56.9Z M22.8,-66.2 L35.2,-102.1 L70.9,-81.5 L45.9,-52.8Z M52.8,-45.9 L81.5,-70.9 L102.1,-35.2 L66.2,-22.8Z"/>
+    <circle r="26"/>
   </g>
 </svg>
