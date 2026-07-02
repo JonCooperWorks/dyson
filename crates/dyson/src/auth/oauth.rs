@@ -55,9 +55,12 @@ fn map_oauth_err(server: &str) -> impl Fn(client::OAuthError) -> DysonError + '_
 /// asks it directly (no RFC 9728 protected-resource dance). The shared
 /// transport builds a path-aware well-known URL (origin-only URLs are
 /// unchanged from the old appended form).
-pub async fn discover_metadata(server_url: &str, client: &reqwest::Client) -> Result<AuthMetadata> {
-    validate_outbound_oauth_url(server_url, "discovery").await?;
-    client::fetch_as_metadata(server_url, client)
+pub async fn discover_metadata(
+    server_url: &str,
+    _client: &reqwest::Client,
+) -> Result<AuthMetadata> {
+    let client = pinned_oauth_client(server_url, "discovery").await?;
+    client::fetch_as_metadata(server_url, &client)
         .await
         .map_err(map_oauth_err(server_url))
 }
@@ -66,10 +69,10 @@ pub async fn discover_metadata(server_url: &str, client: &reqwest::Client) -> Re
 pub async fn register_client(
     url: &str,
     req: &DcrRequest,
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
 ) -> Result<DcrResponse> {
-    validate_outbound_oauth_url(url, "dcr").await?;
-    client::register_client(url, req, client)
+    let client = pinned_oauth_client(url, "dcr").await?;
+    client::register_client(url, req, &client)
         .await
         .map_err(map_oauth_err("dcr"))
 }
@@ -105,9 +108,9 @@ pub async fn exchange_code(
     client_id: &str,
     client_secret: Option<&str>,
     redirect_uri: &str,
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
 ) -> Result<TokenResponse> {
-    validate_outbound_oauth_url(token_url, "token exchange").await?;
+    let client = pinned_oauth_client(token_url, "token exchange").await?;
     client::exchange_code(
         token_url,
         code,
@@ -115,7 +118,7 @@ pub async fn exchange_code(
         client_id,
         client_secret,
         redirect_uri,
-        client,
+        &client,
     )
     .await
     .map_err(map_oauth_err(token_url))
@@ -127,10 +130,10 @@ pub async fn refresh_token(
     refresh_token: &str,
     client_id: &str,
     client_secret: Option<&str>,
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
 ) -> Result<TokenResponse> {
-    validate_outbound_oauth_url(token_url, "token refresh").await?;
-    client::refresh_token(token_url, refresh_token, client_id, client_secret, client)
+    let client = pinned_oauth_client(token_url, "token refresh").await?;
+    client::refresh_token(token_url, refresh_token, client_id, client_secret, &client)
         .await
         .map_err(map_oauth_err(token_url))
 }
@@ -143,11 +146,12 @@ pub async fn refresh_token(
 ///
 /// The shared transport is deliberately SSRF-agnostic, so this stays
 /// dyson-local and runs BEFORE the matching transport call.
-async fn validate_outbound_oauth_url(url: &str, context: &str) -> Result<()> {
-    crate::http::validate_url_safe(url)
+async fn pinned_oauth_client(url: &str, context: &str) -> Result<reqwest::Client> {
+    let validated = crate::http::validate_url_safe(url)
         .await
-        .map(|_| ())
-        .map_err(|e| DysonError::oauth(context, format!("refusing unsafe URL: {e}")))
+        .map_err(|e| DysonError::oauth(context, format!("refusing unsafe URL: {e}")))?;
+    crate::http::pinned_client_for_validated_url(&validated)
+        .map_err(|e| DysonError::oauth(context, format!("failed to build pinned HTTP client: {e}")))
 }
 
 // --- Auth trait impl with auto-refresh ---

@@ -33,6 +33,7 @@
 // neither of which the client-side refresh-token path cares about.
 // ===========================================================================
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -123,6 +124,7 @@ impl OidcAuth {
         algorithms: Option<Vec<Algorithm>>,
         allowed_sub: Option<String>,
     ) -> Result<Self> {
+        validate_oidc_https_or_loopback(issuer, "oidc issuer")?;
         let http = crate::http::client().clone();
         let url = format!(
             "{}/.well-known/openid-configuration",
@@ -143,6 +145,7 @@ impl OidcAuth {
             .json()
             .await
             .map_err(|e| DysonError::Config(format!("oidc metadata parse failed: {e}")))?;
+        validate_oidc_metadata_urls(&config)?;
 
         // Trust the discovered issuer, but cross-check: an IdP that
         // claims a different `iss` than we asked for is almost always
@@ -341,6 +344,52 @@ impl OidcAuth {
 /// form.
 fn issuer_matches(a: &str, b: &str) -> bool {
     a.trim_end_matches('/') == b.trim_end_matches('/')
+}
+
+fn validate_oidc_metadata_urls(config: &OidcConfig) -> Result<()> {
+    validate_oidc_https_or_loopback(&config.issuer, "oidc discovered issuer")?;
+    validate_oidc_https_or_loopback(
+        &config.authorization_endpoint,
+        "oidc authorization_endpoint",
+    )?;
+    validate_oidc_https_or_loopback(&config.jwks_uri, "oidc jwks_uri")?;
+    if let Some(endpoint) = config.token_endpoint.as_deref() {
+        validate_oidc_https_or_loopback(endpoint, "oidc token_endpoint")?;
+    }
+    if let Some(endpoint) = config.userinfo_endpoint.as_deref() {
+        validate_oidc_https_or_loopback(endpoint, "oidc userinfo_endpoint")?;
+    }
+    Ok(())
+}
+
+fn validate_oidc_https_or_loopback(url: &str, label: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| DysonError::Config(format!("{label} is not a valid URL: {e}")))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(DysonError::Config(format!(
+            "{label} must not include userinfo"
+        )));
+    }
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if parsed.host_str().is_some_and(is_loopback_host) => Ok(()),
+        "http" => Err(DysonError::Config(format!(
+            "{label} must use https unless it points at loopback"
+        ))),
+        scheme => Err(DysonError::Config(format!(
+            "{label} must use https, got scheme {scheme:?}"
+        ))),
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
 }
 
 #[cfg(test)]
@@ -867,8 +916,8 @@ mod tests {
 
     #[tokio::test]
     async fn discover_succeeds_against_http_issuer() {
-        // wiremock binds on http; round-trip through .well-known and
-        // assert the discovered fields land where we expect.
+        // wiremock binds on loopback http; round-trip through .well-known
+        // and assert local-dev issuers still work.
         let server = MockServer::start().await;
         let issuer = server.uri();
 
@@ -892,6 +941,50 @@ mod tests {
             auth.token_endpoint(),
             Some(format!("{issuer}/token").as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn discover_rejects_plain_http_non_loopback_issuer() {
+        let err = match OidcAuth::discover(
+            "http://idp.example.com",
+            "dyson-web".to_string(),
+            vec![],
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("non-loopback HTTP issuers must be rejected before discovery"),
+            Err(err) => err,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("must use https"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn discover_rejects_plain_http_jwks_uri() {
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+
+        let body = serde_json::json!({
+            "issuer": issuer,
+            "authorization_endpoint": format!("{issuer}/authorize"),
+            "jwks_uri": "http://idp.example.com/jwks",
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let err =
+            match OidcAuth::discover(&issuer, "dyson-web".to_string(), vec![], None, None).await {
+                Ok(_) => panic!("metadata must not downgrade JWKS to plaintext HTTP"),
+                Err(err) => err,
+            };
+        let msg = format!("{err}");
+        assert!(msg.contains("oidc jwks_uri"), "got: {msg}");
+        assert!(msg.contains("must use https"), "got: {msg}");
     }
 
     #[tokio::test]
