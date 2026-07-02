@@ -17,7 +17,7 @@ export function ShareMenu({ canShare, busy, onMint }) {
   }, [open]);
   const pick = (ttl) => { setOpen(false); onMint(ttl); };
   return (
-    <span ref={ref} style={{ position: 'relative', display: 'inline-block' }}>
+    <span ref={ref} className="share-menu" style={{ position: 'relative', display: 'inline-block' }}>
       <button
         className="btn sm ghost"
         onClick={() => setOpen(o => !o)}

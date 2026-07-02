@@ -245,19 +245,25 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
       .not.toContain('.artefact-back');
   });
 
-  it('mobile artefact headers stay single-row with long filenames', () => {
+  it('mobile artefact headers keep readable actions with long filenames', () => {
     // Screenshot/file artefacts can have machine-generated names long
-    // enough to shove the action buttons onto a second row. The mobile
-    // header should keep the title ellipsized and the actions stable.
+    // enough to crowd the action buttons. The mobile header should give
+    // the title the first line, then keep action labels visible below it.
     const mobileBlock = layoutCss.split('@media (max-width: 760px)')[1] || '';
-    expect(mobileBlock, 'mobile reader header must not wrap')
-      .toMatch(/\.artefact-reader-head\s*\{[^}]*flex-wrap:\s*nowrap\s*!important/);
-    expect(mobileBlock, 'title must shrink before actions wrap')
-      .toMatch(/\.artefact-reader-head\s+\.artefact-reader-title\s*\{[^}]*flex:\s*1 1 0\s*!important/);
+    expect(mobileBlock, 'mobile reader header should wrap into stable rows')
+      .toMatch(/\.artefact-reader-head\s*\{[^}]*flex-wrap:\s*wrap\s*!important/);
+    expect(mobileBlock, 'title must reserve useful measure before controls')
+      .toMatch(/\.artefact-reader-head\s+\.artefact-reader-title\s*\{[^}]*flex:\s*1 1 180px\s*!important/);
+    expect(mobileBlock, 'spacer should force actions onto their own row')
+      .toMatch(/\.artefact-reader-head\s+\.artefact-reader-spacer\s*\{[^}]*flex:\s*1 0 100%\s*!important/);
+    expect(mobileBlock, 'action labels should remain visible')
+      .toMatch(/\.artefact-reader-head\s+\.btn\s+\.btn-label\s*\{[^}]*display:\s*inline/);
     expect(mobileBlock, 'kind chip must be bounded')
       .toMatch(/\.artefact-reader-head\s+\.chip\s*\{[^}]*max-width:\s*82px/);
-    expect(swarmThemeCss, 'alternate theme must carry the same nowrap rule')
-      .toMatch(/\.artefact-reader-head\s*\{[^}]*flex-wrap:\s*nowrap\s*!important/);
+    expect(swarmThemeCss, 'alternate theme must carry the same wrap rule')
+      .toMatch(/\.artefact-reader-head\s*\{[^}]*flex-wrap:\s*wrap\s*!important/);
+    expect(swarmThemeCss, 'alternate theme must keep labels visible')
+      .toMatch(/\.artefact-reader-head\s+\.btn\s+\.btn-label\s*\{[^}]*display:\s*inline/);
   });
 
   it('.mind is a positioning context so the mobile drawer stays below the topbar', () => {

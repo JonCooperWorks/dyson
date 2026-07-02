@@ -920,8 +920,7 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
         </div>
       ) : null}
       {meta && meta.metadata && !isImage && !isFile && (
-        <div style={{display:'flex', flexWrap:'wrap', gap:14, padding:'8px 18px',
-                     borderBottom:'1px solid var(--line)', background:'var(--panel)', fontSize:11.5}}>
+        <div className="artefact-meta-strip">
           {metaRow('model',     meta.metadata.model)}
           {metaRow('target',    meta.metadata.target_name)}
           {metaRow('duration',  meta.metadata.duration_seconds, v => `${v}s`)}
@@ -932,8 +931,7 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
         </div>
       )}
       {isFile && (
-        <div style={{display:'flex', flexWrap:'wrap', gap:14, padding:'8px 18px',
-                     borderBottom:'1px solid var(--line)', background:'var(--panel)', fontSize:11.5}}>
+        <div className="artefact-meta-strip">
           {metaRow('name', fileName)}
           {metaRow('mime', fileMime || 'application/octet-stream')}
           {fileBytes !== null && metaRow('size', fileBytes, prettySize)}
@@ -1024,9 +1022,9 @@ function metaRow(label, value, fmt) {
   if (value === null || value === undefined || value === '') return null;
   const out = fmt ? fmt(value) : String(value);
   return (
-    <div style={{display:'flex', gap:5, alignItems:'baseline'}}>
-      <span style={{color:'var(--mute)'}}>{label}</span>
-      <span className="mono" style={{color:'var(--fg)'}}>{out}</span>
+    <div className="artefact-meta-row">
+      <span className="artefact-meta-label">{label}</span>
+      <span className="artefact-meta-value mono">{out}</span>
     </div>
   );
 }

@@ -187,6 +187,8 @@ export function dysonMock() {
         if (url === '/api/providers') return json(res, PROVIDERS);
         if (url === '/api/agent') return json(res, { name: 'Dyson' });
         if (url === '/api/commands') return json(res, []);
+        if (url === '/api/mcp/elicitations') return json(res, []);
+        if (url === '/api/mcp/servers') return json(res, { servers: [] });
         if (url === '/api/mind') {
           return json(res, {
             backend: 'filesystem',
