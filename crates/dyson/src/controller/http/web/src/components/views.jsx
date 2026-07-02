@@ -6,8 +6,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
-import { DysonMark } from 'dyson-common-ui';
-import { resolvedTheme, toggleTheme } from '../lib/theme.js';
+import { DysonMark, createThemeController } from 'dyson-common-ui';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useEscapeKey } from 'dyson-common-ui';
@@ -15,6 +14,12 @@ import {
   switchProviderModel, removeConversation, upsertConversation,
 } from '../store/app.js';
 import { deleteSession } from '../store/sessions.js';
+
+// Theme controller bound to the swarm-shared cookie: `stripInstanceLabel`
+// scopes it to the swarm host so a dyson subdomain follows the same choice
+// as the apex + sibling dysons.  Destructured (not held as `theme`) to dodge
+// the local `theme` state var in ThemeToggle below.
+const { resolvedTheme, toggleTheme } = createThemeController({ storageKey: 'dyson-theme', stripInstanceLabel: true });
 
 const NAVS = [
   { id: 'conv',      name: 'Conversations', k: '1', icon: 'chat' },

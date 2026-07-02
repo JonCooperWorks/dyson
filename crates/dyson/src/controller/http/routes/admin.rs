@@ -62,10 +62,13 @@ const MAX_STATE_FILE_BODY: usize = 8 * 1024 * 1024;
 const MAX_SKILL_INSTALL_BODY: usize = 96 * 1024;
 const MAX_COST_BACKFILL_BODY: usize = 1024;
 
-/// Header swarm sends with the per-instance configure secret
-/// (32-hex plaintext from `Uuid::new_v4().simple()`).  Dyson hashes
-/// it on first sighting (TOFU) and verifies on every subsequent call.
-const CONFIGURE_HEADER: &str = "x-swarm-configure";
+// Header swarm sends with the per-instance configure secret
+// (32-hex plaintext from `Uuid::new_v4().simple()`).  Dyson hashes
+// it on first sighting (TOFU) and verifies on every subsequent call.
+// The name is compared case-insensitively (hyper `HeaderMap::get`
+// lowercases the lookup key), so the shared const's canonical casing
+// (`X-Swarm-Configure`) matches swarm's wire header.
+use dyson_common::contracts::DYSON_CONFIGURE_HEADER;
 
 /// Filename inside the dyson home dir that holds the argon2id hash
 /// of the configure secret.  Lives next to `workspace/`, persists
@@ -255,7 +258,7 @@ struct InstallSkillAdminBody {
 
 async fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> Option<Resp> {
     let secret = match headers
-        .get(CONFIGURE_HEADER)
+        .get(DYSON_CONFIGURE_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())

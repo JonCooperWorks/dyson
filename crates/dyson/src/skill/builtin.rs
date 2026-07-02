@@ -261,7 +261,7 @@ impl Skill for BuiltinSkill {
             .unwrap_or_default()
             .as_secs();
 
-        let (y, m, d) = crate::util::unix_to_ymd(secs);
+        let (y, m, d) = dyson_common::date::unix_to_ymd(secs);
         let day_secs = secs % 86400;
         let hour = day_secs / 3600;
         let minute = (day_secs % 3600) / 60;

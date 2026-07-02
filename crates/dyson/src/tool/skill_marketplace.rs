@@ -447,13 +447,16 @@ async fn swarm_get<T: for<'de> Deserialize<'de>>(path: &str) -> crate::Result<T>
 }
 
 fn marketplace_base_from_state_url(url: &str) -> Result<String, String> {
-    if let Some(prefix) = url.strip_suffix("/v1/internal/state/file") {
+    use dyson_common::contracts::SWARM_INTERNAL_STATE_FILE_PATH;
+    if let Some(prefix) = url.strip_suffix(SWARM_INTERNAL_STATE_FILE_PATH) {
         return Ok(format!("{prefix}/v1/internal"));
     }
     if let Some(prefix) = url.strip_suffix("/state/file") {
         return Ok(prefix.to_string());
     }
-    Err("expected URL ending in /v1/internal/state/file".into())
+    Err(format!(
+        "expected URL ending in {SWARM_INTERNAL_STATE_FILE_PATH}"
+    ))
 }
 
 fn url_component(value: &str) -> String {

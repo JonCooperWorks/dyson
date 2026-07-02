@@ -45,78 +45,61 @@ use serde::{Deserialize, Serialize};
 // JSON-RPC base types
 // ---------------------------------------------------------------------------
 
-/// A JSON-RPC 2.0 request.
-#[derive(Debug, Serialize)]
-pub struct JsonRpcRequest {
-    pub jsonrpc: &'static str,
-    pub id: u64,
-    pub method: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub params: Option<serde_json::Value>,
+// The transport envelope (request / notification / response / error) is shared
+// verbatim with swarm's MCP proxy, so it lives in `dyson-common`.  Re-exported
+// here so every `super::protocol::JsonRpc*` path in the mcp module is unchanged.
+pub use dyson_common::jsonrpc::{
+    JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
+};
+
+/// MCP-side response constructors for the shared [`JsonRpcResponse`] envelope.
+///
+/// The envelope type is foreign (defined in `dyson-common`), so these builders
+/// — including the MCP-specific `tool_result` content shape — hang off an
+/// extension trait rather than an inherent impl.  `serve/mod.rs` calls them as
+/// `JsonRpcResponse::success(..)` with this trait in scope.
+pub trait JsonRpcResponseExt {
+    /// Build a success response with an arbitrary JSON result.
+    fn success(id: Option<u64>, result: serde_json::Value) -> Self;
+
+    /// Build a JSON-RPC error response (no result, just error).
+    fn rpc_error(id: Option<u64>, code: i64, message: impl Into<String>) -> Self;
+
+    /// Build an MCP tool result (content array + isError flag).
+    fn tool_result(id: Option<u64>, text: impl Into<String>, is_error: bool) -> Self;
 }
 
-impl JsonRpcRequest {
-    pub fn new(id: u64, method: &str, params: Option<serde_json::Value>) -> Self {
+impl JsonRpcResponseExt for JsonRpcResponse {
+    fn success(id: Option<u64>, result: serde_json::Value) -> Self {
         Self {
-            jsonrpc: "2.0",
             id,
-            method: method.to_string(),
-            params,
+            result: Some(result),
+            error: None,
         }
     }
-}
 
-/// A JSON-RPC 2.0 notification (no id, no response expected).
-#[derive(Debug, Serialize)]
-pub struct JsonRpcNotification {
-    pub jsonrpc: &'static str,
-    pub method: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub params: Option<serde_json::Value>,
-}
-
-impl JsonRpcNotification {
-    pub fn new(method: &str, params: Option<serde_json::Value>) -> Self {
+    fn rpc_error(id: Option<u64>, code: i64, message: impl Into<String>) -> Self {
         Self {
-            jsonrpc: "2.0",
-            method: method.to_string(),
-            params,
+            id,
+            result: None,
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+                data: None,
+            }),
         }
     }
-}
 
-/// A JSON-RPC 2.0 response (success or error).
-///
-/// Used in two contexts:
-/// - **Client side** (mod.rs): Deserialized from MCP server responses
-///   when Dyson connects to external MCP servers.
-/// - **Server side** (serve/mod.rs): Serialized to produce JSON responses
-///   when Dyson acts as an MCP server for Claude Code.
-///
-/// Both `Deserialize` and `Serialize` are needed because the same type
-/// is used on both sides of the MCP protocol.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct JsonRpcResponse {
-    pub id: Option<u64>,
-    pub result: Option<serde_json::Value>,
-    pub error: Option<JsonRpcError>,
-}
-
-/// A JSON-RPC 2.0 error object, nested inside `JsonRpcResponse.error`.
-///
-/// Standard error codes:
-/// - `-32700`: Parse error (invalid JSON)
-/// - `-32601`: Method not found
-/// - `-32602`: Invalid params
-/// - `-32603`: Internal error
-///
-/// Derives both `Deserialize` (for parsing remote MCP server errors) and
-/// `Serialize` (for producing error responses in the MCP HTTP server).
-#[derive(Debug, Deserialize, Serialize)]
-pub struct JsonRpcError {
-    pub code: i64,
-    pub message: String,
-    pub data: Option<serde_json::Value>,
+    fn tool_result(id: Option<u64>, text: impl Into<String>, is_error: bool) -> Self {
+        Self {
+            id,
+            result: Some(serde_json::json!({
+                "content": [{ "type": "text", "text": text.into() }],
+                "isError": is_error
+            })),
+            error: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -173,42 +156,6 @@ pub struct McpToolResult {
     pub content: Vec<McpContent>,
     #[serde(rename = "isError", default)]
     pub is_error: bool,
-}
-
-impl JsonRpcResponse {
-    /// Build a success response with an arbitrary JSON result.
-    pub const fn success(id: Option<u64>, result: serde_json::Value) -> Self {
-        Self {
-            id,
-            result: Some(result),
-            error: None,
-        }
-    }
-
-    /// Build a JSON-RPC error response (no result, just error).
-    pub fn rpc_error(id: Option<u64>, code: i64, message: impl Into<String>) -> Self {
-        Self {
-            id,
-            result: None,
-            error: Some(JsonRpcError {
-                code,
-                message: message.into(),
-                data: None,
-            }),
-        }
-    }
-
-    /// Build an MCP tool result (content array + isError flag).
-    pub fn tool_result(id: Option<u64>, text: impl Into<String>, is_error: bool) -> Self {
-        Self {
-            id,
-            result: Some(serde_json::json!({
-                "content": [{ "type": "text", "text": text.into() }],
-                "isError": is_error
-            })),
-            error: None,
-        }
-    }
 }
 
 /// Content block in a tool result.

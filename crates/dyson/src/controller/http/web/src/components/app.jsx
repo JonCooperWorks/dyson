@@ -17,7 +17,7 @@ import { CommandPalette } from './command-palette.jsx';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession, useSessionMutator } from '../hooks/useSession.js';
-import { useEscapeKey } from 'dyson-common-ui';
+import { useEscapeKey, downloadBlob } from 'dyson-common-ui';
 import {
   setTool, updateTool, mergeTools, upsertConversation,
   switchProviderModel,
@@ -603,7 +603,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     : (trimmedAgent || convTitle);
   const empty = session.liveTurns.length === 0 && !session.running;
 
-  const onExport = () => client.exportConversation(conv).then(downloadBlob(`${conv}.sharegpt.json`))
+  const onExport = () => client.exportConversation(conv).then(blob => downloadBlob(blob, `${conv}.sharegpt.json`))
     .catch(e => { console.warn('[dyson] export failed', e); alert(`Export failed: ${e.message || e}`); });
 
   return (
@@ -778,16 +778,6 @@ function setRating(s, turnIndex, emoji) {
   const next = { ...s.ratings };
   if (emoji) next[turnIndex] = emoji; else delete next[turnIndex];
   return { ...s, ratings: next };
-}
-
-function downloadBlob(filename) {
-  return (blob) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-  };
 }
 
 // -- SSE callbacks ------------------------------------------------------

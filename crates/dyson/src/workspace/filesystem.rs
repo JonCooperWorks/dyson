@@ -708,7 +708,7 @@ fn chrono_yesterday() -> String {
 
 /// Convert Unix timestamp to YYYY-MM-DD string.
 fn unix_to_date(secs: u64) -> String {
-    let (y, m, d) = crate::util::unix_to_ymd(secs);
+    let (y, m, d) = dyson_common::date::unix_to_ymd(secs);
     format!("{y:04}-{m:02}-{d:02}")
 }
 

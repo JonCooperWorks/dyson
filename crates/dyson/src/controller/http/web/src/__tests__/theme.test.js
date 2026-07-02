@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { MODES, getMode, resolvedTheme, applyMode, setMode, toggleTheme } from '../lib/theme.js';
+import { createThemeController } from 'dyson-common-ui';
+
+// The theme logic itself lives in (and is tested by) dyson-common-ui.  These
+// tests only pin the *binding* this app uses at its import sites — the exact
+// `storageKey`/`stripInstanceLabel` config that main.jsx + views.jsx wire in.
+// A wrong key or a dropped flag would silently unshare the theme across the
+// swarm, so the config round-trip is the thing worth guarding here.
+const theme = createThemeController({ storageKey: 'dyson-theme', stripInstanceLabel: true });
 
 // jsdom has no matchMedia; stub it so "system" resolution has something to read.
 function stubMatchMedia(prefersLight) {
@@ -23,64 +30,17 @@ afterEach(() => {
   document.documentElement.removeAttribute('data-theme');
 });
 
-describe('theme controller', () => {
-  test('defaults to system with no attribute set', () => {
-    expect(getMode()).toBe('system');
-    applyMode('system');
-    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+describe('dyson theme binding', () => {
+  test('persists the choice under the dyson-theme storageKey', () => {
+    theme.setMode('light');
+    expect(localStorage.getItem('dyson-theme')).toBe('light');
+    expect(theme.getMode()).toBe('light');
   });
 
-  test('explicit modes write the data-theme attribute', () => {
-    setMode('light');
-    expect(document.documentElement.getAttribute('data-theme')).toBe('light');
-    setMode('dark');
-    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
-  });
-
-  test('system removes the attribute so the OS media query wins', () => {
-    setMode('dark');
-    setMode('system');
-    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
-  });
-
-  test('choice persists to localStorage', () => {
-    setMode('light');
-    expect(getMode()).toBe('light');
-  });
-
-  test('toggle swaps against the resolved theme (system=dark -> light -> dark)', () => {
-    expect(getMode()).toBe('system'); // resolves to dark (OS stub = dark)
-    expect(toggleTheme()).toBe('light');
-    expect(toggleTheme()).toBe('dark');
-    expect(toggleTheme()).toBe('light');
-  });
-
-  test('toggle from system=light flips to dark', () => {
-    stubMatchMedia(true); // OS = light, no stored pref -> resolves light
-    expect(toggleTheme()).toBe('dark');
-  });
-
-  test('resolvedTheme follows the OS in system mode', () => {
-    stubMatchMedia(true); // OS = light
-    expect(resolvedTheme('system')).toBe('light');
-    stubMatchMedia(false); // OS = dark
-    expect(resolvedTheme('system')).toBe('dark');
-  });
-
-  test('invalid stored value falls back to system', () => {
-    localStorage.setItem('dyson-theme', 'chartreuse');
-    expect(getMode()).toBe('system');
-  });
-
-  test('setMode writes a shared cookie that getMode prefers over localStorage', () => {
-    setMode('light');
+  test('writes the swarm-shared dyson-theme cookie, preferred over stale localStorage', () => {
+    theme.setMode('light');
     expect(document.cookie).toContain('dyson-theme=light');
-    // A stale localStorage value must not win over the shared cookie.
     localStorage.setItem('dyson-theme', 'dark');
-    expect(getMode()).toBe('light');
-  });
-
-  test('MODES lists the three supported modes', () => {
-    expect(MODES).toEqual(['system', 'light', 'dark']);
+    expect(theme.getMode()).toBe('light');
   });
 });

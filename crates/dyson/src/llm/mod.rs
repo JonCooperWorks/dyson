@@ -59,8 +59,6 @@ use crate::llm::stream::StreamEvent;
 use crate::message::{ContentBlock, Message, Role};
 use crate::tool::Tool;
 
-pub const SWARM_LLM_AUDIT_ID_HEADER: &str = "x-swarm-llm-audit-id";
-
 // ---------------------------------------------------------------------------
 // CompletionConfig
 // ---------------------------------------------------------------------------

@@ -16,7 +16,6 @@
 
 use std::fmt;
 
-use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
 /// A secret string that is zeroed from memory when dropped.
@@ -53,12 +52,6 @@ impl Credential {
     /// Returns true if the credential is empty.
     pub const fn is_empty(&self) -> bool {
         self.value.is_empty()
-    }
-
-    /// Compare a candidate secret in constant time.
-    pub fn ct_eq(&self, other: &[u8]) -> bool {
-        let value = self.value.as_bytes();
-        value.len() == other.len() && bool::from(value.ct_eq(other))
     }
 }
 
@@ -120,14 +113,6 @@ mod tests {
     fn is_empty() {
         assert!(Credential::new(String::new()).is_empty());
         assert!(!Credential::new("x".into()).is_empty());
-    }
-
-    #[test]
-    fn ct_eq_matches_only_identical_bytes() {
-        let cred = Credential::new("secret".into());
-
-        assert!(cred.ct_eq(b"secret"));
-        assert!(!cred.ct_eq(b"secres"));
     }
 
     #[test]

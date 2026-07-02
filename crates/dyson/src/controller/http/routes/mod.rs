@@ -233,7 +233,9 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     if is_api_path
         && is_state_changing
         && !is_csrf_exempt
-        && !req.headers().contains_key("x-dyson-csrf")
+        && !req
+            .headers()
+            .contains_key(dyson_common::contracts::DYSON_CSRF_HEADER)
     {
         return super::responses::bad_request("missing X-Dyson-CSRF header");
     }

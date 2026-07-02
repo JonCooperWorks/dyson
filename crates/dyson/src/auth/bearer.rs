@@ -74,7 +74,7 @@ impl Auth for BearerTokenAuth {
 
     async fn validate_request(&self, headers: &hyper::HeaderMap) -> Result<AuthInfo> {
         let valid = super::extract_bearer(headers)
-            .map(|t| self.token.ct_eq(t.as_bytes()))
+            .map(|t| dyson_common::util::ct_eq_bytes(self.token.expose().as_bytes(), t.as_bytes()))
             .unwrap_or(false);
 
         if valid {

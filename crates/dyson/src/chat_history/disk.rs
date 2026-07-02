@@ -98,7 +98,7 @@ impl DiskChatHistory {
             .unwrap_or_default()
             .as_secs();
 
-        let (y, m, d) = crate::util::unix_to_ymd(now);
+        let (y, m, d) = dyson_common::date::unix_to_ymd(now);
 
         let day_secs = now % 86400;
         let h = day_secs / 3600;

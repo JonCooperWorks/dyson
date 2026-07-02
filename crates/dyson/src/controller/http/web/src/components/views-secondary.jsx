@@ -10,7 +10,7 @@
 import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { markdown, prettySize } from './turns.jsx';
-import { copyToClipboard } from '../lib/clipboard.js';
+import { copyToClipboard, downloadBlob } from 'dyson-common-ui';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession } from '../hooks/useSession.js';
@@ -815,6 +815,9 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
   const isBinaryFile = isFile && !isPreviewableFile;
 
   const download = () => {
+    // Image/file cards download straight from a same-origin URL (no blob to
+    // build) — the shared downloadBlob helper wants a Blob, so this branch
+    // stays an inline anchor click.
     const url = isImage ? imageUrl : fileUrl;
     if ((isImage || isFile) && url) {
       const a = document.createElement('a');
@@ -824,12 +827,7 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
       return;
     }
     const blob = new Blob([body], { type: 'text/markdown' });
-    const u = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = u;
-    a.download = ((meta && meta.title) || 'artefact') + '.md';
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(u);
+    downloadBlob(blob, ((meta && meta.title) || 'artefact') + '.md');
   };
   const copy = async () => {
     const text = isImage ? imageUrl : (isBinaryFile ? fileUrl : isPreviewableFile ? previewBody : body);

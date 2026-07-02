@@ -12,7 +12,7 @@
  * and the per-chat ref counter.  These are resources, not data: they
  * don't belong in a snapshot and can't meaningfully be frozen anyway. */
 
-import { createStore } from './createStore.js';
+import { createStore } from 'dyson-common-ui';
 
 export function makeSession() {
   return {

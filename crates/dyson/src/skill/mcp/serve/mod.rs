@@ -141,7 +141,7 @@ use crate::tool::workspace::WorkspaceTool;
 use crate::tool::{Tool, ToolContext};
 use crate::workspace::WorkspaceHandle;
 
-use super::protocol::{JsonRpcResponse, McpToolDef};
+use super::protocol::{JsonRpcResponse, JsonRpcResponseExt, McpToolDef};
 
 // ---------------------------------------------------------------------------
 // McpHttpServer

@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Icon } from './icons.jsx';
-import { copyToClipboard } from '../lib/clipboard.js';
+import { copyToClipboard } from 'dyson-common-ui';
 
 function PanelChrome({ icon, name, arg, live, copyText, onClose, toolRef, children }) {
   const [copied, setCopied] = useState(false);

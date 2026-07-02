@@ -43,25 +43,6 @@ pub fn truncate_output(output: &str) -> std::borrow::Cow<'_, str> {
     ))
 }
 
-/// Convert a Unix timestamp (seconds since epoch) to a (year, month, day) tuple.
-///
-/// Uses a civil-date algorithm derived from Howard Hinnant's `chrono`-compatible
-/// formulas.  No external dependencies — pure arithmetic.
-pub const fn unix_to_ymd(secs: u64) -> (i64, u64, u64) {
-    let z = (secs / 86400) as i64 + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-
-    (y, m, d)
-}
-
 /// Escape a string for safe embedding inside single-quoted shell arguments.
 ///
 /// Replaces every `'` with `'\''` which:
@@ -91,18 +72,12 @@ pub fn resolve_tilde(path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
-/// Largest exponent applied to `base_ms` in [`backoff_with_jitter`].  Caps the
-/// exponential term at `base_ms * 64` so a long retry streak can't overflow or
-/// produce an absurd sleep.
-const MAX_BACKOFF_SHIFT: u32 = 6;
-
-/// Exponential backoff with up-to-half jitter: `base_ms * 2^min(attempt, 6)`
-/// plus a random `0..=(exp/2)` jitter term.  Shared by the LLM retry decorator
-/// and the agent loop's stream/empty-response retries so the shape and shift
-/// cap live in one place.
+/// Exponential backoff with up-to-half jitter: the shared capped-exponential
+/// term (`dyson_common::util::backoff_ms`) plus a random `0..=(exp/2)` jitter.
+/// The jitter (and thus `rand`) stays dyson-local — the shared helper is pure
+/// so swarm can reuse the deterministic term without pulling in `rand`.
 pub fn backoff_with_jitter(base_ms: u64, attempt: usize) -> u64 {
-    let shift = (attempt as u32).min(MAX_BACKOFF_SHIFT);
-    let exp_ms = base_ms.saturating_mul(1u64 << shift);
+    let exp_ms = dyson_common::util::backoff_ms(base_ms, attempt);
     let jitter_ms = rand::random::<u64>() % (exp_ms / 2 + 1);
     exp_ms.saturating_add(jitter_ms)
 }
@@ -114,17 +89,6 @@ pub fn backoff_with_jitter(base_ms: u64, attempt: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn unix_epoch_is_1970_01_01() {
-        assert_eq!(unix_to_ymd(0), (1970, 1, 1));
-    }
-
-    #[test]
-    fn known_date() {
-        // 2025-01-15 00:00:00 UTC = 1736899200
-        assert_eq!(unix_to_ymd(1736899200), (2025, 1, 15));
-    }
 
     #[test]
     fn truncation() {

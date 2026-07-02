@@ -2,10 +2,10 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Icon, Kbd } from './icons.jsx';
-// The clipboard dance (modern API → legacy textarea + execCommand
-// fallback → swallow) used to live inline here and was copy-pasted
-// across panels.jsx / views-secondary.jsx.  One implementation now.
-import { copyToClipboard } from '../lib/clipboard.js';
+// Clipboard dance (modern API → legacy textarea + execCommand fallback →
+// swallow) lives in the shared UI package — the fallback matters because
+// dyson is often served over plain HTTP where navigator.clipboard is gated.
+import { copyToClipboard } from 'dyson-common-ui';
 import { useAppState } from '../hooks/useAppState.js';
 import { useApiOptional } from '../hooks/useApi.js';
 import { requestOpenArtefact } from '../store/app.js';

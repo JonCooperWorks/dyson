@@ -20,9 +20,9 @@ import { DysonClient } from './api/client.js';
 import { boot } from './api/boot.js';
 import { bootstrapAuth } from './api/auth.js';
 import { ApiProvider } from './hooks/useApi.js';
-import { initTheme } from './lib/theme.js';
+import { createThemeController } from 'dyson-common-ui';
 
-initTheme();
+createThemeController({ storageKey: 'dyson-theme', stripInstanceLabel: true }).initTheme();
 
 bootstrapAuth().then(session => {
   // `getToken` is read fresh on every request through DysonClient,

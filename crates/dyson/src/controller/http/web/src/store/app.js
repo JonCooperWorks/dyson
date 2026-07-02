@@ -7,7 +7,7 @@
  * chrome (TopBar / LeftRail / Mind / Activity) and to serve tool panels
  * which are logically global (keyed by chatId-prefixed ref). */
 
-import { createStore } from './createStore.js';
+import { createStore } from 'dyson-common-ui';
 
 const INITIAL = {
   // true once /api/conversations has responded.  Cold mode renders the

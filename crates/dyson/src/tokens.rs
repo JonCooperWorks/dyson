@@ -5,8 +5,8 @@
 //!
 //! - `pt_<32hex>` — chat-provider proxy bearer that authenticates
 //!   `dyson` against swarm's `/llm/*` proxy.
-//! - `it_<32hex>` — internal-ingest bearer for `POST
-//!   /v1/internal/ingest/artefact`.
+//! - `it_<32hex>` — internal-ingest bearer for `POST` to
+//!   [`SWARM_INTERNAL_ARTEFACT_INGEST_PATH`](dyson_common::contracts::SWARM_INTERNAL_ARTEFACT_INGEST_PATH).
 //! - `st_<32hex>` — state-sync bearer that authorises pushes back
 //!   to swarm's durable state surface.
 //!

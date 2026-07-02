@@ -23,6 +23,8 @@
  *   full redirect — the user re-authenticates and continues.
  */
 
+import { randomString, pkceChallenge } from 'dyson-common-ui';
+
 const STORAGE_KEY = 'dyson:auth';
 const PENDING_KEY = 'dyson:auth:pending';
 const REFRESH_LEEWAY_S = 60;
@@ -57,29 +59,9 @@ function writePending(p) {
   else sessionStorage.setItem(PENDING_KEY, JSON.stringify(p));
 }
 
-// ──────────────────────────────────────────────────────────────────
 // PKCE — RFC 7636.  S256 challenge from a cryptographically-random
-// 32-byte verifier.  Both values are base64url-encoded with no
-// padding so they survive a query string round-trip unmolested.
-// ──────────────────────────────────────────────────────────────────
-
-function base64url(bytes) {
-  let s = '';
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function randomString(byteLen = 32) {
-  const a = new Uint8Array(byteLen);
-  crypto.getRandomValues(a);
-  return base64url(a);
-}
-
-async function pkceChallenge(verifier) {
-  const data = new TextEncoder().encode(verifier);
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  return base64url(new Uint8Array(digest));
-}
+// 32-byte verifier; randomString + pkceChallenge (base64url under them)
+// live in dyson-common-ui (imported above).
 
 // ──────────────────────────────────────────────────────────────────
 // Discovery — /api/auth/config is the unauthenticated endpoint the

@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use dyson_common::state_sync::{ENV_STATE_SYNC_TOKEN, ENV_STATE_SYNC_URL};
 use serde::Serialize;
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(5);
@@ -28,9 +29,6 @@ fn transient_backoff(failures: u32) -> Duration {
     let factor = 2u32.saturating_pow(failures.min(16));
     (SYNC_INTERVAL * factor).min(MAX_TRANSIENT_BACKOFF)
 }
-
-pub const ENV_STATE_SYNC_URL: &str = "SWARM_STATE_SYNC_URL";
-pub const ENV_STATE_SYNC_TOKEN: &str = "SWARM_STATE_SYNC_TOKEN";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StateSyncConfig {
@@ -716,7 +714,10 @@ mod tests {
     #[test]
     fn set_config_initializes_global_handle() {
         let cfg = StateSyncConfig {
-            url: "https://swarm.test/v1/internal/state/file".into(),
+            url: format!(
+                "https://swarm.test{}",
+                dyson_common::contracts::SWARM_INTERNAL_STATE_FILE_PATH
+            ),
             token: "st_test".into(),
         };
 
