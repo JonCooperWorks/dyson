@@ -111,9 +111,15 @@ fn normalize(model: &str) -> String {
 // ---------------------------------------------------------------------------
 
 const ANTHROPIC: &[(&str, ModelPricing)] = &[
-    // Claude 4.x family — current flagship line.
-    ("claude-opus-4-7", ModelPricing::new(15.00, 75.00)),
-    ("claude-opus-4-6", ModelPricing::new(15.00, 75.00)),
+    // Claude 4.x family — current flagship line.  Opus list price dropped to
+    // $5/$25 with the 4.5 refresh (4.5 through 4.8); 4.0 and 4.1 stayed at the
+    // old $15/$75.  The bare `claude-opus-4` prefix is the 4.0 legacy entry and
+    // also the fall-through for any not-yet-listed dashed suffix.
+    ("claude-opus-4-8", ModelPricing::new(5.00, 25.00)),
+    ("claude-opus-4-7", ModelPricing::new(5.00, 25.00)),
+    ("claude-opus-4-6", ModelPricing::new(5.00, 25.00)),
+    ("claude-opus-4-5", ModelPricing::new(5.00, 25.00)),
+    ("claude-opus-4-1", ModelPricing::new(15.00, 75.00)),
     ("claude-opus-4", ModelPricing::new(15.00, 75.00)),
     ("claude-sonnet-4-6", ModelPricing::new(3.00, 15.00)),
     ("claude-sonnet-4", ModelPricing::new(3.00, 15.00)),
@@ -144,7 +150,8 @@ const OPENAI: &[(&str, ModelPricing)] = &[
 // we actually use against OpenRouter in the smoke examples.  Unknown IDs
 // fall through to None.
 const OPENROUTER: &[(&str, ModelPricing)] = &[
-    ("anthropic/claude-opus-4-7", ModelPricing::new(15.00, 75.00)),
+    ("anthropic/claude-opus-4-8", ModelPricing::new(5.00, 25.00)),
+    ("anthropic/claude-opus-4-7", ModelPricing::new(5.00, 25.00)),
     (
         "anthropic/claude-sonnet-4-6",
         ModelPricing::new(3.00, 15.00),
@@ -174,26 +181,28 @@ mod tests {
     #[test]
     fn lookup_hits_exact_normalised_name() {
         let p = lookup(&LlmProvider::Anthropic, "claude-opus-4-7").unwrap();
-        assert_eq!(p.input_per_mtok, 15.00);
-        assert_eq!(p.output_per_mtok, 75.00);
+        assert_eq!(p.input_per_mtok, 5.00);
+        assert_eq!(p.output_per_mtok, 25.00);
     }
 
     #[test]
     fn lookup_strips_date_suffix() {
         let p = lookup(&LlmProvider::Anthropic, "claude-opus-4-7-20250514").unwrap();
-        assert_eq!(p.input_per_mtok, 15.00);
+        assert_eq!(p.input_per_mtok, 5.00);
     }
 
     #[test]
     fn lookup_uppercase_matches() {
         let p = lookup(&LlmProvider::Anthropic, "Claude-Opus-4-7").unwrap();
-        assert_eq!(p.input_per_mtok, 15.00);
+        assert_eq!(p.input_per_mtok, 5.00);
     }
 
     #[test]
     fn lookup_prefix_fallback_takes_longest_match() {
-        // `claude-opus-4-9` (unreleased) shouldn't hit `claude-opus-4-7`
-        // — fall through to the `claude-opus-4` prefix (same tier).
+        // `claude-opus-4-9` (unreleased) has no exact entry, so it falls
+        // through to the bare `claude-opus-4` legacy entry ($15/$75) rather
+        // than any of the dashed 4-5..4-8 entries. Add an explicit row when
+        // it ships (a real 4-9 would price at the $5/$25 flagship tier).
         let p = lookup(&LlmProvider::Anthropic, "claude-opus-4-9").unwrap();
         assert_eq!(p.input_per_mtok, 15.00);
     }
