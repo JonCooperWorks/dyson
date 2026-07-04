@@ -529,7 +529,15 @@ impl SseJsonParser for OpenAiJsonParser {
                 for tc in tool_calls {
                     let index = tc["index"].as_u64().unwrap_or(0) as usize;
 
-                    if let Some(id) = tc["id"].as_str() {
+                    // A tool call *starts* only on a non-empty `id`.  Standard
+                    // OpenAI omits `id` on follow-up (argument) deltas, but some
+                    // upstreams (e.g. GLM-5.2 via api.aisa.one) send `"id":""`
+                    // on every follow-up delta instead of omitting it.  Treating
+                    // that empty string as a new start would `start_tool` again
+                    // and OVERWRITE the buffer — wiping the real id+name from the
+                    // opening delta, so the call finalizes as `Unknown tool ''`.
+                    // Filtering empty ids keeps the opening buffer intact.
+                    if let Some(id) = tc["id"].as_str().filter(|s| !s.is_empty()) {
                         let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
 
                         if let Some(err_event) = ctx.start_tool(index, id.to_string(), name.clone())
@@ -545,12 +553,9 @@ impl SseJsonParser for OpenAiJsonParser {
                     }
 
                     // Capture the name from whichever delta carries it — not
-                    // just the id-bearing one.  GLM/Zhipu (via OpenRouter)
-                    // streams `function.name` in a delta separate from the
-                    // `id`, so the buffer starts empty above and only gets its
-                    // real name here; without this it dispatches as
-                    // `Unknown tool ''`.  Harmless (idempotent) for providers
-                    // that send id and name together.
+                    // only the id-bearing one — for providers that stream
+                    // `function.name` in a later delta.  Idempotent for the
+                    // common case where id and name arrive together.
                     if let Some(name) = tc["function"]["name"].as_str()
                         && !name.is_empty()
                     {
@@ -673,17 +678,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_tool_call_name_split_from_id_across_deltas() {
-        // Regression for GLM/Zhipu via OpenRouter: the tool-call `id` arrives
-        // in one delta with an empty `function.name`, and the real name lands
-        // in a LATER delta that carries no `id`.  The base parser used to read
-        // the name only off the id-bearing delta, so the call finalized with an
-        // empty name and dispatched as `Unknown tool ''`.  The name must be
-        // picked up from whichever delta carries it.
+    fn parse_tool_call_empty_string_id_on_followup_deltas() {
+        // Regression for GLM-5.2 via api.aisa.one (verified against the live
+        // upstream): the opening delta carries id+name (and the first argument
+        // chunk), then EVERY follow-up delta repeats `"id":""` — an empty
+        // string, not an omitted field — alongside the next argument chunk.
+        // `tc["id"].as_str()` returns `Some("")` for that, so the parser used to
+        // `start_tool` again and overwrite the buffer, wiping the real id+name;
+        // the call finalized as `Unknown tool ''`.  Empty ids must not restart.
         let sse = "\
-            data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n\
-            data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"bash\"}}]},\"finish_reason\":null}]}\n\n\
-            data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]},\"finish_reason\":null}]}\n\n\
+            data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_be434\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\"}}]},\"finish_reason\":null}]}\n\n\
+            data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"type\":\"function\",\"function\":{\"arguments\":\"\\\"command\\\": \"}}]},\"finish_reason\":null}]}\n\n\
+            data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"type\":\"function\",\"function\":{\"arguments\":\"\\\"ls\\\"}\"}}]},\"finish_reason\":null}]}\n\n\
             data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
             data: [DONE]\n\n";
 
@@ -697,8 +703,8 @@ mod tests {
 
         match completes[0].as_ref().unwrap() {
             StreamEvent::ToolUseComplete { id, name, input } => {
-                assert_eq!(id, "call_1");
-                assert_eq!(name, "bash", "tool name must survive the split-delta framing");
+                assert_eq!(id, "call_be434", "id from the opening delta must survive");
+                assert_eq!(name, "bash", "name must survive the empty-id follow-up deltas");
                 assert_eq!(input["command"], "ls");
             }
             other => panic!("expected ToolUseComplete, got: {other:?}"),
