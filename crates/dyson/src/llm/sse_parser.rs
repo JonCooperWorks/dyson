@@ -97,6 +97,23 @@ impl ToolBufferContext {
         None
     }
 
+    /// Set (or correct) the name of an already-started tool buffer.
+    ///
+    /// The OpenAI streaming contract lets a tool call's fields be spread
+    /// across deltas: the `id` can arrive in one chunk and `function.name`
+    /// in a later one.  Some providers do exactly this — notably Zhipu's
+    /// GLM family via OpenRouter, which streams the `id` first with an empty
+    /// name and sends the real `function.name` in a subsequent delta that
+    /// carries no `id`.  The base parser only reads the name off the
+    /// id-bearing delta, so without this the buffer keeps its empty name and
+    /// the finalized call dispatches as `Unknown tool ''`.  A no-op when the
+    /// index has no active buffer (name before id — not seen in the wild).
+    pub(crate) fn set_tool_name(&mut self, index: usize, name: &str) {
+        if let Some(buf) = self.tool_buffers.get_mut(&index) {
+            buf.name = name.to_string();
+        }
+    }
+
     /// Append partial JSON to an existing tool buffer.
     ///
     /// Returns `Some(error event)` if the accumulated JSON exceeds either the

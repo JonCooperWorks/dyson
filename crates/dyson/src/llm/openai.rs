@@ -544,6 +544,19 @@ impl SseJsonParser for OpenAiJsonParser {
                         }));
                     }
 
+                    // Capture the name from whichever delta carries it — not
+                    // just the id-bearing one.  GLM/Zhipu (via OpenRouter)
+                    // streams `function.name` in a delta separate from the
+                    // `id`, so the buffer starts empty above and only gets its
+                    // real name here; without this it dispatches as
+                    // `Unknown tool ''`.  Harmless (idempotent) for providers
+                    // that send id and name together.
+                    if let Some(name) = tc["function"]["name"].as_str()
+                        && !name.is_empty()
+                    {
+                        ctx.set_tool_name(index, name);
+                    }
+
                     if let Some(args) = tc["function"]["arguments"].as_str() {
                         if let Some(err_event) = ctx.append_tool_json(index, args) {
                             events.push(Ok(err_event));
@@ -653,6 +666,39 @@ mod tests {
             StreamEvent::ToolUseComplete { id, name, input } => {
                 assert_eq!(id, "call_1");
                 assert_eq!(name, "bash");
+                assert_eq!(input["command"], "ls");
+            }
+            other => panic!("expected ToolUseComplete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_call_name_split_from_id_across_deltas() {
+        // Regression for GLM/Zhipu via OpenRouter: the tool-call `id` arrives
+        // in one delta with an empty `function.name`, and the real name lands
+        // in a LATER delta that carries no `id`.  The base parser used to read
+        // the name only off the id-bearing delta, so the call finalized with an
+        // empty name and dispatched as `Unknown tool ''`.  The name must be
+        // picked up from whichever delta carries it.
+        let sse = "\
+            data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n\
+            data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"bash\"}}]},\"finish_reason\":null}]}\n\n\
+            data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]},\"finish_reason\":null}]}\n\n\
+            data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+            data: [DONE]\n\n";
+
+        let events = parse_sse(sse);
+
+        let completes: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.as_ref().unwrap(), StreamEvent::ToolUseComplete { .. }))
+            .collect();
+        assert_eq!(completes.len(), 1);
+
+        match completes[0].as_ref().unwrap() {
+            StreamEvent::ToolUseComplete { id, name, input } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "bash", "tool name must survive the split-delta framing");
                 assert_eq!(input["command"], "ls");
             }
             other => panic!("expected ToolUseComplete, got: {other:?}"),
