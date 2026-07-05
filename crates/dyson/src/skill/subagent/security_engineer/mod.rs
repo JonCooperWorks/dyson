@@ -794,6 +794,21 @@ async fn run_security_harness_inner(
     // ledger BEFORE rendering, so the report can mark each finding new/recurring
     // with a stable key. Best-effort: a ledger failure never blocks the report.
     upsert_findings_ledger(rt, &report, &mut checkpoint).await;
+    // Persist the structured report document (findings decorated with their
+    // ledger keys). Must happen here: `ledger_summary` lives only on the
+    // in-memory checkpoint — the last checkpoint save above predates it.
+    // Best-effort, like the ledger: a write failure never blocks the report.
+    let report_doc = self::report::report_document(&report, &checkpoint);
+    if let Err(e) = self::report::save_report_document(
+        rt.workspace.as_ref(),
+        &rt.parent_working_dir,
+        &checkpoint.run_id,
+        &report_doc,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to persist report document; report still produced");
+    }
     let elapsed = checkpoint.updated_at.saturating_sub(started_epoch);
     out.content = render_report_markdown(&report, &checkpoint);
     emit_checkpoint(
@@ -813,6 +828,7 @@ async fn run_security_harness_inner(
             "Security harness: {}",
             target_name_for(&report.target.repo_path)
         );
+        let findings_rollup = self::types::SeverityRollup::from_findings(&report.findings);
         let metadata = serde_json::json!({
             "run_id": checkpoint.run_id,
             "harness_version": SECURITY_HARNESS_VERSION,
@@ -826,6 +842,18 @@ async fn run_security_harness_inner(
             "stage_models": serde_json::to_value(&rt.stage_models).unwrap_or_default(),
             "checkpoint_path": checkpoint.checkpoint_path(),
             "stage_count": checkpoint.stage_history.len(),
+            // Pointer + rollup only: this metadata is echoed on every
+            // artefact-list response and SSE event, so the findings
+            // themselves stay in the report document.
+            "report_path": self::report::report_document_path(&checkpoint.run_id),
+            "findings_rollup": {
+                "critical": findings_rollup.critical,
+                "high": findings_rollup.high,
+                "medium": findings_rollup.medium,
+                "low": findings_rollup.low,
+                "new": checkpoint.ledger_summary.new_findings,
+                "recurring": checkpoint.ledger_summary.recurring_findings,
+            },
         });
         out.artefacts
             .push(Artefact::markdown(kind, title, out.content.clone()).with_metadata(metadata));

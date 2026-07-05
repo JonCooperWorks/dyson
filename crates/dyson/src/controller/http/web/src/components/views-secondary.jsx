@@ -15,6 +15,7 @@ import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession } from '../hooks/useSession.js';
 import { ShareMenu } from './share-menu.jsx';
+import { SecurityReportView } from './security-report.jsx';
 import { useEscapeKey } from 'dyson-common-ui';
 import {
   setActivity,
@@ -813,6 +814,13 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
   // Markdown/text files use an inline reader. Other files (binary,
   // archives, images handled above) get a download-only card.
   const isBinaryFile = isFile && !isPreviewableFile;
+  // Structured security-report artefacts carry a workspace path to the
+  // per-run report document.  Keyed on the metadata field, NOT on
+  // kind === 'security_review': legacy report artefacts have that kind
+  // but no document and must keep rendering as markdown.  `meta` can be
+  // null on cold deep-links — the branch falls through to markdown until
+  // it hydrates, then upgrades.
+  const reportPath = typeof metaData.report_path === 'string' ? metaData.report_path : '';
 
   const download = () => {
     // Image/file cards download straight from a same-origin URL (no blob to
@@ -975,6 +983,13 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
             <pre className="artefact-text-preview">{previewBody}</pre>
           )}
         </div>
+      ) : reportPath ? (
+        <SecurityReportView reportPath={reportPath}
+          fallback={
+            <div className="prose"
+                 style={{overflowY:'auto', flex:1, padding:'18px 28px', lineHeight:1.6}}
+                 dangerouslySetInnerHTML={{__html: markdown(body || '')}}/>
+          }/>
       ) : (
         <div className="prose"
              style={{overflowY:'auto', flex:1, padding:'18px 28px', lineHeight:1.6}}

@@ -6,12 +6,15 @@
 //! dedupe-by-root-cause grouping the LLM is allowed to skip.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use super::SECURITY_HARNESS_SCHEMA_VERSION;
 use super::parse::{is_no_vulnerability_note, missing_finding_evidence_fields};
 use super::types::{
-    DedupeGroup, SecurityCheckpoint, SecurityFinding, SecurityHarnessReport, ValidationDecisionKind,
+    DedupeGroup, SecurityCheckpoint, SecurityFinding, SecurityHarnessReport, SeverityRollup,
+    ValidationDecisionKind,
 };
+use crate::workspace::WorkspaceHandle;
 
 pub(super) fn render_report_markdown(
     report: &SecurityHarnessReport,
@@ -601,6 +604,111 @@ pub(crate) fn report_from_checkpoint(checkpoint: &SecurityCheckpoint) -> Securit
     }
 }
 
+/// Where the per-run structured report documents live in the workspace `kb/`
+/// tree (Swarm-mirrored), one `<run_id>.json` per completed run.
+const REPORTS_PREFIX: &str = "kb/security-harness/reports";
+
+pub(super) fn report_document_path(run_id: &str) -> String {
+    format!("{REPORTS_PREFIX}/{run_id}.json")
+}
+
+/// The durable, structured form of a completed run: the rendered findings
+/// decorated with their cross-run ledger identity (`DYS-` key, recurring,
+/// occurrences). Must be built from the LIVE `report` + `checkpoint` structs
+/// at run completion — `ledger_summary` is stamped after the final checkpoint
+/// save and never reaches the checkpoint file, so this document cannot be
+/// reconstructed from disk later.
+pub(super) fn report_document(
+    report: &SecurityHarnessReport,
+    checkpoint: &SecurityCheckpoint,
+) -> serde_json::Value {
+    let rollup = SeverityRollup::from_findings(&report.findings);
+    let findings: Vec<serde_json::Value> = report
+        .findings
+        .iter()
+        .map(|finding| {
+            // Same join the markdown renderer uses: ledger entries are keyed
+            // by the rendered finding id. A missing entry (ledger load/save
+            // failed) still yields a document — the identity fields just say
+            // "no ledger key".
+            let entry = checkpoint
+                .ledger_summary
+                .entries
+                .iter()
+                .find(|e| e.finding_id == finding.id && !e.finding_key.is_empty());
+            let mut value = serde_json::to_value(finding).expect("finding serializes");
+            let map = value.as_object_mut().expect("finding is a JSON object");
+            map.insert(
+                "key".into(),
+                serde_json::Value::String(entry.map(|e| e.finding_key.clone()).unwrap_or_default()),
+            );
+            map.insert(
+                "run_finding_id".into(),
+                serde_json::Value::String(finding.id.clone()),
+            );
+            map.insert(
+                "recurring".into(),
+                serde_json::Value::Bool(entry.map(|e| e.recurring).unwrap_or(false)),
+            );
+            map.insert(
+                "occurrences".into(),
+                serde_json::json!(entry.map(|e| e.occurrences).unwrap_or(0)),
+            );
+            value
+        })
+        .collect();
+    serde_json::json!({
+        "schema_version": 1,
+        "run_id": report.run_id,
+        "target": report.target,
+        "scope": report.scope,
+        "model": checkpoint.model,
+        "harness_version": checkpoint.harness_version,
+        "created_at": checkpoint.created_at,
+        "updated_at": checkpoint.updated_at,
+        "report_source": checkpoint.report_validation_state.status,
+        "summary": {
+            "critical": rollup.critical,
+            "high": rollup.high,
+            "medium": rollup.medium,
+            "low": rollup.low,
+            "new": checkpoint.ledger_summary.new_findings,
+            "recurring": checkpoint.ledger_summary.recurring_findings,
+        },
+        "findings": findings,
+        "rejected_candidates": report.rejected_candidates,
+        "gaps": report.gaps,
+        "class_coverage": report.class_coverage,
+        "stage_history": report.stage_history,
+    })
+}
+
+/// Persist the report document. Mirrors `LedgerStore::save`: workspace `kb/`
+/// tree when present (Swarm-mirrored), local `.dyson/` fallback otherwise.
+/// Best-effort — callers log the error and never fail the run on it.
+pub(super) async fn save_report_document(
+    workspace: Option<&WorkspaceHandle>,
+    working_dir: &Path,
+    run_id: &str,
+    doc: &serde_json::Value,
+) -> std::result::Result<(), String> {
+    let body = serde_json::to_string_pretty(doc).map_err(|e| e.to_string())?;
+    if let Some(workspace) = workspace {
+        let mut guard = workspace.write().await;
+        guard.set(&report_document_path(run_id), &body);
+        return guard.save().map_err(|e| e.to_string());
+    }
+    let path = working_dir
+        .join(".dyson")
+        .join("security-harness")
+        .join("reports")
+        .join(format!("{run_id}.json"));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, body).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::types::{
@@ -1042,5 +1150,71 @@ mod tests {
             reportable_confirmed_findings(&cp).is_empty(),
             "findings with no validation decision should not be reportable"
         );
+    }
+
+    #[test]
+    fn report_document_joins_ledger_keys_and_rolls_up_severity() {
+        let mut cp = cp_with_target("/repo");
+        // F1 has a ledger entry; F2's ledger upsert failed (no entry) — the
+        // document must still carry it, with empty identity fields.
+        cp.ledger_summary = LedgerSummary {
+            new_findings: 1,
+            recurring_findings: 1,
+            entries: vec![LedgerSummaryEntry {
+                finding_id: "F1".into(),
+                finding_key: "DYS-1A2B3C4D".into(),
+                recurring: true,
+                occurrences: 3,
+            }],
+        };
+        let mut high = finding("F1", "rc1");
+        high.severity = "high".into();
+        let medium = finding("F2", "rc2");
+        let report = report_with(&cp, vec![high, medium]);
+        let doc = report_document(&report, &cp);
+
+        let findings = doc["findings"].as_array().expect("findings array");
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0]["key"], "DYS-1A2B3C4D");
+        assert_eq!(findings[0]["run_finding_id"], "F1");
+        assert_eq!(findings[0]["recurring"], true);
+        assert_eq!(findings[0]["occurrences"], 3);
+        assert_eq!(
+            findings[0]["title"], "title for F1",
+            "SecurityFinding fields pass through"
+        );
+        assert_eq!(findings[1]["key"], "");
+        assert_eq!(findings[1]["recurring"], false);
+        assert_eq!(findings[1]["occurrences"], 0);
+
+        assert_eq!(doc["summary"]["critical"], 0);
+        assert_eq!(doc["summary"]["high"], 1);
+        assert_eq!(doc["summary"]["medium"], 1);
+        assert_eq!(doc["summary"]["low"], 0);
+        assert_eq!(doc["summary"]["new"], 1);
+        assert_eq!(doc["summary"]["recurring"], 1);
+        assert_eq!(doc["run_id"], cp.run_id);
+        assert_eq!(doc["report_source"], cp.report_validation_state.status);
+    }
+
+    #[tokio::test]
+    async fn save_report_document_writes_via_workspace() {
+        let workspace: WorkspaceHandle = std::sync::Arc::new(tokio::sync::RwLock::new(Box::new(
+            crate::workspace::InMemoryWorkspace::new(),
+        )
+            as Box<dyn crate::workspace::Workspace>));
+        let cp = cp_with_target("/repo");
+        let report = report_with(&cp, vec![finding("F1", "rc")]);
+        let doc = report_document(&report, &cp);
+        save_report_document(Some(&workspace), Path::new("/unused"), &cp.run_id, &doc)
+            .await
+            .expect("save via workspace");
+
+        let guard = workspace.read().await;
+        let body = guard
+            .get("kb/security-harness/reports/run-r.json")
+            .expect("report document exists in kb/ tree");
+        let back: serde_json::Value = serde_json::from_str(&body).expect("parses back");
+        assert_eq!(back, doc, "document must round-trip through the workspace");
     }
 }

@@ -96,8 +96,170 @@ const ACTIVITY = {
   'sec-audit': { lanes: [] },
 };
 
+// Structured report document a completed security_engineer run persists to
+// the workspace kb/ tree.  Served through the /api/mind/file mock below so
+// SecurityReportView's fetch path works end-to-end in dev.
+const SECURITY_REPORT_DOC = {
+  schema_version: 1,
+  run_id: 'sec-1751700000-42',
+  target: { repo_path: '/var/lib/dyson/workspace/programs/vuln-demo', git_ref: '2f9c1ab' },
+  scope: 'whole repository, network-reachable entry points prioritized',
+  model: { provider: 'openrouter', model: 'deepseek/deepseek-v4-pro' },
+  harness_version: 'v3',
+  created_at: 1751700000,
+  updated_at: 1751702400,
+  report_source: 'valid',
+  summary: { critical: 1, high: 2, medium: 2, low: 2, new: 4, recurring: 3 },
+  findings: [
+    {
+      id: 'F1', run_finding_id: 'F1', key: 'DYS-1A2B3C4D', recurring: true, occurrences: 4,
+      title: 'OS command injection via ping host parameter', severity: 'critical',
+      vulnerability_class: 'injection_unsafe_execution',
+      trust_boundary: 'remote unauthenticated attacker to host shell',
+      entry_point: 'POST /ping (ping_host view)',
+      sink_or_decision: 'app.py:27 os.system invoked with shell string',
+      root_cause: 'user-controlled host concatenated into a shell command with no argv separation',
+      affected_paths: ['vuln-demo/app.py:27', 'vuln-demo/templates/ping.html:12'],
+      evidence: [
+        'app.py:27 — os.system("ping -c 1 " + request.form["host"])',
+        'curl -d host=";id" /ping returns uid=33(www-data) in the response body',
+      ],
+      reachability: 'reachable',
+      tenant_or_instance_impact: 'full host compromise from an unauthenticated request',
+      severity_rationale: 'unauthenticated remote command execution, no mitigations in path',
+      fix_recommendation: 'use subprocess.run with a list argv and validate the host against a strict pattern',
+      suggested_patch: '--- a/app.py\n+++ b/app.py\n@@ -25,3 +25,4 @@\n-    os.system("ping -c 1 " + request.form["host"])\n+    host = request.form["host"]\n+    if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", host): abort(400)\n+    subprocess.run(["ping", "-c", "1", host], check=False)',
+    },
+    {
+      id: 'F2', run_finding_id: 'F2', key: 'DYS-9F8E7D6C', recurring: true, occurrences: 2,
+      title: 'IDOR on user profile lookup', severity: 'high',
+      vulnerability_class: 'auth_authorization',
+      trust_boundary: 'any authenticated caller to user data store',
+      entry_point: 'GET /users/<id> (users_show view)',
+      sink_or_decision: 'app.py:14 user row returned without owner check',
+      root_cause: 'the view never verifies the session owns the requested id',
+      affected_paths: ['vuln-demo/app.py:14'],
+      evidence: ['app.py:14 — return jsonify(USERS[int(user_id)])'],
+      reachability: 'reachable',
+      tenant_or_instance_impact: 'cross-tenant read of any user profile',
+      severity_rationale: 'horizontal privilege escalation with trivial enumeration',
+      fix_recommendation: 'scope the lookup to session.user_id or add an ownership predicate',
+      suggested_patch: '',
+    },
+    {
+      id: 'F3', run_finding_id: 'F3', key: 'DYS-55AA66BB', recurring: false, occurrences: 1,
+      title: 'SSRF in webhook preview fetcher', severity: 'high',
+      vulnerability_class: 'ssrf_outbound_network',
+      trust_boundary: 'authenticated user to internal network',
+      entry_point: 'POST /webhooks/preview',
+      sink_or_decision: 'fetcher.py:41 requests.get(url) with no destination policy',
+      root_cause: 'attacker-supplied URL fetched server-side without an allowlist or metadata-IP block',
+      affected_paths: ['vuln-demo/fetcher.py:41'],
+      evidence: ['fetcher.py:41 — resp = requests.get(payload["url"], timeout=5)'],
+      reachability: 'reachable',
+      tenant_or_instance_impact: 'reads cloud metadata and intranet services from the app host',
+      severity_rationale: 'server-side pivot into the private network',
+      fix_recommendation: 'resolve and validate the destination against a public-IP-only policy before fetching',
+      suggested_patch: '',
+    },
+    {
+      id: 'F4', run_finding_id: 'F4', key: 'DYS-0C1D2E3F', recurring: true, occurrences: 5,
+      title: 'Session cookie missing Secure and HttpOnly flags', severity: 'medium',
+      vulnerability_class: 'session_oauth_csrf',
+      trust_boundary: 'network attacker to session token',
+      entry_point: 'app.py:8 session cookie configuration',
+      sink_or_decision: 'app.py:8 SESSION_COOKIE_SECURE unset',
+      root_cause: 'default cookie flags left in place',
+      affected_paths: ['vuln-demo/app.py:8'],
+      evidence: [],
+      reachability: 'requires network position',
+      tenant_or_instance_impact: 'session hijack over plaintext hops or via XSS',
+      severity_rationale: 'mitigated by TLS at the edge but undefended in depth',
+      fix_recommendation: 'set SESSION_COOKIE_SECURE, SESSION_COOKIE_HTTPONLY, SameSite=Lax',
+      suggested_patch: '',
+    },
+    {
+      id: 'F5', run_finding_id: 'F5', key: 'DYS-77CC88DD', recurring: false, occurrences: 1,
+      title: 'Path traversal in static file download', severity: 'medium',
+      vulnerability_class: 'path_traversal_file_access',
+      trust_boundary: 'unauthenticated caller to app filesystem',
+      entry_point: 'GET /files/<name>',
+      sink_or_decision: 'app.py:52 open(os.path.join(BASE, name))',
+      root_cause: 'no normalization or containment check on the joined path',
+      affected_paths: ['vuln-demo/app.py:52'],
+      evidence: ['app.py:52 — open(os.path.join(BASE, request.args["name"]))',
+        'GET /files/..%2f..%2fetc/passwd returns the host password file'],
+      reachability: 'reachable',
+      tenant_or_instance_impact: 'arbitrary file read from the app working directory',
+      severity_rationale: 'unauthenticated read but confined to files the process can open',
+      fix_recommendation: 'reject any name containing a path separator and confine with realpath',
+      suggested_patch: '',
+    },
+    {
+      id: 'F6', run_finding_id: 'F6', key: 'DYS-11AA22BB', recurring: false, occurrences: 1,
+      title: 'Reflected XSS in search echo', severity: 'low',
+      vulnerability_class: 'frontend_security_ux',
+      trust_boundary: 'attacker-crafted link to victim browser',
+      entry_point: 'GET /search?q=',
+      sink_or_decision: 'results.html:8 {{ q | safe }} disables autoescaping',
+      root_cause: 'the search term is rendered with the safe filter',
+      affected_paths: ['vuln-demo/templates/results.html:8'],
+      evidence: ['results.html:8 — <h2>Results for {{ q | safe }}</h2>'],
+      reachability: 'reachable',
+      tenant_or_instance_impact: 'session theft on a click',
+      severity_rationale: 'reflected and requires a click; downgraded from medium',
+      fix_recommendation: 'drop the safe filter so Jinja autoescaping applies',
+      suggested_patch: '',
+    },
+    {
+      id: 'F7', run_finding_id: 'F7', key: '', recurring: false, occurrences: 0,
+      title: 'Verbose stack traces in production', severity: 'info',
+      vulnerability_class: 'information_disclosure',
+      trust_boundary: 'any caller to error responses',
+      entry_point: 'app config',
+      sink_or_decision: 'app.py:5 debug=True',
+      root_cause: 'Flask debug mode enabled in the shipped config',
+      affected_paths: ['vuln-demo/app.py:5'],
+      evidence: [],
+      reachability: 'reachable',
+      tenant_or_instance_impact: 'leaks source paths and local variables on any 500',
+      severity_rationale: 'informational; no direct exploit but aids other attacks',
+      fix_recommendation: 'run with debug=False behind a WSGI server',
+      suggested_patch: '',
+    },
+  ],
+  rejected_candidates: [],
+  gaps: [],
+  class_coverage: [],
+  stage_history: [],
+};
+
 const ARTEFACTS = {
   'sec-audit': [
+    {
+      id: 'mock-security-report',
+      kind: 'security_review',
+      title: 'Security harness: vuln-demo',
+      bytes: 4200,
+      metadata: {
+        run_id: SECURITY_REPORT_DOC.run_id,
+        model: SECURITY_REPORT_DOC.model.model,
+        target_name: 'vuln-demo',
+        report_path: 'kb/security-harness/reports/' + SECURITY_REPORT_DOC.run_id + '.json',
+        findings_rollup: SECURITY_REPORT_DOC.summary,
+      },
+      // Markdown fallback body, shown only if the report doc fails to load.
+      body: '# Security Harness Report: vuln-demo\n\n(legacy markdown fallback)\n',
+    },
+    {
+      id: 'mock-legacy-report',
+      kind: 'security_review',
+      title: 'Security harness: legacy-run (no doc)',
+      bytes: 900,
+      // No report_path: a pre-doc artefact must keep rendering as markdown.
+      metadata: { run_id: 'sec-old', model: 'claude-opus-4-7', target_name: 'legacy-run' },
+      body: '# Security Harness Report: legacy-run\n\nThis pre-doc artefact renders as **markdown**.\n',
+    },
     {
       id: 'mock-screenshot-result',
       kind: 'other',
@@ -111,6 +273,10 @@ const ARTEFACTS = {
       },
     },
   ],
+};
+
+const REPORT_DOCS = {
+  ['kb/security-harness/reports/' + SECURITY_REPORT_DOC.run_id + '.json']: SECURITY_REPORT_DOC,
 };
 
 const FILES = {
@@ -205,6 +371,12 @@ export function dysonMock() {
         const mindFileMatch = url.match(/^\/api\/mind\/file\?path=(.+)$/);
         if (mindFileMatch && req.method === 'GET') {
           const filePath = decodeURIComponent(mindFileMatch[1]);
+          // Report docs are the same JSON-in-content envelope the mind route
+          // serves for any workspace file — this is the path SecurityReportView
+          // fetches and JSON.parses.
+          if (filePath in REPORT_DOCS) {
+            return json(res, { path: filePath, content: JSON.stringify(REPORT_DOCS[filePath]) });
+          }
           return json(res, { path: filePath, content: MIND_FILES[filePath] || '' });
         }
         if (url === '/api/mind/file' && req.method === 'POST') {
@@ -241,7 +413,7 @@ export function dysonMock() {
           res.statusCode = 200;
           res.setHeader('content-type', 'text/plain; charset=utf-8');
           res.setHeader('X-Dyson-Chat-Id', chat);
-          res.end(art.metadata?.file_url || '');
+          res.end(art.body || art.metadata?.file_url || '');
           return;
         }
         const globalArtMatch = url.match(/^\/api\/artefacts\/([^/?]+)$/);
