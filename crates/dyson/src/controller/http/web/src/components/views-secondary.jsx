@@ -10,12 +10,11 @@
 import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { markdown, prettySize } from './turns.jsx';
-import { copyToClipboard, downloadBlob } from 'dyson-common-ui';
+import { copyToClipboard, downloadBlob, SecurityReportView } from 'dyson-common-ui';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession } from '../hooks/useSession.js';
 import { ShareMenu } from './share-menu.jsx';
-import { SecurityReportView } from './security-report.jsx';
 import { useEscapeKey } from 'dyson-common-ui';
 import {
   setActivity,

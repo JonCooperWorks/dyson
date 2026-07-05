@@ -889,4 +889,4 @@ function ToolPanel({ tool, onClose, toolRef }) {
   );
 }
 
-export { PanelChrome, BashPanel, DiffPanel, SbomPanel, TaintPanel, ThinkingPanel, ImagePanel, FallbackPanel, ReadPanel, SubagentPanel, SecurityHarnessPanel, FindingsCounter, ClassGrid, parseHarnessState, HARNESS_STAGES, SEVERITY_LABELS, SEVERITY_COLOR, ToolBody, ToolPanel, copyTextForTool, copyInputForTool };
+export { PanelChrome, BashPanel, DiffPanel, SbomPanel, TaintPanel, ThinkingPanel, ImagePanel, FallbackPanel, ReadPanel, SubagentPanel, SecurityHarnessPanel, FindingsCounter, ClassGrid, parseHarnessState, HARNESS_STAGES, SEVERITY_LABELS, ToolBody, ToolPanel, copyTextForTool, copyInputForTool };
