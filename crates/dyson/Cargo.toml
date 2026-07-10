@@ -11,8 +11,8 @@ build = "build.rs"
 # transport (dyson runs the agent-side MCP OAuth flow). Pinned to a release tag
 # so the contract can't silently re-resolve. NOTE: the transport exposes
 # `&reqwest::Client`, so dyson + swarm + dyson-common must share one reqwest
-# major — dyson is held at 0.12 to match (see the reqwest dep below).
-dyson-common = { git = "ssh://git@github.com/JonCooperWorks/dyson-common.git", tag = "v0.1.4", features = ["oidc", "oauth-client"] }
+# major — all three ride reqwest 0.13 (see the reqwest dep below).
+dyson-common = { git = "ssh://git@github.com/JonCooperWorks/dyson-common.git", tag = "v0.1.7", features = ["oidc", "oauth-client"] }
 
 # Shared across workspace crates — inherit from [workspace.dependencies]
 # so version bumps live in one place and cargo always dedupes.
@@ -24,7 +24,7 @@ thiserror = { workspace = true }
 
 # Runtime + HTTP
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "signal", "process", "sync", "time"] }
-reqwest = { version = "0.12.28", default-features = false, features = ["stream", "json", "multipart", "rustls-tls-no-provider"] }
+reqwest = { version = "0.13", default-features = false, features = ["stream", "json", "multipart", "query", "rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # TLS termination + automatic Let's Encrypt issuance for non-loopback
 # HTTP controller binds.  rustls-acme drives the ACME (RFC 8555) flow
@@ -56,39 +56,39 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 # Content + storage
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 regex = "1"
 glob = "0.3"
 ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-nanohtml2text = "0.1"
+nanohtml2text = "0.2"
 
 # Dependency manifest parsing — used by `dependency_analysis` module for
 # OSV-backed dependency review.  TOML covers Cargo.lock, poetry.lock,
 # uv.lock, pyproject.toml; YAML covers pnpm-lock.yaml, pubspec.lock,
 # stack.yaml.lock, and GitHub Actions workflows.
-toml = { version = "0.8", default-features = false, features = ["parse"] }
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 serde_yaml_ng = "0.10"
 
 # AST-aware editing — 20 grammars for 19 languages, statically linked.
 tree-sitter = "0.26"
 streaming-iterator = "0.1"
-tree-sitter-rust = "0.23.3"
-tree-sitter-python = "0.23.6"
-tree-sitter-javascript = "0.23.1"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
 tree-sitter-typescript = "0.23.2"
-tree-sitter-go = "0.23.4"
+tree-sitter-go = "0.25"
 tree-sitter-java = "0.23.5"
-tree-sitter-c = "0.23.4"
+tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23.4"
 tree-sitter-c-sharp = "0.23"
 tree-sitter-ruby = "0.23.1"
 tree-sitter-kotlin-ng = "1.1.0"
-tree-sitter-swift = "=0.6.0"
+tree-sitter-swift = "0.7"
 tree-sitter-zig = "1.1.2"
 tree-sitter-elixir = "0.3.5"
-tree-sitter-erlang = "0.15.0"
-tree-sitter-ocaml = "0.24.2"
+tree-sitter-erlang = "0.19"
+tree-sitter-ocaml = "0.25"
 tree-sitter-haskell = "0.23.1"
 tree-sitter-nix = "0.3.0"
 tree-sitter-json = "0.24.8"
@@ -118,14 +118,14 @@ argon2 = "0.5"
 # decrypt; verification is unaffected.  Documented and ignored in
 # `.cargo/audit.toml`; revisit when jsonwebtoken upgrades past the
 # fixed `rsa` version.
-jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pem", "rust_crypto"] }
+jsonwebtoken = { version = "10.4", default-features = false, features = ["use_pem", "rust_crypto"] }
 libc = "0.2"
-undoc = "0.2.0"
-unpdf = { version = "0.4.5", default-features = false, features = ["fast-parse"] }
+undoc = "0.5"
+unpdf = { version = "0.7", default-features = false, features = ["fast-parse"] }
 tempfile = "3"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
-tikv-jemallocator = "0.6"
+tikv-jemallocator = "0.7"
 
 [dev-dependencies]
 proptest = "1"
