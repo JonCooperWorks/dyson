@@ -1,7 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Dyson">
   <rect width="512" height="512" rx="112" fill="#2563eb"/>
-  <g transform="translate(256,256) scale(1.9)" fill="#ffffff">
-    <path d="M56.9,-11.1 L94.2,-18.3 L94.2,18.3 L56.9,11.1Z M54.8,18.9 L90.8,31.3 L72.5,63.0 L43.8,38.1Z M38.1,43.8 L63.0,72.5 L31.3,90.8 L18.9,54.8Z M11.1,56.9 L18.3,94.2 L-18.3,94.2 L-11.1,56.9Z M-18.9,54.8 L-31.3,90.8 L-63.0,72.5 L-38.1,43.8Z M-43.8,38.1 L-72.5,63.0 L-90.8,31.3 L-54.8,18.9Z M-56.9,11.1 L-94.2,18.3 L-94.2,-18.3 L-56.9,-11.1Z M-54.8,-18.9 L-90.8,-31.3 L-72.5,-63.0 L-43.8,-38.1Z M-38.1,-43.8 L-63.0,-72.5 L-31.3,-90.8 L-18.9,-54.8Z M-11.1,-56.9 L-18.3,-94.2 L18.3,-94.2 L11.1,-56.9Z M22.8,-66.2 L35.2,-102.1 L70.9,-81.5 L45.9,-52.8Z M52.8,-45.9 L81.5,-70.9 L102.1,-35.2 L66.2,-22.8Z"/>
-    <circle r="26"/>
+  <g transform="translate(256,256) scale(1.9)">
+    <path d="M53.24,-30.74 A61.48,61.48 0 1 1 -48.45,-37.85" fill="none" stroke="#ffffff" stroke-width="14.84" stroke-linecap="round"/>
+    <path d="M-52.8,84.5 A99.64,99.64 0 1 1 74.05,-66.67" fill="none" stroke="#ffffff" stroke-width="12.72" stroke-linecap="round"/>
+    <circle cx="-37.85" cy="-48.45" r="13.78" fill="#ffffff"/>
+    <circle cx="72.87" cy="-67.95" r="10.6" fill="#ffffff"/>
+    <circle cx="0" cy="0" r="27.56" fill="#ffffff"/>
   </g>
 </svg>
