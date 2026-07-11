@@ -537,7 +537,7 @@ export function ArtefactsView({ conv, setConv }) {
       {showSide && <div className="mind-scrim" onClick={() => setShowSide(false)}/>}
       <aside className="mind-side">
         <div className="artefact-tree-head">
-          <div className="eyebrow">artefacts</div>
+          <div className="eyebrow">artifacts</div>
           <div style={{fontSize:12, color:'var(--fg-dim)', marginTop:4}}>
             {hasChats
               ? `${chats.length} chat${chats.length === 1 ? '' : 's'} with reports`
@@ -565,7 +565,7 @@ export function ArtefactsView({ conv, setConv }) {
         ) : (
           <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center', padding:'24px'}}>
             <div style={{color:'var(--fg-dim)', fontSize:13, lineHeight:1.6, textAlign:'center', maxWidth:'320px'}}>
-              No artefacts yet.
+              No artifacts yet.
             </div>
           </div>
         )}
@@ -595,7 +595,7 @@ function ChatBranch({ chat, isActive, open, onToggle, selected, selectedChatId, 
       {open && (
         items.length === 0 ? (
           <div style={{padding:'6px 14px 10px 32px', color:'var(--fg-dim)', fontSize:11.5}}>
-            No artefacts loaded.
+            No artifacts loaded.
           </div>
         ) : (
           items.map(a => (
@@ -771,11 +771,11 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
         <div className="artefact-reader-head"
              style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
                      borderBottom:'1px solid var(--line)', background:'var(--bg)'}}>
-          <span className="artefact-reader-title" style={{fontSize:13, color:'var(--fg-dim)'}}>Artefacts</span>
+          <span className="artefact-reader-title" style={{fontSize:13, color:'var(--fg-dim)'}}>Artifacts</span>
         </div>
         <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center',
                      color:'var(--fg-dim)', fontSize:13}}>
-          Select an artefact to read.
+          Select an artifact to read.
         </div>
       </section>
     );
@@ -834,7 +834,7 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
       return;
     }
     const blob = new Blob([body], { type: 'text/markdown' });
-    downloadBlob(blob, ((meta && meta.title) || 'artefact') + '.md');
+    downloadBlob(blob, ((meta && meta.title) || 'artifact') + '.md');
   };
   const copy = async () => {
     const text = isImage ? imageUrl : (isBinaryFile ? fileUrl : isPreviewableFile ? previewBody : body);
@@ -891,7 +891,7 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
       <div className="artefact-reader-head"
            style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
                    borderBottom:'1px solid var(--line)', background:'var(--bg)', flexWrap:'wrap'}}>
-        <span className="artefact-reader-title" style={{fontSize:13, color:'var(--fg)', fontWeight:500}}>{(meta && meta.title) || 'Artefact'}</span>
+        <span className="artefact-reader-title" style={{fontSize:13, color:'var(--fg)', fontWeight:500}}>{(meta && meta.title) || 'Artifact'}</span>
         {meta && meta.kind && <span className="chip mono">{meta.kind.replace(/_/g, ' ')}</span>}
         {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
         <span className="artefact-reader-spacer" style={{flex:1}}/>

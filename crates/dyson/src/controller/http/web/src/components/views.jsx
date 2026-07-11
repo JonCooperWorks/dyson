@@ -24,7 +24,7 @@ const { resolvedTheme, toggleTheme } = createThemeController({ storageKey: 'dyso
 const NAVS = [
   { id: 'conv',      name: 'Conversations', k: '1', icon: 'chat' },
   { id: 'mind',      name: 'Mind',          k: '2', icon: 'brain' },
-  { id: 'artefacts', name: 'Artefacts',     k: '3', icon: 'file' },
+  { id: 'artefacts', name: 'Artifacts',     k: '3', icon: 'file' },
   { id: 'activity',  name: 'Activity',      k: '4', icon: 'activity' },
   { id: 'audit',     name: 'Audit',         k: '5', icon: 'gauge' },
 ];
@@ -63,7 +63,7 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
   const drawerTitle = view === 'mind'
     ? 'Workspace files'
     : view === 'artefacts'
-      ? 'Artefacts'
+      ? 'Artifacts'
       : 'Conversations';
   // Active provider starts open, others collapsed.  Resets on menu open
   // so the initial render always matches the current active provider.

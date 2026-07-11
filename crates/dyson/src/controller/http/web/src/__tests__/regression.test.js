@@ -232,7 +232,7 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
     expect(primaryViews, 'TopBar must label the drawer for Mind')
       .toContain("? 'Workspace files'");
     expect(primaryViews, 'TopBar must label the drawer for Artefacts')
-      .toContain("? 'Artefacts'");
+      .toContain("? 'Artifacts'");
     expect(primaryViews, 'TopBar hamburger must expose the dynamic label')
       .toContain('aria-label={drawerTitle}');
     expect(viewsSrc, 'secondary panes must not accept private drawer opener props')

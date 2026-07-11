@@ -56,7 +56,7 @@ describe('ArtefactsView — tree sidebar', () => {
     // drawer — not in a standalone .mind-pane as in the previous
     // design.  The copy anchors the screen when nothing else will.
     expect(container.querySelector('.mind.show-side')).toBeTruthy();
-    expect(queryByText(/No artefacts yet/)).toBeTruthy();
+    expect(queryByText(/No artifacts yet/)).toBeTruthy();
   });
 
   it('renders every chat with artefacts and marks the active one', () => {
@@ -207,7 +207,7 @@ describe('ArtefactReader — empty-id branch stays reachable', () => {
     );
     expect(container.querySelector('.artefact-reader-head')).toBeTruthy();
     expect(container.querySelector('.artefact-back')).toBeNull();
-    expect(queryByText(/Select an artefact to read/)).toBeTruthy();
+    expect(queryByText(/Select an artifact to read/)).toBeTruthy();
   });
 
   it('keeps the loaded reader header to one drawer opener: the topbar', async () => {

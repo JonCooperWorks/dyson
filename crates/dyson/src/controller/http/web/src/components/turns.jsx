@@ -594,9 +594,9 @@ function ArtefactBlock({ block, chatId }) {
   const kind = (block.kind || 'other').replace(/_/g, ' ');
   return (
     <div className="artefact-chat-block">
-      <a href={reader} onClick={open} className="fileblock" title="Open artefact">
+      <a href={reader} onClick={open} className="fileblock" title="Open artifact">
         <Icon name="file" size={14}/>
-        <span className="name">{block.title || 'Artefact'}</span>
+        <span className="name">{block.title || 'Artifact'}</span>
         <span className="sz mono" style={{color:'var(--fg-dim)'}}>{kind}</span>
         {typeof block.bytes === 'number' && (
           <span className="sz mono">{prettySize(block.bytes)}</span>
