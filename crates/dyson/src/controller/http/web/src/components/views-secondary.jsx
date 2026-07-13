@@ -10,7 +10,7 @@
 import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { markdown, prettySize } from './turns.jsx';
-import { copyToClipboard, downloadBlob, SecurityReportView } from 'dyson-common-ui';
+import { copyToClipboard, downloadBlob, SecurityReportView, EvalReportView } from 'dyson-common-ui';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession } from '../hooks/useSession.js';
@@ -820,6 +820,10 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
   // null on cold deep-links — the branch falls through to markdown until
   // it hydrates, then upgrades.
   const reportPath = typeof metaData.report_path === 'string' ? metaData.report_path : '';
+  // `report_kind` discriminates which structured reader renders the document
+  // (absent ⇒ "security" for back-compat, since the card contract keyed on bare
+  // `report_path` before evals existed).
+  const reportKind = metaData.report_kind === 'eval' ? 'eval' : 'security';
 
   const download = () => {
     // Image/file cards download straight from a same-origin URL (no blob to
@@ -982,6 +986,13 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
             <pre className="artefact-text-preview">{previewBody}</pre>
           )}
         </div>
+      ) : reportPath && reportKind === 'eval' ? (
+        <EvalReportView reportPath={reportPath}
+          fallback={
+            <div className="prose"
+                 style={{overflowY:'auto', flex:1, padding:'18px 28px', lineHeight:1.6}}
+                 dangerouslySetInnerHTML={{__html: markdown(body || '')}}/>
+          }/>
       ) : reportPath ? (
         <SecurityReportView reportPath={reportPath}
           fallback={

@@ -425,6 +425,7 @@ impl Output for SseOutput {
             // at the call site.
             let kind = match artefact.kind {
                 crate::message::ArtefactKind::SecurityReview => "security_review",
+                crate::message::ArtefactKind::EvalReport => "eval_report",
                 crate::message::ArtefactKind::Image => "image",
                 crate::message::ArtefactKind::Other => "other",
             }

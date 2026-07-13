@@ -258,6 +258,7 @@ fn summary_from_record(record: &ArtefactRecord) -> ArtefactSummary {
 fn kind_name(kind: ArtefactKind) -> &'static str {
     match kind {
         ArtefactKind::SecurityReview => "security_review",
+        ArtefactKind::EvalReport => "eval_report",
         ArtefactKind::Image => "image",
         ArtefactKind::Other => "other",
     }
