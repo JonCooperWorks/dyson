@@ -176,6 +176,10 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
   const q = query.trim().toLowerCase();
 
   const configuredIds = new Set(configured.map(c => c.id));
+  // The "current" group also honours the query — otherwise a search for a
+  // *configured* model finds nothing (it's excluded from the catalogue list
+  // below, and hiding this group on any query made it unsearchable).
+  const configShown = configured.filter(c => !q || (c.id || '').toLowerCase().includes(q));
   const cata = Array.isArray(catalogue) ? catalogue : [];
   // Hide configured ids from the catalogue list — they already show in the
   // "current" group, and duplicating them just pads the results.
@@ -199,10 +203,10 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
                  onChange={e => setQuery(e.target.value)}/>
         </div>
 
-        {configured.length > 0 && !q && (
+        {configShown.length > 0 && (
           <div className="mm-section">
             <div className="mm-label">Current</div>
-            {configured.map(c => {
+            {configShown.map(c => {
               const next = nextRunModel?.provider === c.provider && nextRunModel?.model === c.id;
               return (
                 <div key={`${c.provider}/${c.id}`}
@@ -217,6 +221,11 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
           </div>
         )}
 
+        {/* Hide the whole catalogue section when a query matched only a
+            configured model (shown above) — but still surface it while
+            loading, when the catalogue is genuinely unreachable, or when
+            nothing matched anywhere. */}
+        {(shown.length > 0 || loading || cata.length === 0 || configShown.length === 0) && (
         <div className="mm-section">
           <div className="mm-label">Catalogue{loading ? ' · loading' : ''}</div>
           {!loading && shown.length === 0 && (
@@ -243,6 +252,7 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
             <div className="mm-hint">+{overflow} more — keep typing to narrow</div>
           )}
         </div>
+        )}
       </div>
     </>
   );

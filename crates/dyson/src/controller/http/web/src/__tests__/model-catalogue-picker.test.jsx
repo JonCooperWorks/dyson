@@ -7,7 +7,7 @@
 
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 import { TopBar } from '../components/views.jsx';
 import { ApiProvider } from '../hooks/useApi.js';
@@ -64,6 +64,36 @@ describe('TopBar — catalogue picker', () => {
     // Picking a catalogue model posts the switch for the active provider.
     fireEvent.click(screen.getByText('openai/gpt-5'));
     await waitFor(() => expect(postModel).toHaveBeenCalledWith('p', 'openai/gpt-5'));
+  });
+
+  it('keeps configured models searchable (they are excluded from the catalogue list)', async () => {
+    // Two configured models; the catalogue also carries deepseek-v4-pro, so
+    // it must be de-duped out of the catalogue list — but a search for it
+    // must still surface it from the "current" group, not vanish.
+    setProviders([{
+      id: 'p', name: 'Provider', active: true, activeModel: 'deepseek/deepseek-v4-pro',
+      models: ['deepseek/deepseek-v4-pro', 'moonshotai/kimi-k3'],
+    }], 'deepseek/deepseek-v4-pro');
+    const listModels = vi.fn(async () => ({
+      models: [
+        { id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+        { id: 'openai/gpt-5', name: 'GPT-5' },
+      ],
+    }));
+    const postModel = vi.fn(async () => ({}));
+    renderTopBar({ listModels, postModel });
+
+    fireEvent.click(screen.getByTitle('Switch model'));
+    const search = await screen.findByLabelText('Search models');
+    fireEvent.change(search, { target: { value: 'deepseek-v4-pro' } });
+
+    // Found via the current group (scope to the menu — the top-bar button
+    // also shows the active model), and no misleading "No matches".
+    const menu = document.querySelector('.modelmenu');
+    await waitFor(() => expect(within(menu).getByText('deepseek/deepseek-v4-pro')).toBeTruthy());
+    expect(screen.queryByText('No matches.')).toBeNull();
+    fireEvent.click(within(menu).getByText('deepseek/deepseek-v4-pro'));
+    await waitFor(() => expect(postModel).toHaveBeenCalledWith('p', 'deepseek/deepseek-v4-pro'));
   });
 
   it('degrades to a graceful empty state when no catalogue is reachable', async () => {
