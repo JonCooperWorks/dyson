@@ -524,17 +524,12 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     // clears agent context.  Skip the optimistic turn pair (no LLM
     // reply is coming) and reset local state once the POST lands.
     if (val.trim() === '/clear' && !(files && files.length)) {
-      fetch(`/api/conversations/${encodeURIComponent(activeConv)}/turn`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: '/clear' }),
-      }).then(r => {
-        if (!r.ok) return;
+      client.clearConversation(activeConv).then(() => {
         mutate(s => ({
           ...s, liveTurns: [], artefacts: [], panels: [],
           openTool: null, thinkingRef: null, liveToolRef: null,
         }));
-      });
+      }).catch(e => console.warn('[dyson] /clear failed', e));
       return;
     }
 

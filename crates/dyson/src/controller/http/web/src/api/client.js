@@ -239,6 +239,21 @@ export class DysonClient {
     return r.blob();
   }
 
+  // `/clear` — server-side conversation reset (rotate the transcript to a
+  // dated archive + wipe the agent's in-memory context).  Routed through
+  // _authedFetch so it carries the X-Dyson-CSRF header and bearer; a bare
+  // fetch() 400s on the controller's CSRF gate (that was the bug where
+  // `/clear` did nothing and surfaced a 400).
+  async clearConversation(id) {
+    const r = await this._authedFetch(`/api/conversations/${encodeURIComponent(id)}/turn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: '/clear' }),
+    });
+    if (!r.ok) throw new Error(`clear failed: ${r.status}`);
+    return r.json();
+  }
+
   async postModel(provider, model) {
     const r = await this._authedFetch('/api/model', {
       method: 'POST',
