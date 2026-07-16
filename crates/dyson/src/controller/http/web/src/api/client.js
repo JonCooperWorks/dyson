@@ -110,6 +110,12 @@ export class DysonClient {
   listProviders() { return this._json('/api/providers'); }
   listCommands()  { return this._json('/api/commands'); }
 
+  // Full model catalogue the active provider can reach (via the swarm
+  // proxy's /openrouter/v1/models).  Distinct from listProviders(), which
+  // returns only the models configured in dyson.json.  Fetched lazily on
+  // menu-open; degrades to { models: [] } off-swarm.
+  listModels() { return this._json('/api/models'); }
+
   // MCP elicitation: open prompts a connected MCP server has asked the
   // user to answer, and the answer submission.
   listElicitations() { return this._json('/api/mcp/elicitations'); }

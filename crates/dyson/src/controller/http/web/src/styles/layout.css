@@ -751,6 +751,41 @@
   padding: 8px;
   z-index: 20;
 }
+/* Searchable catalogue picker (replaces the provider-tree menu). */
+.modelmenu .mm-search {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--mute);
+  background: var(--bg-1);
+}
+.modelmenu .mm-search input {
+  flex: 1; min-width: 0;
+  border: 0; outline: 0; background: transparent;
+  color: var(--fg);
+  font: 500 13px/1 var(--font-ui);
+}
+.modelmenu .mm-section { margin-bottom: 4px; }
+.modelmenu .mm-label {
+  padding: 6px 10px 4px;
+  font: 600 9.5px/1 var(--font-mono);
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--mute);
+}
+.modelmenu .mm-empty,
+.modelmenu .mm-hint {
+  padding: 8px 10px;
+  font: 500 11.5px/1.4 var(--font-ui);
+  color: var(--mute);
+}
+.modelmenu .mm-ctx {
+  margin-left: auto;
+  font: 500 10.5px/1 var(--font-mono);
+  color: var(--mute);
+}
 .modelmenu .group { border-radius: 8px; margin-bottom: 2px; }
 .modelmenu .group:last-child { margin-bottom: 0; }
 .modelmenu .g-head {

@@ -37,6 +37,7 @@ mod files;
 mod mcp;
 mod mind;
 mod model;
+mod models;
 mod providers;
 mod sse;
 mod static_assets;
@@ -301,6 +302,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         (&Method::GET, ["api", "mcp", "servers"]) => mcp::list_servers(&state).await,
 
         (&Method::GET, ["api", "providers"]) => providers::list(&state),
+        (&Method::GET, ["api", "models"]) => models::list(&state).await,
         (&Method::GET, ["api", "commands"]) => commands::get(&state).await,
         (&Method::POST, ["api", "model"]) => model::post(req, Arc::clone(&state)).await,
         (&Method::GET, ["api", "agent"]) => agent::get(&state).await,

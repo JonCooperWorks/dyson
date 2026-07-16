@@ -56,24 +56,45 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
   const model = useAppState(s => s.activeModel);
   const providers = useAppState(s => s.providers);
   const agentName = useAppState(s => s.agentName);
-  const totalModels = providers.reduce((n, p) => n + (p.models?.length || 0), 0);
+  // The active provider a catalogue pick switches to.  Falls back to the
+  // first provider when none is flagged active (fresh boot).
+  const activeProvider = (providers.find(p => p.active) || providers[0])?.id || '';
+  // The models named in dyson.json — shown as the "current" group so the
+  // seeded/active model is always one click away without a catalogue fetch.
+  const configured = providers.flatMap(p =>
+    (p.models || []).map(m => ({ provider: p.id, id: m, active: !!p.active && m === model }))
+  );
+  // There's always something to switch *from* once a model is active, and
+  // the catalogue is fetched lazily on open — so the control is enabled
+  // whenever a model is set, not gated on the (now single-entry) configured
+  // list.
+  const canSwitch = !!model;
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Catalogue is null until the menu is first opened, then the normalized
+  // list from GET /api/models (or [] off-swarm / on error).
+  const [catalogue, setCatalogue] = useState(null);
+  const [cataLoading, setCataLoading] = useState(false);
   const drawerTitle = view === 'mind'
     ? 'Workspace files'
     : view === 'artefacts'
       ? 'Artifacts'
       : 'Conversations';
-  // Active provider starts open, others collapsed.  Resets on menu open
-  // so the initial render always matches the current active provider.
-  const [expanded, setExpanded] = useState({});
+
+  // Fetch the full catalogue lazily the first time the menu opens.  Older
+  // test/embed clients may not expose listModels — degrade to the
+  // configured list rather than throwing.
   useEffect(() => {
-    if (!menuOpen) return;
-    const init = {};
-    for (const p of providers) init[p.id] = !!p.active;
-    setExpanded(init);
-  }, [menuOpen, providers]);
+    if (!menuOpen || catalogue !== null || typeof client.listModels !== 'function') return;
+    let alive = true;
+    setCataLoading(true);
+    client.listModels()
+      .then(r => { if (alive) setCatalogue(Array.isArray(r?.models) ? r.models : []); })
+      .catch(() => { if (alive) setCatalogue([]); })
+      .finally(() => { if (alive) setCataLoading(false); });
+    return () => { alive = false; };
+  }, [menuOpen, catalogue, client]);
 
   const switchTo = async (provider, modelName) => {
     setBusy(true);
@@ -113,21 +134,21 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
         <ThemeToggle/>
         {model && (
           <button type="button" className="select"
-                  onClick={() => totalModels > 0 && setMenuOpen(o => !o)}
-                  disabled={totalModels === 0}
+                  onClick={() => canSwitch && setMenuOpen(o => !o)}
+                  disabled={!canSwitch}
                   aria-haspopup="menu" aria-expanded={menuOpen}
-                  aria-label={totalModels > 0 ? 'Switch model' : 'Active model'}
+                  aria-label={canSwitch ? 'Switch model' : 'Active model'}
                   style={{opacity: busy ? 0.5 : 1}}
-                  title={totalModels > 0 ? 'Switch model' : 'Active model'}>
+                  title={canSwitch ? 'Switch model' : 'Active model'}>
             <span className="label">{nextRunModel ? 'next' : 'model'}</span>
             <span className="mono">{nextRunModel ? nextRunModel.model : model}</span>
-            {totalModels > 0 && <Icon name="chevd" size={10}/>}
+            {canSwitch && <Icon name="chevd" size={10}/>}
           </button>
         )}
-        {menuOpen && totalModels > 0 && (
-          <ModelMenu providers={providers} model={model} expanded={expanded}
+        {menuOpen && canSwitch && (
+          <ModelMenu configured={configured} catalogue={catalogue} loading={cataLoading}
+                     activeProvider={activeProvider} activeModel={model}
                      nextRunModel={nextRunModel}
-                     onToggleGroup={id => setExpanded(e => ({ ...e, [id]: !e[id] }))}
                      onPick={switchTo} onDismiss={() => setMenuOpen(false)}/>
         )}
       </div>
@@ -135,45 +156,93 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
   );
 }
 
-function ModelMenu({ providers, model, expanded, nextRunModel, onToggleGroup, onPick, onDismiss }) {
+// Compact context-window label: 200000 → "200K", 1048576 → "1M".
+function fmtCtx(n) {
+  if (!n || n <= 0) return '';
+  if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return String(n);
+}
+
+// Searchable picker over the full model catalogue (GET /api/models),
+// distinct from the old provider-tree menu that only listed the models
+// named in dyson.json.  A small "current" group keeps the configured /
+// active model one click away; the rest of the list is type-to-filter
+// over the catalogue, bounded so a 300-model list never renders whole.
+const CATALOGUE_LIMIT = 30;
+function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel, nextRunModel, onPick, onDismiss }) {
   useEscapeKey(onDismiss);
+  const [query, setQuery] = useState('');
+  const q = query.trim().toLowerCase();
+
+  const configuredIds = new Set(configured.map(c => c.id));
+  const cata = Array.isArray(catalogue) ? catalogue : [];
+  // Hide configured ids from the catalogue list — they already show in the
+  // "current" group, and duplicating them just pads the results.
+  const matches = cata.filter(m => {
+    if (configuredIds.has(m.id)) return false;
+    if (!q) return true;
+    return (m.id || '').toLowerCase().includes(q)
+      || (m.name || '').toLowerCase().includes(q);
+  });
+  const shown = matches.slice(0, CATALOGUE_LIMIT);
+  const overflow = matches.length - shown.length;
+
   return (
     <>
       <div className="modelmenu-scrim" onClick={onDismiss}/>
       <div className="modelmenu">
-        {providers.map(p => {
-          const open = !!expanded[p.id];
-          const models = p.models || [];
-          return (
-            <div key={p.id} className={`group ${p.active ? 'active' : ''}`}>
-              <div className="g-head" onClick={() => onToggleGroup(p.id)}>
-                <span className="caret" style={{transform: open ? 'rotate(90deg)' : 'none'}}>
-                  <Icon name="chev" size={10}/>
-                </span>
-                <span className="name">{p.name}</span>
-                {p.active && <span className="badge">active</span>}
-                <span className="count">{models.length}</span>
-              </div>
-              {open && models.length > 0 && (
-                <div className="g-body">
-                  {models.map(m => {
-                    const next = nextRunModel?.provider === p.id && nextRunModel?.model === m;
-                    const current = p.active && m === model;
-                    return (
-                    <div key={m}
-                         className={`item ${current ? 'on' : ''} ${next ? 'next' : ''}`}
-                         onClick={() => onPick(p.id, m)}>
-                      <span className="dot"/>
-                      <span className="model mono">{m}</span>
-                      {next && <span className="badge">next run</span>}
-                    </div>
-                    );
-                  })}
+        <div className="mm-search">
+          <Icon name="search" size={13}/>
+          <input autoFocus placeholder="Search models" value={query}
+                 aria-label="Search models"
+                 onChange={e => setQuery(e.target.value)}/>
+        </div>
+
+        {configured.length > 0 && !q && (
+          <div className="mm-section">
+            <div className="mm-label">Current</div>
+            {configured.map(c => {
+              const next = nextRunModel?.provider === c.provider && nextRunModel?.model === c.id;
+              return (
+                <div key={`${c.provider}/${c.id}`}
+                     className={`item ${c.active ? 'on' : ''} ${next ? 'next' : ''}`}
+                     onClick={() => onPick(c.provider, c.id)}>
+                  <span className="dot"/>
+                  <span className="model mono">{c.id}</span>
+                  {next && <span className="badge">next run</span>}
                 </div>
-              )}
+              );
+            })}
+          </div>
+        )}
+
+        <div className="mm-section">
+          <div className="mm-label">Catalogue{loading ? ' · loading' : ''}</div>
+          {!loading && shown.length === 0 && (
+            <div className="mm-empty">
+              {cata.length === 0 ? 'No catalogue available.' : 'No matches.'}
             </div>
-          );
-        })}
+          )}
+          {shown.map(m => {
+            const next = nextRunModel?.provider === activeProvider && nextRunModel?.model === m.id;
+            const current = !!activeProvider && m.id === activeModel;
+            const ctx = fmtCtx(m.context_length);
+            return (
+              <div key={m.id}
+                   className={`item ${current ? 'on' : ''} ${next ? 'next' : ''}`}
+                   onClick={() => onPick(activeProvider, m.id)}
+                   title={m.name || m.id}>
+                <span className="dot"/>
+                <span className="model mono">{m.id}</span>
+                {ctx && <span className="mm-ctx">{ctx}</span>}
+              </div>
+            );
+          })}
+          {overflow > 0 && (
+            <div className="mm-hint">+{overflow} more — keep typing to narrow</div>
+          )}
+        </div>
       </div>
     </>
   );
