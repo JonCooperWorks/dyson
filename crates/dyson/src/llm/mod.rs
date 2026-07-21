@@ -687,6 +687,22 @@ pub(crate) struct ConcurrencyLimitedLlmClient {
     sem: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
+struct ConcurrencyPermitStream {
+    inner: Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Stream for ConcurrencyPermitStream {
+    type Item = Result<StreamEvent>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.get_mut().inner.as_mut().poll_next(cx)
+    }
+}
+
 impl ConcurrencyLimitedLlmClient {
     pub fn new(inner: Box<dyn LlmClient>, max_concurrent: usize) -> Self {
         Self {
@@ -706,18 +722,24 @@ impl LlmClient for ConcurrencyLimitedLlmClient {
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<StreamResponse> {
-        // Acquire a permit before issuing the request.  Permit drops when
-        // _permit goes out of scope — we hold it through the whole
-        // .stream() call (including any retries inside the inner client).
-        let _permit = self
+        // Acquire before issuing the request, then move the permit into the
+        // returned stream so the cap covers retries, response headers, and
+        // the complete streamed generation (including early consumer drop).
+        let permit = self
             .sem
             .clone()
             .acquire_owned()
             .await
             .expect("semaphore is never closed");
-        self.inner
+        let mut response = self
+            .inner
             .stream(messages, system, system_suffix, tools, config)
-            .await
+            .await?;
+        response.stream = Box::pin(ConcurrencyPermitStream {
+            inner: response.stream,
+            _permit: permit,
+        });
+        Ok(response)
     }
 
     fn set_mcp_tools(&self, tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>) {
@@ -1657,5 +1679,96 @@ mod tests {
             h.await.unwrap();
         }
         assert_eq!(peak.load(Ordering::SeqCst), 1);
+    }
+
+    struct ActiveResponseGuard {
+        active: Arc<AtomicUsize>,
+    }
+
+    impl Drop for ActiveResponseGuard {
+        fn drop(&mut self) {
+            self.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct StreamingOverlapClient {
+        active: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmClient for StreamingOverlapClient {
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _system_suffix: &str,
+            _tools: &[ToolDefinition],
+            _config: &CompletionConfig,
+        ) -> Result<StreamResponse> {
+            let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            let guard = ActiveResponseGuard {
+                active: Arc::clone(&self.active),
+            };
+            let stream = async_stream::stream! {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+                #[allow(unreachable_code)]
+                yield Ok(StreamEvent::TextDelta(String::new()));
+            };
+            Ok(StreamResponse {
+                stream: Box::pin(stream),
+                tool_mode: ToolMode::Execute,
+                input_tokens: None,
+                swarm_llm_audit_id: None,
+                provider: None,
+                model: None,
+            })
+        }
+
+        fn set_mcp_tools(
+            &self,
+            _tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
+        ) {
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrency_permit_is_held_until_response_stream_drops() {
+        use futures_util::StreamExt as _;
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let client = Arc::new(ConcurrencyLimitedLlmClient::new(
+            Box::new(StreamingOverlapClient {
+                active: Arc::clone(&active),
+                peak: Arc::clone(&peak),
+            }),
+            1,
+        ));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let client = Arc::clone(&client);
+            handles.push(tokio::spawn(async move {
+                let mut response = client
+                    .stream(&[], "", "", &[], &empty_config())
+                    .await
+                    .unwrap();
+                let _ = response.stream.next().await;
+            }));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            1,
+            "the configured cap must cover active response streams"
+        );
+        for handle in handles {
+            handle.abort();
+            let _ = handle.await;
+        }
     }
 }

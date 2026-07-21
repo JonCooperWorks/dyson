@@ -29,6 +29,8 @@ pub enum ExecutionPhase {
 enum Resource {
     File(String),
     Git,
+    /// Conservative shared resource for arbitrary shell side effects.
+    Shell,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -90,6 +92,29 @@ fn classify_git_command(command: &str) -> Option<AccessKind> {
         return Some(AccessKind::Write);
     }
     None
+}
+
+/// Classify the small set of shell commands whose lack of side effects is
+/// obvious without parsing a shell program. Everything else is a write.
+fn classify_shell_command(command: &str) -> AccessKind {
+    let trimmed = command.trim();
+    if trimmed.contains(['>', '|', ';'])
+        || trimmed.contains("&&")
+        || trimmed.contains("||")
+        || trimmed.contains("$(")
+        || trimmed.contains('`')
+    {
+        return AccessKind::Write;
+    }
+    let executable = trimmed.split_whitespace().next().unwrap_or("");
+    if matches!(
+        executable,
+        "cat" | "echo" | "grep" | "head" | "ls" | "printf" | "pwd" | "rg" | "stat" | "tail" | "wc"
+    ) {
+        AccessKind::Read
+    } else {
+        AccessKind::Write
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +235,17 @@ fn extract_resources(call: &ToolCall) -> Vec<ResourceAccess> {
             }
         }
         "bash" => {
+            // Shell commands can touch any file, process, or repository state.
+            // Without a real shell parser, treating all bash calls as sharing
+            // one write resource is the only correctness-preserving default.
+            resources.push(ResourceAccess {
+                resource: Resource::Shell,
+                kind: call
+                    .input
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .map_or(AccessKind::Write, classify_shell_command),
+            });
             if let Some(command) = call.input.get("command").and_then(|v| v.as_str())
                 && let Some(kind) = classify_git_command(command)
             {
@@ -342,6 +378,19 @@ mod test_dependency_analyzer {
         ];
         let refs: Vec<&ToolCall> = calls.iter().collect();
         assert!(DependencyAnalyzer::analyze(&refs).len() >= 2);
+    }
+
+    #[test]
+    fn unknown_bash_calls_are_serialised_conservatively() {
+        let calls = [
+            ToolCall::new("bash", json!({"command": "generate-report > report.json"})),
+            ToolCall::new("bash", json!({"command": "cat report.json"})),
+        ];
+        let refs: Vec<&ToolCall> = calls.iter().collect();
+        assert!(
+            DependencyAnalyzer::analyze(&refs).len() >= 2,
+            "arbitrary shell commands may share filesystem state and must not race"
+        );
     }
 
     // QP: the analyzer's tool-name match used to read `file_read` /
