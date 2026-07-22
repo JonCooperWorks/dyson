@@ -8,12 +8,16 @@
 //   calls in a loop until it has an answer.  Everything else — MCP servers,
 //   skills, local tools — plugs into that loop through traits.
 //
-// Crate structure:
+// Workspace structure:
 //
-//   dyson (library crate)
+//   dyson-core          — Message/error domain contracts
+//   dyson-harness       — Execution protocol, scheduler, replay, grading
+//   dyson-ast           — Language parsing and taint primitives
+//   dyson-dependency-analysis — Manifest parsing and OSV analysis
+//   dyson-persistence   — Chat histories and durable run journals
+//   dyson (composition crate)
 //     ├── auth          — Auth trait, Credential, BearerToken/ApiKey/Composite auth
-//     ├── error         — DysonError enum, Result type alias
-//     ├── message       — Message, Role, ContentBlock
+//     ├── error/message — Compatibility façades over dyson-core
 //     ├── config        — Settings, loaders (dyson.json)
 //     ├── tool          — Tool trait, ToolContext, ToolOutput, built-in tools
 //     ├── skill         — Skill trait, BuiltinSkill

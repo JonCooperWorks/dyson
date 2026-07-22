@@ -41,6 +41,11 @@ across turns.
 ## Source Map
 
 ```text
+crates/dyson-core/          Provider-neutral messages and errors
+crates/dyson-harness/       Execution contracts, scheduler, replay, grading
+crates/dyson-ast/           Tree-sitter parsing and taint primitives
+crates/dyson-dependency-analysis/  Manifest parsers and OSV analysis
+crates/dyson-persistence/   Chat histories, journals, migrations, checkpoints
 crates/dyson/src/
   main.rs                 CLI entry: listen, init, hash-bearer, swarm, run
   command/                Subcommand implementations and config overrides
@@ -48,12 +53,12 @@ crates/dyson/src/
   llm/                    Provider registry, API clients, CLI-subprocess clients, SSE parsers
   agent/                  Agent loop, stream handler, compaction, rate limits, dependency analysis
   tool/                   Built-in tools, web/search/file/workspace tools
-  ast/                    Tree-sitter language registry and AST query helpers
+  ast/                    Compatibility façade over dyson-ast
   skill/                  Builtin, local, MCP, subagent, marketplace-loaded skills
   media/                  Attachments, generated artefacts, PDF/image/audio handling
   sandbox/                Policy sandbox, OS command builders, no-sandbox bypass
   controller/             Terminal, HTTP/web, Telegram, background controllers
-  chat_history/           Disk chat store and flat-layout migrations
+  chat_history/           Configured factory and persistence compatibility façade
   workspace/              Filesystem/in-memory workspace, memory store, migrations
   auth/                   Bearer, hashed bearer, OIDC/no-auth shared auth traits
   secret/                 Secret resolver registry

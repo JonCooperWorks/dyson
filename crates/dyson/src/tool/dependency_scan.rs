@@ -73,7 +73,7 @@ impl Tool for DependencyScanTool {
             severity_min: parse_severity(parsed.severity_min.as_deref()),
             ..ScanOptions::default()
         };
-        let client = OsvClient::new();
+        let client = OsvClient::with_http(crate::http::client().clone());
         let report = dependency_analysis::scan(&root, &opts, &client).await?;
 
         let out = match parsed.format.as_deref() {

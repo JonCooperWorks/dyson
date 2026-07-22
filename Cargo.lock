@@ -830,7 +830,12 @@ dependencies = [
  "async-trait",
  "base64",
  "clap",
+ "dyson-ast",
  "dyson-common",
+ "dyson-core",
+ "dyson-dependency-analysis",
+ "dyson-harness",
+ "dyson-persistence",
  "flate2",
  "futures-util",
  "glob",
@@ -851,7 +856,6 @@ dependencies = [
  "rustls-acme",
  "serde",
  "serde_json",
- "serde_yaml_ng",
  "sha2",
  "streaming-iterator",
  "subtle",
@@ -866,6 +870,22 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "tree-sitter",
+ "undoc",
+ "unpdf",
+ "wiremock",
+ "zeroize",
+]
+
+[[package]]
+name = "dyson-ast"
+version = "0.1.0"
+dependencies = [
+ "dyson-core",
+ "ignore",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
  "tree-sitter",
  "tree-sitter-c",
  "tree-sitter-c-sharp",
@@ -886,10 +906,6 @@ dependencies = [
  "tree-sitter-swift",
  "tree-sitter-typescript",
  "tree-sitter-zig",
- "undoc",
- "unpdf",
- "wiremock",
- "zeroize",
 ]
 
 [[package]]
@@ -905,6 +921,57 @@ dependencies = [
  "serde_json",
  "sha2",
  "subtle",
+]
+
+[[package]]
+name = "dyson-core"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dyson-dependency-analysis"
+version = "0.1.0"
+dependencies = [
+ "dyson-core",
+ "futures-util",
+ "ignore",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "wiremock",
+]
+
+[[package]]
+name = "dyson-harness"
+version = "0.1.0"
+dependencies = [
+ "rand 0.10.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dyson-persistence"
+version = "0.1.0"
+dependencies = [
+ "dyson-common",
+ "dyson-core",
+ "dyson-harness",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

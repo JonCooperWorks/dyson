@@ -83,6 +83,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{DysonError, Result};
 
+pub use dyson_harness::{Idempotency, ResourceAccess, ResourceClaim, ToolExecutionPlan};
+
 // ---------------------------------------------------------------------------
 // Tool trait
 // ---------------------------------------------------------------------------
@@ -180,78 +182,6 @@ pub trait Tool: Send + Sync {
 // ---------------------------------------------------------------------------
 // Declarative execution planning
 // ---------------------------------------------------------------------------
-
-/// Whether a tool only observes a resource or may mutate it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResourceAccess {
-    Read,
-    Write,
-}
-
-/// One normalized resource claimed by a tool invocation.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ResourceClaim {
-    pub key: String,
-    pub access: ResourceAccess,
-}
-
-/// Tool-level retry semantics used by the execution journal and recovery UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Idempotency {
-    /// Repeating the call is observationally safe.
-    Safe,
-    /// Repeating the call requires an implementation-provided idempotency key.
-    Keyed,
-    /// The runtime must never retry automatically after execution begins.
-    Unsafe,
-}
-
-/// Scheduling and supervision metadata for one concrete tool invocation.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ToolExecutionPlan {
-    pub resources: Vec<ResourceClaim>,
-    pub idempotency: Idempotency,
-    /// Hard runtime deadline.  Individual tools may use a shorter internal
-    /// timeout; this is the harness-wide backstop.
-    pub timeout_ms: u64,
-}
-
-impl ToolExecutionPlan {
-    pub fn exclusive() -> Self {
-        Self {
-            resources: vec![ResourceClaim {
-                key: "global:tool-execution".to_string(),
-                access: ResourceAccess::Write,
-            }],
-            idempotency: Idempotency::Unsafe,
-            timeout_ms: 300_000,
-        }
-    }
-
-    pub fn read(key: impl Into<String>) -> Self {
-        Self {
-            resources: vec![ResourceClaim {
-                key: key.into(),
-                access: ResourceAccess::Read,
-            }],
-            idempotency: Idempotency::Safe,
-            timeout_ms: 120_000,
-        }
-    }
-
-    pub fn write(key: impl Into<String>) -> Self {
-        Self {
-            resources: vec![ResourceClaim {
-                key: key.into(),
-                access: ResourceAccess::Write,
-            }],
-            idempotency: Idempotency::Unsafe,
-            timeout_ms: 120_000,
-        }
-    }
-}
 
 /// Return true when an execution plan computed after a policy rewrite is no
 /// broader than the plan used by the scheduler. This prevents an Allow hook

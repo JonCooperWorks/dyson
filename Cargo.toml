@@ -2,6 +2,11 @@
 resolver = "2"
 members = [
     "crates/dyson",
+    "crates/dyson-ast",
+    "crates/dyson-core",
+    "crates/dyson-dependency-analysis",
+    "crates/dyson-harness",
+    "crates/dyson-persistence",
 ]
 
 [workspace.package]
@@ -16,6 +21,14 @@ base64 = "0.22"
 ring = "0.17"
 sha2 = "0.10"
 thiserror = "2"
+async-trait = "0.1"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+ignore = "0.4"
+rand = "0.10"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["stream", "json", "query", "rustls-no-provider"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "time"] }
+tree-sitter = "0.26"
 
 [profile.release]
 opt-level = "z"

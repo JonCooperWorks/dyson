@@ -1,0 +1,131 @@
+// ===========================================================================
+// ChatHistory — trait for persisting per-chat conversation history.
+//
+// LEARNING OVERVIEW
+//
+// What this module does:
+//   Defines the ChatHistory trait and its implementations.  Chat history
+//   is per-conversation state — each chat gets its own history that can
+//   be saved, loaded, and rotated (archived on /clear).
+//
+// Module layout:
+//   mod.rs      — ChatHistory trait + factory (this file)
+//   disk.rs     — DiskChatHistory (JSON files on disk)
+//
+// How it differs from Workspace:
+//   - Workspace: agent's long-term identity and memory, shared across
+//     all conversations.  Loaded once on startup.
+//   - ChatHistory: per-chat conversation messages, used by controllers
+//     to persist and restore individual conversations.
+//
+// Configuration:
+//   In dyson.json:
+//   ```json
+//   {
+//     "chat_history": {
+//       "backend": "disk",
+//       "connection_string": "~/.dyson/chats"
+//     }
+//   }
+//   ```
+// ===========================================================================
+
+mod coalesce;
+pub mod disk;
+pub mod migrate;
+
+pub use coalesce::CoalescingPersister;
+pub use disk::DiskChatHistory;
+
+fn resolve_tilde(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return std::path::PathBuf::from(home).join(rest);
+    }
+    if path == "~"
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return std::path::PathBuf::from(home);
+    }
+    std::path::PathBuf::from(path)
+}
+
+use dyson_core::{Message, Result};
+
+// ---------------------------------------------------------------------------
+// ChatHistory trait
+// ---------------------------------------------------------------------------
+
+/// Persistent storage for per-chat conversation history.
+///
+/// Implementors decide where and how messages are stored.  Controllers
+/// call `save()` after each agent turn and `load()` when creating an
+/// agent for a chat.
+pub trait ChatHistory: Send + Sync {
+    /// Save the conversation history for a chat.
+    ///
+    /// Called after each agent turn.  Replaces any previously saved
+    /// history for this chat_id.
+    fn save(&self, chat_id: &str, messages: &[Message]) -> Result<()>;
+
+    /// Load the conversation history for a chat.
+    ///
+    /// Returns the newest (current) conversation.  Returns an empty Vec
+    /// if no history exists for this chat_id.
+    fn load(&self, chat_id: &str) -> Result<Vec<Message>>;
+
+    /// Save an optional display title for a chat.
+    fn save_title(&self, _chat_id: &str, _title: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Load a display title for a chat, when the backend stores one.
+    fn load_title(&self, _chat_id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Remove a generated display title for a chat.
+    fn remove_title(&self, _chat_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Rotate the conversation history for a chat.
+    ///
+    /// Called on /clear.  The current history is archived (not deleted)
+    /// and a fresh conversation starts.  Old history files are preserved
+    /// for review or RAG indexing.
+    fn rotate(&self, chat_id: &str) -> Result<()>;
+
+    /// Hard-delete the current conversation file for a chat.
+    ///
+    /// Callers use this for empty chats that the user dismissed — no
+    /// transcript worth archiving.  Rotated archives for the same
+    /// chat_id are untouched.  Default is a no-op for backends that
+    /// can't express deletion; the disk backend overrides it.
+    fn remove(&self, _chat_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Enumerate the chat IDs that have a current (non-archived) history.
+    ///
+    /// Used by controllers (e.g. the HTTP controller) to repopulate their
+    /// in-memory chat list at startup.  Default returns empty for
+    /// backends that don't support enumeration; the disk backend
+    /// overrides it to scan its directory.
+    fn list(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// Durably append one canonical agent-run event.  Backends that do not
+    /// support execution journaling may keep the default no-op, but the disk
+    /// backend persists JSONL before side-effecting tool calls begin.
+    fn append_run_event(&self, _chat_id: &str, _event: &dyson_harness::RunEvent) -> Result<()> {
+        Ok(())
+    }
+
+    /// Load the canonical run journal for replay, recovery, and evaluations.
+    fn load_run_events(&self, _chat_id: &str) -> Result<Vec<dyson_harness::RunEvent>> {
+        Ok(Vec::new())
+    }
+}

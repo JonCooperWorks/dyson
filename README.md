@@ -25,6 +25,14 @@ sandboxes. This repo is the agent process itself.
 
 ## Architecture
 
+The runtime is split into focused workspace crates. `dyson-core` owns domain
+contracts; `dyson-harness` owns execution, scheduling, replay, and grading;
+`dyson-ast` and `dyson-dependency-analysis` own code-intelligence services;
+`dyson-persistence` owns histories and journals; and the `dyson` package is
+the composition root for providers, tools, controllers, configuration, and
+the CLI. See [Crate architecture](docs/crate-architecture.md) for dependency
+rules and compatibility guarantees.
+
 ```mermaid
 flowchart TB
     user["User / operator"] --> controllers

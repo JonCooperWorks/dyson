@@ -48,47 +48,11 @@ use crate::error::Result;
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::message::{ContentBlock, Message};
 
+pub use dyson_harness::ToolCall;
+
 // ---------------------------------------------------------------------------
 // ToolCall — a fully-formed tool call ready for execution.
 // ---------------------------------------------------------------------------
-
-/// A tool call extracted from the LLM's streaming response.
-///
-/// The agent loop uses these to look up the tool, run it through the
-/// sandbox, execute it, and build a tool_result message.
-#[derive(Debug, Clone)]
-pub struct ToolCall {
-    /// Unique ID for this tool call (matches the LLM's tool_use block).
-    ///
-    /// The corresponding `tool_result` must reference this same ID so the
-    /// LLM can match results to calls.
-    pub id: String,
-
-    /// Tool name (e.g., "bash").
-    pub name: String,
-
-    /// The JSON input for the tool (e.g., `{"command": "ls -la"}`).
-    pub input: serde_json::Value,
-}
-
-impl ToolCall {
-    /// Create a new tool call with a generated ID.
-    ///
-    /// Useful for tests and programmatic construction.  The ID is derived
-    /// from the tool name so it's deterministic but unique enough for
-    /// single-turn test scenarios.
-    pub fn new(name: impl Into<String>, input: serde_json::Value) -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let name = name.into();
-        Self {
-            id: format!("call_{}_{}", name, n),
-            name,
-            input,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // process_stream — the main entry point.

@@ -4,6 +4,11 @@ Dyson's agent loop exposes a stable execution protocol for orchestration,
 recovery, evaluation, and observability. The protocol is intentionally
 separate from UI events and provider-specific stream formats.
 
+The protocol, execution declarations, scheduler, replay logic, and
+deterministic grader are owned by the standalone `dyson-harness` crate.
+Provider/controller code depends on that crate through the compatibility
+façade at `dyson::agent`; the harness never depends back on the application.
+
 ## Run outcomes
 
 `Agent::run_detailed` returns a `RunOutcome` with a unique run id, a typed

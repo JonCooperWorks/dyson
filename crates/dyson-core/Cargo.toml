@@ -1,0 +1,12 @@
+[package]
+name = "dyson-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Provider-neutral domain contracts and error model for Dyson"
+
+[dependencies]
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
