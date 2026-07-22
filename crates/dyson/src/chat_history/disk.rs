@@ -48,6 +48,7 @@ const MEDIA_REF_PREFIX: &str = "@media/";
 pub struct DiskChatHistory {
     /// Root directory holding every chat subdir.
     dir: PathBuf,
+    journal_lock: std::sync::Mutex<()>,
 }
 
 impl DiskChatHistory {
@@ -60,7 +61,10 @@ impl DiskChatHistory {
         if let Err(e) = crate::chat_history::migrate::migrate(&dir) {
             tracing::warn!(error = %e, dir = %dir.display(), "chats migration failed");
         }
-        Ok(Self { dir })
+        Ok(Self {
+            dir,
+            journal_lock: std::sync::Mutex::new(()),
+        })
     }
 
     /// Create from a connection string (path with ~ expansion).
@@ -84,6 +88,10 @@ impl DiskChatHistory {
 
     fn archives_dir(&self, chat_id: &str) -> PathBuf {
         self.chat_root(chat_id).join("archives")
+    }
+
+    fn run_events_path(&self, chat_id: &str) -> PathBuf {
+        self.chat_root(chat_id).join("run-events.jsonl")
     }
 
     /// Directory for externalised media files for a given chat.
@@ -240,6 +248,99 @@ impl ChatHistory for DiskChatHistory {
         // for Telegram numeric ids the tiebreak is merely stable.
         rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
         Ok(rows.into_iter().map(|(id, _)| id).collect())
+    }
+
+    fn append_run_event(
+        &self,
+        chat_id: &str,
+        event: &crate::agent::protocol::RunEvent,
+    ) -> Result<()> {
+        use std::io::{Read as _, Seek as _, Write as _};
+
+        let _guard = self.journal_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let root = self.chat_root(chat_id);
+        std::fs::create_dir_all(&root)?;
+        let path = self.run_events_path(chat_id);
+        let creates_journal = !path.exists();
+        let bytes = serde_json::to_vec(event)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path)?;
+        // A power loss can leave the final JSONL record partially written.
+        // Repair only that uncommitted tail before appending so one torn write
+        // cannot poison all later replay. Earlier malformed records remain a
+        // hard error because silently skipping committed history is unsafe.
+        let file_len = file.metadata()?.len();
+        if file_len > 0 {
+            let mut final_byte = [0_u8; 1];
+            file.seek(std::io::SeekFrom::End(-1))?;
+            file.read_exact(&mut final_byte)?;
+            if final_byte[0] != b'\n' {
+                // Search backwards in bounded chunks. Reading the whole
+                // append-only journal on every event would become O(n²).
+                let mut cursor = file_len;
+                let mut committed_len = 0;
+                let mut buffer = vec![0_u8; 8192];
+                while cursor > 0 {
+                    let start = cursor.saturating_sub(buffer.len() as u64);
+                    let count = (cursor - start) as usize;
+                    file.seek(std::io::SeekFrom::Start(start))?;
+                    file.read_exact(&mut buffer[..count])?;
+                    if let Some(position) = buffer[..count].iter().rposition(|byte| *byte == b'\n')
+                    {
+                        committed_len = start + position as u64 + 1;
+                        break;
+                    }
+                    cursor = start;
+                }
+                file.set_len(committed_len)?;
+            }
+        }
+        file.seek(std::io::SeekFrom::End(0))?;
+        file.write_all(&bytes)?;
+        file.write_all(b"\n")?;
+        file.sync_data()?;
+        #[cfg(unix)]
+        if creates_journal {
+            // Persist the directory entry as well as the file contents. This
+            // matters for the first event if the host loses power immediately
+            // after `tool_started` is acknowledged.
+            std::fs::File::open(&root)?.sync_all()?;
+        }
+        Ok(())
+    }
+
+    fn load_run_events(&self, chat_id: &str) -> Result<Vec<crate::agent::protocol::RunEvent>> {
+        let path = self.run_events_path(chat_id);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = std::fs::read_to_string(&path)?;
+        let ends_with_newline = content.ends_with('\n');
+        let mut events = Vec::new();
+        let lines: Vec<_> = content.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str(line) {
+                Ok(event) => events.push(event),
+                Err(error) if index + 1 == lines.len() && !ends_with_newline => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "ignoring torn final run-journal record"
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(events)
     }
 }
 
@@ -759,6 +860,68 @@ mod tests {
         assert!(ids.contains("a"));
         assert!(ids.contains("b"));
         assert!(!ids.contains("c"), "archive-only chats should not list");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_event_journal_round_trips_and_survives_transcript_rotation() {
+        use crate::agent::protocol::{RunEvent, RunEventKind, RunId};
+
+        let (dir, store) = temp_store("run_events");
+        let event = RunEvent::new(1, RunId::new(), 1, RunEventKind::RunStarted);
+        store.save("chat_j", &[Message::user("hello")]).unwrap();
+        store.append_run_event("chat_j", &event).unwrap();
+        assert_eq!(
+            store.load_run_events("chat_j").unwrap(),
+            vec![event.clone()]
+        );
+
+        store.rotate("chat_j").unwrap();
+        // Compaction rotates transcripts during an active run. Keeping the
+        // journal in place prevents one canonical trajectory from being split
+        // across an archive and the live file.
+        assert_eq!(store.load_run_events("chat_j").unwrap(), vec![event]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_event_journal_ignores_then_repairs_a_torn_tail() {
+        use crate::agent::protocol::{RunEvent, RunEventKind, RunId};
+
+        let (dir, store) = temp_store("run_events_torn_tail");
+        let first = RunEvent::new(1, RunId::new(), 1, RunEventKind::RunStarted);
+        store.append_run_event("chat_j", &first).unwrap();
+        let path = dir.join("chat_j").join("run-events.jsonl");
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"schema_version\":")
+            .unwrap();
+
+        assert_eq!(store.load_run_events("chat_j").unwrap(), vec![first]);
+
+        let second = RunEvent::new(2, RunId::new(), 2, RunEventKind::RunStarted);
+        store.append_run_event("chat_j", &second).unwrap();
+        assert_eq!(store.load_run_events("chat_j").unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transcript_rotation_is_a_noop_for_a_journal_only_chat() {
+        use crate::agent::protocol::{RunEvent, RunEventKind, RunId};
+
+        let (dir, store) = temp_store("run_events_only");
+        store
+            .append_run_event(
+                "chat_j",
+                &RunEvent::new(1, RunId::new(), 1, RunEventKind::RunStarted),
+            )
+            .unwrap();
+        store.rotate("chat_j").unwrap();
+        assert_eq!(store.load_run_events("chat_j").unwrap().len(), 1);
+        assert!(!dir.join("chat_j").join("archives").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

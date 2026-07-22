@@ -132,10 +132,6 @@ impl Agent {
         self.conversation.turn_count += 1;
         self.conversation.budget_warning_fired = false;
 
-        self.fire_dreams(DreamEvent::TurnComplete {
-            turn_count: self.conversation.turn_count,
-        });
-
         let mut final_text = String::new();
         let mut hit_max_iterations = false;
         let mut any_text_streamed = false;
@@ -166,6 +162,7 @@ impl Agent {
             // Check for cooperative cancellation (used by /stop).
             if self.tool_context.cancellation.is_cancelled() {
                 tracing::info!("agent cancelled — breaking loop");
+                self.last_run_status = super::protocol::RunStatus::Cancelled;
                 break;
             }
 
@@ -189,13 +186,33 @@ impl Agent {
                 stop_reason,
                 cost_metadata,
             ) = loop {
+                self.emit_run_event(super::protocol::RunEventKind::LlmAttemptStarted {
+                    iteration,
+                    attempt: empty_attempts + stream_error_attempts,
+                });
                 let response = match self
                     .stream_with_retry(&skill_fragments, &mut recovered_this_turn, output)
                     .await
                 {
                     StreamResult::Response(r) => r,
-                    StreamResult::Recovered => continue 'iter,
-                    StreamResult::Error(e) => return Err(e),
+                    StreamResult::Recovered(e) => {
+                        self.emit_run_event(super::protocol::RunEventKind::LlmAttemptFailed {
+                            iteration,
+                            error_kind: llm_error_kind(&e).to_string(),
+                            retryable: crate::llm::is_retryable(&e),
+                            after_tool_use: false,
+                        });
+                        continue 'iter;
+                    }
+                    StreamResult::Error(e) => {
+                        self.emit_run_event(super::protocol::RunEventKind::LlmAttemptFailed {
+                            iteration,
+                            error_kind: llm_error_kind(&e).to_string(),
+                            retryable: crate::llm::is_retryable(&e),
+                            after_tool_use: false,
+                        });
+                        return Err(e);
+                    }
                 };
 
                 let tool_mode = response.tool_mode;
@@ -272,8 +289,22 @@ impl Agent {
                         stream_error_attempts += 1;
                         continue;
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        self.emit_run_event(super::protocol::RunEventKind::LlmAttemptFailed {
+                            iteration,
+                            error_kind: llm_error_kind(&e).to_string(),
+                            retryable: crate::llm::is_retryable(&e),
+                            after_tool_use: emitted_tool_use,
+                        });
+                        return Err(e);
+                    }
                 };
+
+                self.emit_run_event(super::protocol::RunEventKind::LlmAttemptCompleted {
+                    iteration,
+                    output_tokens,
+                    tool_calls: tool_calls.len(),
+                });
 
                 // Empty responses (no text, no tool calls) can happen
                 // transiently — retry per the same policy we use for network
@@ -335,6 +366,7 @@ impl Agent {
 
             if let Err(e) = self.conversation.token_budget.record(output_tokens) {
                 self.conversation.messages.push(assistant_msg);
+                self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
                 tracing::warn!(
                     used = self.conversation.token_budget.output_tokens_used,
                     "token budget exceeded — stopping agent loop"
@@ -453,6 +485,7 @@ impl Agent {
         }
 
         if hit_max_iterations {
+            self.last_run_status = super::protocol::RunStatus::IterationLimit;
             final_text = self
                 .summarize_on_max_iterations(&skill_fragments, output)
                 .await?;
@@ -462,6 +495,12 @@ impl Agent {
         }
 
         output.flush()?;
+        // A TurnComplete snapshot must include the assistant's final response
+        // and every committed tool result.  Firing this at turn start taught
+        // memory dreams from incomplete conversations.
+        self.fire_dreams(DreamEvent::TurnComplete {
+            turn_count: self.conversation.turn_count,
+        });
         Ok(final_text)
     }
 
@@ -697,7 +736,7 @@ impl Agent {
             self.conversation.messages.push(msg);
         }
         *recovered_this_turn = true;
-        StreamResult::Recovered
+        StreamResult::Recovered(err)
     }
 
     /// Log a summary of the assistant response.
@@ -716,6 +755,18 @@ impl Agent {
                 "assistant response (no text)"
             );
         }
+    }
+}
+
+fn llm_error_kind(error: &crate::error::DysonError) -> &'static str {
+    match error {
+        crate::error::DysonError::Llm(_) => "llm",
+        crate::error::DysonError::LlmRateLimit { .. } => "provider_rate_limit",
+        crate::error::DysonError::LlmOverloaded { .. } => "provider_overloaded",
+        crate::error::DysonError::RateLimit { .. } => "local_rate_limit",
+        crate::error::DysonError::Http(_) => "transport",
+        crate::error::DysonError::Cancelled => "cancelled",
+        _ => "internal",
     }
 }
 

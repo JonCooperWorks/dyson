@@ -36,7 +36,8 @@ use std::time::Instant;
 
 use crate::controller::Output;
 use crate::error::DysonError;
-use crate::tool::ToolOutput;
+use crate::message::{Artefact, Message};
+use crate::tool::{CheckpointEvent, ToolOutput};
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -45,13 +46,44 @@ use crate::tool::ToolOutput;
 /// One variant per `Output` method, capturing the arguments that were passed.
 #[derive(Debug, Clone)]
 pub enum OutputEvent {
-    TextDelta { text: String },
-    ThinkingDelta { text: String },
-    ToolUseStart { id: String, name: String },
+    TextDelta {
+        text: String,
+    },
+    ThinkingDelta {
+        text: String,
+    },
+    ToolUseStart {
+        id: String,
+        name: String,
+    },
     ToolUseComplete,
-    ToolResult { content: String, is_error: bool },
-    SendFile { path: PathBuf },
-    Error { message: String },
+    ToolResult {
+        content: String,
+        is_error: bool,
+    },
+    SendFile {
+        path: PathBuf,
+    },
+    Checkpoint {
+        message: String,
+        progress: Option<f32>,
+    },
+    Artefact {
+        title: String,
+    },
+    UserMessage {
+        message: Message,
+    },
+    TypingIndicator {
+        visible: bool,
+    },
+    CompactionStarted {
+        estimated_tokens: usize,
+        threshold: usize,
+    },
+    Error {
+        message: String,
+    },
     Flush,
 }
 
@@ -212,6 +244,45 @@ impl Output for RecordingOutput {
     fn send_file(&mut self, path: &Path) -> std::result::Result<(), DysonError> {
         self.record(OutputEvent::SendFile {
             path: path.to_path_buf(),
+        });
+        Ok(())
+    }
+
+    fn checkpoint(&mut self, event: &CheckpointEvent) -> std::result::Result<(), DysonError> {
+        self.record(OutputEvent::Checkpoint {
+            message: event.message.clone(),
+            progress: event.progress,
+        });
+        Ok(())
+    }
+
+    fn send_artefact(&mut self, artefact: &Artefact) -> std::result::Result<(), DysonError> {
+        self.record(OutputEvent::Artefact {
+            title: artefact.title.clone(),
+        });
+        Ok(())
+    }
+
+    fn user_message(&mut self, message: &Message) -> std::result::Result<(), DysonError> {
+        self.record(OutputEvent::UserMessage {
+            message: message.clone(),
+        });
+        Ok(())
+    }
+
+    fn typing_indicator(&mut self, visible: bool) -> std::result::Result<(), DysonError> {
+        self.record(OutputEvent::TypingIndicator { visible });
+        Ok(())
+    }
+
+    fn compacting_started(
+        &mut self,
+        estimated_tokens: usize,
+        threshold: usize,
+    ) -> std::result::Result<(), DysonError> {
+        self.record(OutputEvent::CompactionStarted {
+            estimated_tokens,
+            threshold,
         });
         Ok(())
     }

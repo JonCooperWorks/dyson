@@ -77,6 +77,18 @@ impl Tool for ReadFileTool {
         })
     }
 
+    fn execution_plan(
+        &self,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> super::ToolExecutionPlan {
+        input
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(|path| super::ToolExecutionPlan::read(super::file_resource_key(ctx, path)))
+            .unwrap_or_else(super::ToolExecutionPlan::exclusive)
+    }
+
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let file_path = crate::tool::required_str(input, "file_path", "read_file")?;
 

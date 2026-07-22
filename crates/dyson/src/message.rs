@@ -293,16 +293,18 @@ pub struct MessageCostMetadata {
 impl ContentBlock {
     /// Rough offline token estimate for this content block.
     ///
-    /// Uses whitespace splitting (consistent with `stream_handler.rs`) to
-    /// approximate token count without calling a tokenizer.  Good enough
-    /// for deciding when to compact — not meant for billing accuracy.
+    /// Uses a conservative hybrid of word count and Unicode character count.
+    /// Whitespace-only estimates badly undercount source code, JSON, URLs,
+    /// minified text, and CJK content; the `chars / 4` floor keeps compaction
+    /// decisions safely below provider context limits without binding the
+    /// harness to one model's tokenizer.
     ///
     /// For `ToolUse` blocks, estimates based on the JSON byte length
     /// divided by 4 (average bytes per token) to avoid serializing the
     /// entire `serde_json::Value` tree on every call.
     pub fn estimate_tokens(&self) -> usize {
         match self {
-            Self::Text { text } => text.split_whitespace().count().max(1),
+            Self::Text { text } => estimate_text_tokens(text),
             Self::ToolUse { id, name, input } => {
                 let input_token_estimate = estimate_json_tokens(input);
                 name.len() / 4 + 1 + id.len() / 4 + 1 + input_token_estimate + 10 // JSON structure overhead
@@ -312,9 +314,9 @@ impl ContentBlock {
                 content,
                 ..
             } => {
-                tool_use_id.split_whitespace().count() + content.split_whitespace().count() + 5 // JSON structure overhead
+                estimate_text_tokens(tool_use_id) + estimate_text_tokens(content) + 5 // JSON structure overhead
             }
-            Self::Thinking { thinking } => thinking.split_whitespace().count().max(1),
+            Self::Thinking { thinking } => estimate_text_tokens(thinking),
             Self::Image { data, .. } => {
                 // Anthropic charges ~1600 tokens for a 1568x1568 image.
                 // Rough heuristic based on base64 data size.
@@ -324,7 +326,7 @@ impl ContentBlock {
             Self::Document { extracted_text, .. } => {
                 // Use the extracted text for token estimation since that's
                 // what most providers will actually consume.
-                extracted_text.split_whitespace().count().max(1)
+                estimate_text_tokens(extracted_text)
             }
             // Artefact blocks are UI-only and stripped before hitting the
             // provider (see message_to_anthropic / message_to_openai), so
@@ -332,6 +334,13 @@ impl ContentBlock {
             Self::Artefact { .. } => 0,
         }
     }
+}
+
+/// Conservative tokenizer-independent estimate for arbitrary text.
+pub(crate) fn estimate_text_tokens(text: &str) -> usize {
+    let words = text.split_whitespace().count();
+    let character_floor = text.chars().count().div_ceil(4);
+    words.max(character_floor).max(1)
 }
 
 /// Estimate token count from a `serde_json::Value` without serializing it.
@@ -343,7 +352,7 @@ pub(crate) fn estimate_json_tokens(value: &serde_json::Value) -> usize {
     match value {
         serde_json::Value::Null | serde_json::Value::Bool(_) => 1,
         serde_json::Value::Number(_) => 1,
-        serde_json::Value::String(s) => s.split_whitespace().count().max(1),
+        serde_json::Value::String(s) => estimate_text_tokens(s),
         serde_json::Value::Array(arr) => arr.iter().map(estimate_json_tokens).sum::<usize>() + 2,
         serde_json::Value::Object(map) => {
             map.iter()
@@ -516,7 +525,7 @@ mod tests {
         let block = ContentBlock::Text {
             text: "hello world foo bar baz".into(),
         };
-        assert_eq!(block.estimate_tokens(), 5);
+        assert_eq!(block.estimate_tokens(), 6);
     }
 
     #[test]
@@ -575,7 +584,13 @@ mod tests {
                 text: "four five".into(),
             },
         ]);
-        // 3 + 2 words + 4 overhead = 9
-        assert_eq!(msg.estimate_tokens(), 9);
+        // Conservative character floors plus message framing overhead.
+        assert_eq!(msg.estimate_tokens(), 11);
+    }
+
+    #[test]
+    fn estimate_tokens_does_not_undercount_unbroken_or_cjk_text() {
+        assert_eq!(super::estimate_text_tokens("abcdefghijklmnop"), 4);
+        assert_eq!(super::estimate_text_tokens("这是没有空格的中文文本"), 3);
     }
 }

@@ -103,6 +103,22 @@ pub trait ChatHistory: Send + Sync {
     fn list(&self) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
+
+    /// Durably append one canonical agent-run event.  Backends that do not
+    /// support execution journaling may keep the default no-op, but the disk
+    /// backend persists JSONL before side-effecting tool calls begin.
+    fn append_run_event(
+        &self,
+        _chat_id: &str,
+        _event: &crate::agent::protocol::RunEvent,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Load the canonical run journal for replay, recovery, and evaluations.
+    fn load_run_events(&self, _chat_id: &str) -> Result<Vec<crate::agent::protocol::RunEvent>> {
+        Ok(Vec::new())
+    }
 }
 
 // ---------------------------------------------------------------------------

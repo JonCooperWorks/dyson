@@ -58,9 +58,6 @@ impl super::Agent {
             }
         }
 
-        // Fire compaction-triggered dreams (learning synthesis) in the background.
-        self.fire_dreams(super::dream::DreamEvent::Compaction);
-
         let system_prompt = std::sync::Arc::clone(&self.system_prompt);
         tracing::info!(
             messages = self.conversation.messages.len(),
@@ -175,13 +172,18 @@ impl super::Agent {
         // estimates no longer describe a prefix of it.
         self.conversation.invalidate_token_estimates();
 
-        self.conversation.token_budget.reset();
-
         tracing::info!(
             old_messages = old_count,
             new_messages = self.conversation.messages.len(),
             "context compacted"
         );
+        self.emit_run_event(super::protocol::RunEventKind::ContextCompacted {
+            old_messages: old_count,
+            new_messages: self.conversation.messages.len(),
+        });
+        // The event is semantically "after compaction" and its snapshot must
+        // contain the compacted transcript, not the pre-compaction history.
+        self.fire_dreams(super::dream::DreamEvent::Compaction);
         Ok(())
     }
 
@@ -361,15 +363,15 @@ impl super::Agent {
     /// Estimate the total token count of the current context that would be
     /// sent to the LLM (messages + system prompt + tool definitions).
     ///
-    /// This is a local/offline estimate using whitespace splitting — no API
-    /// call needed.  Used to decide whether to compact before the next call.
+    /// This is a conservative, tokenizer-independent local estimate — no API
+    /// call needed. Used to decide whether to compact before the next call.
     ///
     /// Message estimates are cached incrementally (`&mut self`): messages
     /// are immutable once pushed, so each agent-loop iteration only pays
     /// for the messages appended since the previous iteration instead of
     /// rescanning the entire history.
     pub(super) fn estimate_context_tokens(&mut self, system_prompt: &str) -> usize {
-        let system_tokens = system_prompt.split_whitespace().count();
+        let system_tokens = crate::message::estimate_text_tokens(system_prompt);
         let message_tokens = self.conversation.estimated_message_tokens();
         system_tokens + message_tokens + self.tool_registry.cached_tokens
     }

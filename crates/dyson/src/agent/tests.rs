@@ -1531,8 +1531,8 @@ async fn compact_preserves_head_and_tail() {
 
     let config = CompactionConfig {
         protect_head: 2,
-        // Each message is ~5 tokens.  Protect last 2 messages (~10 tokens).
-        protect_tail_tokens: 15,
+        // Conservative estimator prices these at 8–9 tokens each.
+        protect_tail_tokens: 20,
         ..CompactionConfig::default()
     };
 
@@ -1788,7 +1788,7 @@ async fn compact_structured_summary_prompt() {
 }
 
 #[tokio::test]
-async fn compact_resets_token_budget() {
+async fn compact_preserves_lifetime_token_budget() {
     let messages = vec![
         Message::user("hello"),
         Message::assistant(vec![ContentBlock::Text { text: "hi".into() }]),
@@ -1823,9 +1823,9 @@ async fn compact_resets_token_budget() {
 
     agent.compact(&mut output).await.unwrap();
 
-    assert_eq!(agent.conversation.token_budget.output_tokens_used, 0);
+    assert_eq!(agent.conversation.token_budget.output_tokens_used, 50);
     assert_eq!(agent.conversation.token_budget.input_tokens_used, 0);
-    assert_eq!(agent.conversation.token_budget.llm_calls, 0);
+    assert_eq!(agent.conversation.token_budget.llm_calls, 1);
 }
 
 #[tokio::test]
@@ -2701,7 +2701,7 @@ fn tail_boundary_partial() {
         vec![],
         CompactionConfig {
             protect_head: 1,
-            protect_tail_tokens: 10, // very small budget
+            protect_tail_tokens: 25, // fits a suffix, but not the whole conversation
             ..CompactionConfig::default()
         },
     );
@@ -3189,7 +3189,7 @@ async fn token_estimate_cache_matches_naive_recount_across_mutations() {
     let (mut agent, _output) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
 
     fn naive(agent: &Agent, system: &str) -> usize {
-        system.split_whitespace().count()
+        crate::message::estimate_text_tokens(system)
             + agent
                 .conversation
                 .messages
@@ -3289,7 +3289,7 @@ async fn token_estimate_stays_correct_through_compaction() {
 
     agent.compact(&mut output).await.unwrap();
 
-    let naive: usize = sys.split_whitespace().count()
+    let naive: usize = crate::message::estimate_text_tokens(sys)
         + agent
             .conversation
             .messages

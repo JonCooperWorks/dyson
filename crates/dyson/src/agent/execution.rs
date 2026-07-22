@@ -16,7 +16,7 @@ use crate::error::{DysonError, Result};
 use crate::llm::ToolDefinition;
 use crate::message::Message;
 use crate::sandbox::SandboxDecision;
-use crate::tool::{ToolContext, ToolOutput};
+use crate::tool::{ToolContext, ToolExecutionPlan, ToolOutput};
 
 use super::Agent;
 use super::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
@@ -34,13 +34,17 @@ impl Agent {
         tool_name: &str,
         input: serde_json::Value,
     ) -> Result<ToolOutput> {
-        if let Err(e) = self.limiter.check(tool_name) {
-            return Ok(ToolOutput::error(e.to_string()));
-        }
-        let call = ToolCall::new(tool_name, input);
-        self.execute_tool_call_timed(&call)
-            .await
-            .map(|(output, _)| output)
+        self.begin_run_protocol();
+        let result = if let Err(e) = self.limiter.check(tool_name) {
+            Ok(ToolOutput::error(e.to_string()))
+        } else {
+            let call = ToolCall::new(tool_name, input);
+            self.execute_tool_call_timed(&call)
+                .await
+                .map(|(output, _)| output)
+        };
+        self.finish_run_protocol(&result);
+        result
     }
 
     /// Check rate limits, analyze dependencies, and execute tool calls in phases.
@@ -50,6 +54,7 @@ impl Agent {
         output: &mut dyn Output,
     ) -> Result<()> {
         let mut limited_calls: Vec<usize> = Vec::with_capacity(tool_calls.len());
+        let mut persisted_rate_limit_result = false;
         for (i, call) in tool_calls.iter().enumerate() {
             if let Err(e) = self.limiter.check(&call.name) {
                 tracing::warn!(tool = call.name, error = %e, "tool call rate-limited");
@@ -58,9 +63,13 @@ impl Agent {
                     &e.to_string(),
                     true,
                 ));
+                persisted_rate_limit_result = true;
             } else {
                 limited_calls.push(i);
             }
+        }
+        if persisted_rate_limit_result {
+            self.persist();
         }
 
         let allowed_calls: Vec<&ToolCall> = limited_calls.iter().map(|&i| &tool_calls[i]).collect();
@@ -69,7 +78,17 @@ impl Agent {
             return Ok(());
         }
 
-        let phases = DependencyAnalyzer::analyze(&allowed_calls);
+        let plans: Vec<_> = allowed_calls
+            .iter()
+            .map(|call| {
+                self.tool_registry
+                    .get(&call.name)
+                    .map_or_else(crate::tool::ToolExecutionPlan::exclusive, |tool| {
+                        tool.execution_plan(&call.input, &self.tool_context)
+                    })
+            })
+            .collect();
+        let phases = DependencyAnalyzer::analyze_plans(&plans);
 
         for phase in phases {
             match phase {
@@ -242,7 +261,14 @@ impl Agent {
                     ));
                 }
                 HookDecision::Modify { input } => {
-                    effective_call = ToolCall::new(&call.name, input);
+                    // Input rewriting must not mint a second protocol id: the
+                    // provider is waiting for a result tied to the original
+                    // tool_use id, and journal/UI correlation uses it too.
+                    effective_call = ToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        input,
+                    };
                     &effective_call
                 }
                 HookDecision::Allow => call,
@@ -327,6 +353,14 @@ impl Agent {
     /// 3. On Deny: return error ToolOutput
     /// 4. On Redirect: look up redirected tool → run it → `sandbox.after()`
     async fn execute_tool_call(&self, call: &ToolCall) -> Result<ToolOutput> {
+        use sha2::Digest as _;
+        let input_bytes = serde_json::to_vec(&call.input).unwrap_or_default();
+        let input_sha256 = format!("{:x}", sha2::Sha256::digest(input_bytes));
+        self.emit_run_event(super::protocol::RunEventKind::ToolRequested {
+            tool_use_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            input_sha256,
+        });
         // Per-call clone of the tool context so each tool sees its own
         // `tool_use_id`.  Cloning is cheap (Arcs and small primitives)
         // and is the only safe way to stamp per-call state when the
@@ -336,6 +370,12 @@ impl Agent {
         // event with its owning subagent box.
         let mut ctx = self.tool_context.clone();
         ctx.tool_use_id = Some(call.id.clone());
+        let scheduled_plan = self
+            .tool_registry
+            .get(&call.name)
+            .map_or_else(ToolExecutionPlan::exclusive, |tool| {
+                tool.execution_plan(&call.input, &ctx)
+            });
         // -- Ask the sandbox --
         //
         // Sandbox and tool-lookup errors are converted to error ToolOutputs
@@ -351,7 +391,10 @@ impl Agent {
         };
 
         match decision {
-            SandboxDecision::Allow { input } => self.run_named_tool(&call.name, &input, &ctx).await,
+            SandboxDecision::Allow { input } => {
+                self.run_named_tool(&call.name, &input, &ctx, &scheduled_plan)
+                    .await
+            }
 
             SandboxDecision::Deny { reason } => {
                 tracing::info!(
@@ -371,7 +414,8 @@ impl Agent {
                 );
                 // The redirected call keeps the original `tool_use_id` — the
                 // sandbox didn't change which message id the LLM is waiting on.
-                self.run_named_tool(&tool_name, &input, &ctx).await
+                self.run_named_tool(&tool_name, &input, &ctx, &scheduled_plan)
+                    .await
             }
         }
     }
@@ -384,22 +428,87 @@ impl Agent {
         name: &str,
         input: &serde_json::Value,
         ctx: &ToolContext,
+        scheduled_plan: &ToolExecutionPlan,
     ) -> Result<ToolOutput> {
         let Some(tool) = self.tool_registry.get(name) else {
             tracing::warn!(tool = name, "unknown tool");
             return Ok(ToolOutput::error(format!("Unknown tool '{name}'")));
         };
 
-        let mut tool_output = match tool.run(input, ctx).await {
-            Ok(out) => out,
-            Err(e) => ToolOutput::error(e.to_string()),
+        if let Err(error) = crate::tool::validate_tool_input(&tool.input_schema(), input) {
+            tracing::warn!(tool = name, error, "tool input failed schema validation");
+            return Ok(ToolOutput::error(format!(
+                "Invalid input for tool '{name}': {error}"
+            )));
+        }
+
+        let plan = tool.execution_plan(input, ctx);
+        if !crate::tool::execution_plan_covers(scheduled_plan, &plan) {
+            tracing::warn!(
+                tool = name,
+                "sandbox rewrite expanded the scheduled execution plan"
+            );
+            return Ok(ToolOutput::error(format!(
+                "Policy rewrite for '{name}' changed its resource or side-effect footprint; execution was withheld to prevent an unsafe scheduling race"
+            )));
+        }
+        self.emit_run_event(super::protocol::RunEventKind::ToolAuthorized {
+            tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
+            effective_tool_name: name.to_string(),
+            idempotency: plan.idempotency,
+            timeout_ms: plan.timeout_ms,
+        });
+        let idempotency_key = format!(
+            "{}:{}",
+            self.active_run_id.0,
+            ctx.tool_use_id.as_deref().unwrap_or("direct")
+        );
+        self.emit_run_event(super::protocol::RunEventKind::ToolStarted {
+            tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
+            effective_tool_name: name.to_string(),
+            idempotency_key,
+        });
+
+        let started = std::time::Instant::now();
+        let mut tool_output = match tokio::time::timeout(
+            std::time::Duration::from_millis(plan.timeout_ms.max(1)),
+            tool.run(input, ctx),
+        )
+        .await
+        {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => ToolOutput::error(e.to_string()),
+            Err(_) => {
+                self.emit_run_event(super::protocol::RunEventKind::ToolOutcomeUnknown {
+                    tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
+                    effective_tool_name: name.to_string(),
+                    reason: format!("execution exceeded {} ms deadline", plan.timeout_ms),
+                });
+                return Ok(ToolOutput::error(format!(
+                    "Tool '{name}' exceeded its {} ms execution deadline; side-effect outcome is unknown and the runtime will not retry it automatically",
+                    plan.timeout_ms
+                )));
+            }
         };
 
         if let Err(e) = self.sandbox.after(name, input, &mut tool_output).await {
             tracing::warn!(tool = name, error = %e, "sandbox after-hook failed");
+            // Post-processing commonly performs redaction.  Returning the raw
+            // output on failure would turn an observability problem into a
+            // secret-disclosure path, so fail closed.
+            tool_output = ToolOutput::error(format!(
+                "Sandbox post-processing failed for '{name}'; output withheld"
+            ));
         }
 
         self.notify_after_tool(name, &tool_output).await;
+
+        self.emit_run_event(super::protocol::RunEventKind::ToolFinished {
+            tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
+            effective_tool_name: name.to_string(),
+            is_error: tool_output.is_error,
+            duration_ms: started.elapsed().as_millis() as u64,
+        });
 
         Ok(tool_output)
     }

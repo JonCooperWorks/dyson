@@ -90,6 +90,7 @@ mod silent_output;
 pub use silent_output::SilentOutput;
 mod r#loop;
 mod persistence;
+pub mod protocol;
 mod sliding_window;
 mod state;
 pub mod stream_handler;
@@ -225,6 +226,11 @@ pub struct Agent {
     /// or kill doesn't lose the conversation — the end-of-turn save is
     /// unreachable if the tokio task gets aborted mid-run.
     persist_hook: Option<PersistHook>,
+
+    /// Identity and monotonic sequence for the currently executing run.
+    active_run_id: protocol::RunId,
+    event_sequence: std::sync::Mutex<u64>,
+    last_run_status: protocol::RunStatus,
 }
 
 /// Callback fired whenever the agent's message history changes.
@@ -436,6 +442,9 @@ impl Agent {
             transcriber,
             advisor_prompt,
             persist_hook: None,
+            active_run_id: protocol::RunId::new(),
+            event_sequence: std::sync::Mutex::new(0),
+            last_run_status: protocol::RunStatus::Completed,
         })
     }
 
@@ -898,7 +907,10 @@ impl Agent {
         // Append the user's message to history.
         self.conversation.messages.push(Message::user(user_input));
         self.persist();
-        self.run_inner(output).await
+        self.begin_run_protocol();
+        let result = self.run_inner(output).await;
+        self.finish_run_protocol(&result);
+        result
     }
 
     /// Run the agent loop with pre-built content blocks (text + images).
@@ -919,7 +931,10 @@ impl Agent {
             .messages
             .push(Message::user_multimodal(blocks));
         self.persist();
-        self.run_inner(output).await
+        self.begin_run_protocol();
+        let result = self.run_inner(output).await;
+        self.finish_run_protocol(&result);
+        result
     }
 
     /// Run the agent loop with text and raw media attachments.
@@ -967,7 +982,46 @@ impl Agent {
             .messages
             .push(Message::user_multimodal(blocks));
         self.persist();
-        self.run_inner(output).await
+        self.begin_run_protocol();
+        let result = self.run_inner(output).await;
+        self.finish_run_protocol(&result);
+        result
+    }
+
+    /// Execute a turn and return a typed outcome suitable for orchestration,
+    /// evaluations, and APIs that must distinguish cancellation from success.
+    pub async fn run_detailed(
+        &mut self,
+        user_input: &str,
+        output: &mut dyn Output,
+    ) -> Result<protocol::RunOutcome> {
+        let before_input = self.conversation.token_budget.input_tokens_used;
+        let before_output = self.conversation.token_budget.output_tokens_used;
+        let before_calls = self.conversation.token_budget.llm_calls;
+        let final_text = self.run(user_input, output).await?;
+        Ok(protocol::RunOutcome {
+            run_id: self.active_run_id.clone(),
+            status: self.last_run_status,
+            final_text,
+            usage: protocol::RunUsage {
+                input_tokens: self
+                    .conversation
+                    .token_budget
+                    .input_tokens_used
+                    .saturating_sub(before_input),
+                output_tokens: self
+                    .conversation
+                    .token_budget
+                    .output_tokens_used
+                    .saturating_sub(before_output),
+                llm_calls: self
+                    .conversation
+                    .token_budget
+                    .llm_calls
+                    .saturating_sub(before_calls),
+            },
+            warnings: Vec::new(),
+        })
     }
 }
 

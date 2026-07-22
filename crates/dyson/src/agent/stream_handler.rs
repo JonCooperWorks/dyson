@@ -133,6 +133,7 @@ pub async fn process_stream(
     let mut api_output_tokens: Option<usize> = None;
     let mut typing_cleared = false;
     let mut final_stop_reason = StopReason::EndTurn;
+    let mut saw_message_complete = false;
 
     tokio::pin!(stream);
 
@@ -207,7 +208,7 @@ pub async fn process_stream(
                             output.typing_indicator(false)?;
                             typing_cleared = true;
                         }
-                        token_count += segment.split_whitespace().count().max(1);
+                        token_count += crate::message::estimate_text_tokens(&segment);
                         output.text_delta(&segment)?;
                         assembly.current_text.push_str(&segment);
                     }
@@ -261,6 +262,7 @@ pub async fn process_stream(
                 stop_reason,
                 output_tokens,
             } => {
+                saw_message_complete = true;
                 final_stop_reason = stop_reason;
                 api_output_tokens = output_tokens;
                 let elapsed = stream_start.elapsed();
@@ -307,6 +309,19 @@ pub async fn process_stream(
                 return Err(e);
             }
         }
+    }
+
+    if !saw_message_complete && tool_calls.is_empty() {
+        return Err(crate::error::DysonError::Llm(
+            "LLM stream ended without a terminal MessageComplete event".to_string(),
+        ));
+    }
+    if !saw_message_complete {
+        tracing::warn!(
+            tool_calls = tool_calls.len(),
+            "LLM stream ended without terminal event after complete tool calls"
+        );
+        final_stop_reason = StopReason::ToolUse;
     }
 
     assembly.finish(
@@ -870,5 +885,13 @@ mod tests {
         assert_eq!(output.text(), "This response is trunca");
         assert!(tool_calls.is_empty());
         assert_eq!(stop_reason, StopReason::MaxTokens);
+    }
+
+    #[tokio::test]
+    async fn eof_without_terminal_event_is_not_success() {
+        let stream = events_to_stream(vec![StreamEvent::TextDelta("partial".into())]);
+        let mut output = RecordingOutput::new();
+        let error = process_stream(stream, &mut output).await.unwrap_err();
+        assert!(error.to_string().contains("without a terminal"));
     }
 }

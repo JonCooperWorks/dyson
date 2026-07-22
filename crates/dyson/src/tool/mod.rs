@@ -153,6 +153,17 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Describe the side effects and resources this invocation may touch.
+    ///
+    /// The runtime uses this declaration to decide which calls may execute in
+    /// parallel.  The conservative default is an exclusive workspace-wide
+    /// write: third-party and MCP tools remain correct even when they have not
+    /// yet supplied richer metadata.  Read-only tools should override this to
+    /// unlock safe concurrency.
+    fn execution_plan(&self, _input: &serde_json::Value, _ctx: &ToolContext) -> ToolExecutionPlan {
+        ToolExecutionPlan::exclusive()
+    }
+
     /// Execute the tool with the given input and context.
     ///
     /// `input` is the JSON object the LLM provided (validated against
@@ -164,6 +175,219 @@ pub trait Tool: Send + Sync {
     /// "tool-level error" via `is_error`), or `DysonError` for
     /// infrastructure failures.
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput>;
+}
+
+// ---------------------------------------------------------------------------
+// Declarative execution planning
+// ---------------------------------------------------------------------------
+
+/// Whether a tool only observes a resource or may mutate it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceAccess {
+    Read,
+    Write,
+}
+
+/// One normalized resource claimed by a tool invocation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResourceClaim {
+    pub key: String,
+    pub access: ResourceAccess,
+}
+
+/// Tool-level retry semantics used by the execution journal and recovery UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Idempotency {
+    /// Repeating the call is observationally safe.
+    Safe,
+    /// Repeating the call requires an implementation-provided idempotency key.
+    Keyed,
+    /// The runtime must never retry automatically after execution begins.
+    Unsafe,
+}
+
+/// Scheduling and supervision metadata for one concrete tool invocation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolExecutionPlan {
+    pub resources: Vec<ResourceClaim>,
+    pub idempotency: Idempotency,
+    /// Hard runtime deadline.  Individual tools may use a shorter internal
+    /// timeout; this is the harness-wide backstop.
+    pub timeout_ms: u64,
+}
+
+impl ToolExecutionPlan {
+    pub fn exclusive() -> Self {
+        Self {
+            resources: vec![ResourceClaim {
+                key: "global:tool-execution".to_string(),
+                access: ResourceAccess::Write,
+            }],
+            idempotency: Idempotency::Unsafe,
+            timeout_ms: 300_000,
+        }
+    }
+
+    pub fn read(key: impl Into<String>) -> Self {
+        Self {
+            resources: vec![ResourceClaim {
+                key: key.into(),
+                access: ResourceAccess::Read,
+            }],
+            idempotency: Idempotency::Safe,
+            timeout_ms: 120_000,
+        }
+    }
+
+    pub fn write(key: impl Into<String>) -> Self {
+        Self {
+            resources: vec![ResourceClaim {
+                key: key.into(),
+                access: ResourceAccess::Write,
+            }],
+            idempotency: Idempotency::Unsafe,
+            timeout_ms: 120_000,
+        }
+    }
+}
+
+/// Return true when an execution plan computed after a policy rewrite is no
+/// broader than the plan used by the scheduler. This prevents an Allow hook
+/// or Redirect decision from turning two safely parallel reads into racing
+/// writes after scheduling has already happened.
+pub(crate) fn execution_plan_covers(
+    scheduled: &ToolExecutionPlan,
+    effective: &ToolExecutionPlan,
+) -> bool {
+    let global_exclusive = scheduled
+        .resources
+        .iter()
+        .any(|claim| claim.key == "global:tool-execution" && claim.access == ResourceAccess::Write);
+    if !global_exclusive
+        && effective.resources.iter().any(|needed| {
+            !scheduled.resources.iter().any(|claim| {
+                claim.key == needed.key
+                    && (claim.access == ResourceAccess::Write
+                        || needed.access == ResourceAccess::Read)
+            })
+        })
+    {
+        return false;
+    }
+
+    matches!(scheduled.idempotency, Idempotency::Unsafe)
+        || scheduled.idempotency == effective.idempotency
+        || (scheduled.idempotency == Idempotency::Keyed
+            && effective.idempotency == Idempotency::Safe)
+}
+
+/// Produce a stable lexical resource key without requiring the target to
+/// exist.  This collapses `./a`, `x/../a`, and absolute/relative spellings to
+/// the same scheduling resource.  Security-sensitive containment remains the
+/// sandbox's responsibility.
+pub fn file_resource_key(ctx: &ToolContext, raw: &str) -> String {
+    use std::path::{Component, Path};
+
+    let path = Path::new(raw);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        ctx.working_dir.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    format!("file:{}", normalized.display())
+}
+
+/// Validate model-supplied tool arguments against the portable JSON Schema
+/// subset used by Dyson tools.  Providers are not a trust boundary: some only
+/// weakly enforce schemas and compatible endpoints may not enforce them at
+/// all, so every call is checked again immediately before authorization.
+pub(crate) fn validate_tool_input(
+    schema: &serde_json::Value,
+    input: &serde_json::Value,
+) -> std::result::Result<(), String> {
+    fn check(schema: &serde_json::Value, value: &serde_json::Value, path: &str) -> Option<String> {
+        if let Some(expected) = schema.get("type").and_then(serde_json::Value::as_str) {
+            let valid = match expected {
+                "object" => value.is_object(),
+                "array" => value.is_array(),
+                "string" => value.is_string(),
+                "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+                "number" => value.is_number(),
+                "boolean" => value.is_boolean(),
+                "null" => value.is_null(),
+                _ => true,
+            };
+            if !valid {
+                return Some(format!("{path}: expected {expected}"));
+            }
+        }
+
+        if let Some(values) = schema.get("enum").and_then(serde_json::Value::as_array)
+            && !values.contains(value)
+        {
+            return Some(format!("{path}: value is not in the allowed enum"));
+        }
+
+        if let Some(object) = value.as_object() {
+            if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
+                for key in required.iter().filter_map(serde_json::Value::as_str) {
+                    if !object.contains_key(key) {
+                        return Some(format!("{path}: missing required property '{key}'"));
+                    }
+                }
+            }
+            let properties = schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object);
+            if schema.get("additionalProperties") == Some(&serde_json::Value::Bool(false)) {
+                for key in object.keys() {
+                    if !properties.is_some_and(|p| p.contains_key(key)) {
+                        return Some(format!("{path}: unknown property '{key}'"));
+                    }
+                }
+            }
+            if let Some(properties) = properties {
+                for (key, child) in object {
+                    if let Some(child_schema) = properties.get(key)
+                        && let Some(error) = check(child_schema, child, &format!("{path}.{key}"))
+                    {
+                        return Some(error);
+                    }
+                }
+            }
+        }
+
+        if let Some(array) = value.as_array()
+            && let Some(items) = schema.get("items")
+        {
+            for (index, child) in array.iter().enumerate() {
+                if let Some(error) = check(items, child, &format!("{path}[{index}]")) {
+                    return Some(error);
+                }
+            }
+        }
+        None
+    }
+
+    if let Some(parse_error) = input
+        .get("_parse_error")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Err(parse_error.to_string());
+    }
+    check(schema, input, "$input").map_or(Ok(()), Err)
 }
 
 // ---------------------------------------------------------------------------
@@ -874,5 +1098,52 @@ mod tests {
         let ok = resolve_and_validate_path(tmp.path(), "~", Some(&guard)).unwrap();
         assert!(ok.is_absolute(), "got {ok:?}");
         assert!(!ok.to_string_lossy().contains('~'), "got {ok:?}");
+    }
+
+    #[test]
+    fn central_schema_validation_rejects_missing_and_wrong_types() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" } },
+            "required": ["path"],
+            "additionalProperties": false
+        });
+        assert!(validate_tool_input(&schema, &serde_json::json!({})).is_err());
+        assert!(validate_tool_input(&schema, &serde_json::json!({"path": 3})).is_err());
+        assert!(
+            validate_tool_input(&schema, &serde_json::json!({"path": "a", "extra": true})).is_err()
+        );
+        assert!(validate_tool_input(&schema, &serde_json::json!({"path": "a"})).is_ok());
+    }
+
+    #[test]
+    fn resource_keys_normalize_equivalent_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::for_test(tmp.path());
+        assert_eq!(
+            file_resource_key(&ctx, "./a/../b.txt"),
+            file_resource_key(&ctx, "b.txt")
+        );
+    }
+
+    #[test]
+    fn rewritten_execution_plan_cannot_expand_resources_or_side_effects() {
+        let read_a = ToolExecutionPlan::read("file:/tmp/a");
+        assert!(execution_plan_covers(
+            &read_a,
+            &ToolExecutionPlan::read("file:/tmp/a")
+        ));
+        assert!(!execution_plan_covers(
+            &read_a,
+            &ToolExecutionPlan::read("file:/tmp/b")
+        ));
+        assert!(!execution_plan_covers(
+            &read_a,
+            &ToolExecutionPlan::write("file:/tmp/a")
+        ));
+        assert!(execution_plan_covers(
+            &ToolExecutionPlan::exclusive(),
+            &ToolExecutionPlan::write("file:/tmp/a")
+        ));
     }
 }

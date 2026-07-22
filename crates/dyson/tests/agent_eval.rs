@@ -20,7 +20,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use dyson::agent::Agent;
+use dyson::agent::protocol::{RunEventKind, evaluate_run};
 use dyson::agent::rate_limiter::RateLimitedHandle;
+use dyson::chat_history::{ChatHistory, DiskChatHistory};
 use dyson::config::AgentSettings;
 use dyson::controller::recording::RecordingOutput;
 use dyson::error::Result;
@@ -256,6 +258,42 @@ fn empty_response_events() -> Vec<StreamEvent> {
         stop_reason: StopReason::EndTurn,
         output_tokens: None,
     }]
+}
+
+#[tokio::test]
+async fn durable_journal_records_and_grades_a_real_tool_trajectory() {
+    let llm = MockLlm::new(vec![
+        tool_call_events(
+            "call_journal",
+            "bash",
+            serde_json::json!({"command": "printf journal-ok"}),
+        ),
+        text_response_events("done"),
+    ]);
+    let history_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(DiskChatHistory::new(history_dir.path().to_path_buf()).unwrap());
+    let mut agent = test_agent(llm);
+    agent.set_chat_history(store.clone(), "journal-eval".to_string());
+    let mut output = RecordingOutput::new();
+
+    let outcome = agent
+        .run_detailed("exercise the journal", &mut output)
+        .await
+        .unwrap();
+    let events = store.load_run_events("journal-eval").unwrap();
+    let evaluation = evaluate_run(&events, &outcome.run_id);
+
+    assert!(evaluation.passed, "{:?}", evaluation.failures);
+    assert_eq!(evaluation.llm_attempts, 2);
+    assert_eq!(evaluation.tool_calls_started, 1);
+    assert!(events.iter().any(|event| matches!(
+        event.kind,
+        RunEventKind::ToolFinished {
+            is_error: false,
+            ..
+        }
+    )));
+    assert!(agent.unresolved_tool_outcomes().unwrap().is_empty());
 }
 
 // ===========================================================================

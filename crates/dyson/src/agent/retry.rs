@@ -16,7 +16,7 @@ pub(super) enum StreamResult {
     /// Successful response from the LLM.
     Response(crate::llm::StreamResponse),
     /// Controller requested recovery — caller should `continue` the loop.
-    Recovered,
+    Recovered(DysonError),
     /// Fatal error — caller should return.
     Error(DysonError),
 }

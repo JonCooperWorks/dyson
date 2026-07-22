@@ -57,9 +57,11 @@ use crate::auth::Auth;
 use crate::error::{DysonError, Result};
 use crate::llm::sse_parser::{BaseSseParser, SseJsonParser, ToolBufferContext};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{CompletionConfig, LlmClient, StreamResponse, ToolDefinition, concat_system_prompt};
-use dyson_common::contracts::SWARM_LLM_AUDIT_ID_HEADER;
+use crate::llm::{
+    CompletionConfig, LlmClient, StreamResponse, ToolDefinition, concat_system_prompt,
+};
 use crate::message::{ContentBlock, Message, Role};
+use dyson_common::contracts::SWARM_LLM_AUDIT_ID_HEADER;
 
 // ---------------------------------------------------------------------------
 // OpenAiClient
@@ -704,7 +706,10 @@ mod tests {
         match completes[0].as_ref().unwrap() {
             StreamEvent::ToolUseComplete { id, name, input } => {
                 assert_eq!(id, "call_be434", "id from the opening delta must survive");
-                assert_eq!(name, "bash", "name must survive the empty-id follow-up deltas");
+                assert_eq!(
+                    name, "bash",
+                    "name must survive the empty-id follow-up deltas"
+                );
                 assert_eq!(input["command"], "ls");
             }
             other => panic!("expected ToolUseComplete, got: {other:?}"),

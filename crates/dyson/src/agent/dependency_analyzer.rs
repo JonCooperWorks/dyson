@@ -6,7 +6,9 @@
 // sequential) to ensure correct ordering.
 // ===========================================================================
 
+#[cfg(test)]
 use super::stream_handler::ToolCall;
+use crate::tool::{ResourceAccess as DeclaredAccess, ToolExecutionPlan};
 
 // ---------------------------------------------------------------------------
 // ExecutionPhase
@@ -28,8 +30,10 @@ pub enum ExecutionPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Resource {
     File(String),
+    #[cfg(test)]
     Git,
     /// Conservative shared resource for arbitrary shell side effects.
+    #[cfg(test)]
     Shell,
 }
 
@@ -50,6 +54,7 @@ struct ResourceAccess {
 // ---------------------------------------------------------------------------
 
 /// Git subcommands that mutate repository state.
+#[cfg(test)]
 const GIT_WRITE_COMMANDS: &[&str] = &[
     "git add",
     "git commit",
@@ -66,6 +71,7 @@ const GIT_WRITE_COMMANDS: &[&str] = &[
 ];
 
 /// Git subcommands that only read repository state.
+#[cfg(test)]
 const GIT_READ_COMMANDS: &[&str] = &[
     "git status",
     "git log",
@@ -75,6 +81,7 @@ const GIT_READ_COMMANDS: &[&str] = &[
     "git remote",
 ];
 
+#[cfg(test)]
 fn classify_git_command(command: &str) -> Option<AccessKind> {
     let trimmed = command.trim();
     for &cmd in GIT_WRITE_COMMANDS {
@@ -96,6 +103,7 @@ fn classify_git_command(command: &str) -> Option<AccessKind> {
 
 /// Classify the small set of shell commands whose lack of side effects is
 /// obvious without parsing a shell program. Everything else is a write.
+#[cfg(test)]
 fn classify_shell_command(command: &str) -> AccessKind {
     let trimmed = command.trim();
     if trimmed.contains(['>', '|', ';'])
@@ -125,11 +133,34 @@ fn classify_shell_command(command: &str) -> AccessKind {
 pub struct DependencyAnalyzer;
 
 impl DependencyAnalyzer {
+    /// Schedule using tool-declared, normalized resource claims.  This is the
+    /// production path; unknown tools receive the Tool trait's conservative
+    /// global-write plan and therefore never race by accident.
+    pub fn analyze_plans(plans: &[ToolExecutionPlan]) -> Vec<ExecutionPhase> {
+        let accesses: Vec<Vec<ResourceAccess>> = plans
+            .iter()
+            .map(|plan| {
+                plan.resources
+                    .iter()
+                    .map(|claim| ResourceAccess {
+                        resource: Resource::File(claim.key.clone()),
+                        kind: match claim.access {
+                            DeclaredAccess::Read => AccessKind::Read,
+                            DeclaredAccess::Write => AccessKind::Write,
+                        },
+                    })
+                    .collect()
+            })
+            .collect();
+        phases_for_accesses(&accesses)
+    }
+
     /// Analyze a batch of tool calls and return execution phases.
     ///
     /// The returned phases should be executed in order.  Calls within a
     /// `Parallel` phase can run concurrently; calls within a `Sequential`
     /// phase must run one after another.
+    #[cfg(test)]
     pub fn analyze(calls: &[&ToolCall]) -> Vec<ExecutionPhase> {
         if calls.is_empty() {
             return Vec::new();
@@ -139,66 +170,71 @@ impl DependencyAnalyzer {
         let accesses: Vec<Vec<ResourceAccess>> =
             calls.iter().map(|c| extract_resources(c)).collect();
 
-        // Step 2: Build dependency edges.
-        // depends_on[i] contains indices of calls that call i depends on.
-        let n = calls.len();
-        let mut depends_on: Vec<Vec<usize>> = vec![Vec::new(); n];
+        phases_for_accesses(&accesses)
+    }
+}
 
-        for i in 0..n {
-            for j in 0..i {
-                if has_dependency(&accesses[j], &accesses[i]) {
-                    depends_on[i].push(j);
-                }
+fn phases_for_accesses(accesses: &[Vec<ResourceAccess>]) -> Vec<ExecutionPhase> {
+    // Step 2: Build dependency edges.
+    // depends_on[i] contains indices of calls that call i depends on.
+    let n = accesses.len();
+    let mut depends_on: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+    for i in 0..n {
+        for j in 0..i {
+            if has_dependency(&accesses[j], &accesses[i]) {
+                depends_on[i].push(j);
             }
         }
+    }
 
-        // Step 3: Build phases via topological layering.
-        // Each call's "depth" is 1 + max depth of its dependencies.
-        let mut depth = vec![0usize; n];
-        for i in 0..n {
-            if !depends_on[i].is_empty() {
-                depth[i] = depends_on[i]
-                    .iter()
-                    .map(|&j| depth[j] + 1)
-                    .max()
-                    .unwrap_or(0);
-            }
+    // Step 3: Build phases via topological layering.
+    // Each call's "depth" is 1 + max depth of its dependencies.
+    let mut depth = vec![0usize; n];
+    for i in 0..n {
+        if !depends_on[i].is_empty() {
+            depth[i] = depends_on[i]
+                .iter()
+                .map(|&j| depth[j] + 1)
+                .max()
+                .unwrap_or(0);
+        }
+    }
+
+    let max_depth = depth.iter().copied().max().unwrap_or(0);
+
+    let mut phases = Vec::new();
+    for d in 0..=max_depth {
+        let indices: Vec<usize> = (0..n).filter(|&i| depth[i] == d).collect();
+        if indices.is_empty() {
+            continue;
         }
 
-        let max_depth = depth.iter().copied().max().unwrap_or(0);
+        // Check if any calls in this layer conflict with each other.
+        let has_conflicts = has_intra_layer_conflicts(&indices, accesses);
 
-        let mut phases = Vec::new();
-        for d in 0..=max_depth {
-            let indices: Vec<usize> = (0..n).filter(|&i| depth[i] == d).collect();
-            if indices.is_empty() {
-                continue;
-            }
-
-            // Check if any calls in this layer conflict with each other.
-            let has_conflicts = has_intra_layer_conflicts(&indices, &accesses);
-
-            if has_conflicts {
+        if has_conflicts {
+            phases.push(ExecutionPhase::Sequential(indices));
+        } else {
+            // If every element in this layer has dependencies on prior
+            // layers, mark it Sequential to signal ordering constraints.
+            let all_dependent = indices.iter().all(|&i| !depends_on[i].is_empty());
+            if all_dependent && indices.len() == 1 {
                 phases.push(ExecutionPhase::Sequential(indices));
             } else {
-                // If every element in this layer has dependencies on prior
-                // layers, mark it Sequential to signal ordering constraints.
-                let all_dependent = indices.iter().all(|&i| !depends_on[i].is_empty());
-                if all_dependent && indices.len() == 1 {
-                    phases.push(ExecutionPhase::Sequential(indices));
-                } else {
-                    phases.push(ExecutionPhase::Parallel(indices));
-                }
+                phases.push(ExecutionPhase::Parallel(indices));
             }
         }
-
-        phases
     }
+
+    phases
 }
 
 // ---------------------------------------------------------------------------
 // Resource extraction
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn extract_resources(call: &ToolCall) -> Vec<ResourceAccess> {
     let mut resources = Vec::new();
 
@@ -438,5 +474,32 @@ mod test_dependency_analyzer {
             DependencyAnalyzer::analyze(&refs).len() >= 2,
             "bulk_edit writes every listed path; subsequent read must wait"
         );
+    }
+
+    #[test]
+    fn declared_plans_parallelize_reads_and_serialize_writes() {
+        let reads = vec![
+            ToolExecutionPlan::read("file:/a"),
+            ToolExecutionPlan::read("file:/a"),
+        ];
+        assert!(matches!(
+            DependencyAnalyzer::analyze_plans(&reads).as_slice(),
+            [ExecutionPhase::Parallel(indices)] if indices.len() == 2
+        ));
+
+        let conflict = vec![
+            ToolExecutionPlan::write("file:/a"),
+            ToolExecutionPlan::read("file:/a"),
+        ];
+        assert_eq!(DependencyAnalyzer::analyze_plans(&conflict).len(), 2);
+    }
+
+    #[test]
+    fn conservative_default_plans_never_race() {
+        let plans = vec![
+            ToolExecutionPlan::exclusive(),
+            ToolExecutionPlan::exclusive(),
+        ];
+        assert_eq!(DependencyAnalyzer::analyze_plans(&plans).len(), 2);
     }
 }

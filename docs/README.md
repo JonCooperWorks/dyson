@@ -11,6 +11,7 @@ across turns.
 | Document | Covers |
 |---|---|
 | [Architecture Overview](architecture-overview.md) | Runtime shape, component wiring, request flow, core traits |
+| [Harness Runtime Contracts](harness-runtime.md) | Typed outcomes, durable execution journal, recovery, scheduling, and evals |
 | [Agent Loop](agent-loop.md) | Stream, tool detection, dependency grouping, execution, error recovery |
 | [LLM Clients](llm-clients.md) | Provider registry, SSE parsing, API vs CLI-subprocess providers |
 | [Tools & Skills](tools-and-skills.md) | `Tool`, `Skill`, built-ins, local skills, MCP skills, adding tools |

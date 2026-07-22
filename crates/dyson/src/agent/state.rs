@@ -17,8 +17,8 @@ fn estimate_tool_def_tokens(
     description: &str,
     input_schema: &serde_json::Value,
 ) -> usize {
-    name.split_whitespace().count()
-        + description.split_whitespace().count()
+    crate::message::estimate_text_tokens(name)
+        + crate::message::estimate_text_tokens(description)
         + crate::message::estimate_json_tokens(input_schema)
         + 10
 }
@@ -74,6 +74,9 @@ impl ToolRegistry {
                         skill = skill.name(),
                         "duplicate tool name — overriding previous registration"
                     );
+                    // Provider APIs require unique tool definitions.  Keep the
+                    // registry and provider-facing schema list in lockstep.
+                    definitions.retain(|definition| definition.name != name);
                 }
 
                 definitions.push(ToolDefinition {
@@ -126,6 +129,15 @@ impl ToolRegistry {
     /// Register an extra tool not owned by any skill (e.g., advisor tool).
     pub(super) fn register_extra_tool(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
+        if let Some(previous) = self.definitions.iter().find(|d| d.name == name) {
+            self.cached_tokens = self.cached_tokens.saturating_sub(estimate_tool_def_tokens(
+                &previous.name,
+                &previous.description,
+                &previous.input_schema,
+            ));
+            self.definitions
+                .retain(|definition| definition.name != name);
+        }
         let tokens = estimate_tool_def_tokens(&name, tool.description(), &tool.input_schema());
         self.definitions.push(ToolDefinition {
             name: name.clone(),
