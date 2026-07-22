@@ -44,38 +44,31 @@ fn load_entry(state: &HttpState, id: &str) -> Option<FileEntry> {
             chat_id: e.chat_id.clone(),
         })
     };
-    Some(match cached {
-        Some(t) => t,
-        None => {
-            let loaded = state
-                .data_dir
-                .as_ref()
-                .and_then(|dir| FileStore::load_from_disk(dir, id));
-            match loaded {
-                Some(e) => {
-                    // Warm the cache so subsequent hits don't re-read
-                    // disk for the same id (browser preview, repeated
-                    // downloads, etc.).  Recover from poisoning so a
-                    // panicked previous holder doesn't silently disable
-                    // the cache.
-                    let out = FileEntry {
-                        bytes: e.bytes.clone(),
-                        mime: e.mime.clone(),
-                        name: e.name.clone(),
-                        chat_id: e.chat_id.clone(),
-                    };
-                    let mut s = match state.files.lock() {
-                        Ok(s) => s,
-                        Err(p) => p.into_inner(),
-                    };
-                    s.put(id.to_string(), e);
-                    drop(s);
-                    out
-                }
-                None => return None,
-            }
-        }
-    })
+    if let Some(entry) = cached {
+        return Some(entry);
+    }
+
+    let entry = state
+        .data_dir
+        .as_ref()
+        .and_then(|dir| FileStore::load_from_disk(dir, id))?;
+
+    // Warm the cache so subsequent hits don't re-read disk for the same id
+    // (browser preview, repeated downloads, etc.). Recover from poisoning so
+    // a panicked previous holder doesn't silently disable the cache.
+    let response = FileEntry {
+        bytes: entry.bytes.clone(),
+        mime: entry.mime.clone(),
+        name: entry.name.clone(),
+        chat_id: entry.chat_id.clone(),
+    };
+    let mut store = match state.files.lock() {
+        Ok(store) => store,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    store.put(id.to_string(), entry);
+    drop(store);
+    Some(response)
 }
 
 fn file_response(entry: FileEntry) -> Resp {
