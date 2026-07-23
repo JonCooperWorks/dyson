@@ -193,6 +193,20 @@ pub async fn run() -> Result<()> {
         Err(e) => tracing::warn!(error = %e, "preseed: failed to consume configure preseed"),
     }
 
+    // A managed-dyson always serves the browser SPA (the http controller in
+    // the config above), which answers MCP `elicitation/create` prompts. Turn
+    // the capability on here at boot — not only inside `HttpController::run`
+    // (controller/http/mod.rs) — so it is set process-wide before any worker,
+    // controller task, or agent turn runs. The http controller sets the same
+    // flag, but that call is subject to start-ordering: the concurrently
+    // spawned telegram controller or the state-sync worker below can drive an
+    // agent turn (and evaluate the pentester preflight gate) before the http
+    // task reaches its own `enable_ui`. Setting it here, synchronously and
+    // before those spawns, makes the elicitation UI a deterministic property
+    // of the deployment. Idempotent `AtomicBool` store, so the later call is a
+    // harmless no-op.
+    dyson::skill::mcp::elicitation::enable_ui();
+
     dyson::swarm_state_sync::spawn_worker(workspace.clone(), chats.clone(), state_sync);
 
     tracing::info!(
