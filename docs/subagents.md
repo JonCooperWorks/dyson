@@ -11,13 +11,14 @@ There are three kinds of subagent:
 |------|----------|-------------|
 | **Config-driven** | `planner`, `researcher`, `verifier`, `dependency_review` | Simple single-purpose agents defined by a `SubagentAgentConfig`.  Each gets a filtered set of parent tools and runs a task to completion. |
 | **Coder** | `coder` | A built-in subagent that scopes a coding task to a specific directory.  Takes `{ path, task }` input — the path becomes the child's `working_dir`. |
-| **Orchestrator** | `security_engineer` | A composable subagent that gets direct tools *and* inner subagent dispatch.  Can run 5+ tool calls in parallel, including dispatching other subagents. |
+| **Orchestrator** | `security_engineer`, `pentest_agent` | A composable subagent that gets direct tools *and* inner subagent dispatch. Can run 5+ tool calls in parallel, including dispatching other subagents. |
 
 **Key files:**
 - `src/skill/subagent/mod.rs` — `SubagentTool`, `SubagentSkill`, `CaptureOutput`, `FilteredSkill`, `spawn_child`
 - `src/skill/subagent/orchestrator.rs` — `OrchestratorTool`, `OrchestratorConfig`
 - `src/skill/subagent/coder.rs` — `CoderTool`
 - `src/skill/subagent/security_engineer/` — `security_engineer_config()` (mod.rs) plus the staged harness split across types/checkpoint/taxonomy/runtime/stages/stack/parse/report
+- `src/skill/subagent/pentest_agent.rs` — authorization-scoped active-testing orchestrator config
 - `src/skill/subagent/prompts/` — System prompts and protocol injections
 - `src/config/mod.rs` — `SubagentAgentConfig`
 - `src/tool/security/` — Security tools (`ast_query`, `attack_surface_analyzer`, `exploit_builder`, `taint_trace`)
@@ -44,6 +45,7 @@ provider (the parent's own model), so they work with zero extra configuration.
 |------|-------|-------------|
 | `coder` | `{ path, task }` | Spawns a focused coding agent scoped to a directory.  Gets `bash`, `read_file`, `edit_file`, `search_files`, `list_files`, `bulk_edit`. |
 | `security_engineer` | `{ task, context?, path?, resume?, run_id?, stop_after_stage? }` | Staged security research harness with durable checkpoint/resume.  Runs Recon, Hunt, Validate, Gapfill, Dedupe, Trace, Feedback, and Report using AST-aware tools plus inner subagent dispatch. |
+| `pentest_agent` | Browser: `{ task, context?, path? }` + scope elicitation. Headless: `{ task, target, authorization, rules_of_engagement, context?, path? }` | Active, non-destructive penetration testing against an explicit authorized target. The browser operator must accept a target/authorization/rules preflight before execution. |
 
 User-defined subagents in `dyson.json` are prepended before built-ins.
 
@@ -70,7 +72,7 @@ Parent Agent (depth 0)
 
 ```
 Parent Agent (depth 0)
-  └── security_engineer (OrchestratorTool)
+  └── security_engineer / pentest_agent (OrchestratorTool)
         └── Child Agent (depth 1)
               ├── [direct tools]
               │     ast_describe, ast_query, attack_surface_analyzer,
@@ -91,6 +93,21 @@ All subagents are **just Tools**.  When the parent LLM calls one:
 
 The child inherits the parent's `Arc<dyn Sandbox>` (security cannot be bypassed
 by delegation) and `Arc<RwLock<Workspace>>` (shared memory).
+
+### Penetration Test Agent
+
+`pentest_agent` carries the security engineer's sandbox inheritance, direct
+security-analysis tools, inner specialist dispatch, and security-review
+artefact output into an active-testing workflow. It is deliberately separate
+from the checkpointed source-review harness: the operator's target,
+authorization statement, and rules of engagement remain in the coordinating
+agent's context for the whole run.
+
+The tool rejects invocations missing any of those boundary fields. Its prompt
+requires least-invasive proof, sequential testing by default, sanitized
+evidence, independent validation, and cleanup. Denial of service, destructive
+writes, persistence, password attacks, social engineering, scope expansion,
+and attacks on real users are prohibited.
 
 ---
 

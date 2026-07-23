@@ -262,6 +262,9 @@ mod tests {
         OrchestratorInput {
             task: String::new(),
             context: String::new(),
+            target: String::new(),
+            authorization: String::new(),
+            rules_of_engagement: String::new(),
             path: String::new(),
             resume: false,
             run_id: None,
@@ -420,6 +423,9 @@ mod tests {
         let parsed = OrchestratorInput {
             task: " review auth ".into(),
             context: " mcp runtime ".into(),
+            target: String::new(),
+            authorization: String::new(),
+            rules_of_engagement: String::new(),
             path: " /repo/src ".into(),
             resume: false,
             run_id: None,
@@ -437,6 +443,9 @@ mod tests {
         let parsed = OrchestratorInput {
             task: "review".into(),
             context: String::new(),
+            target: String::new(),
+            authorization: String::new(),
+            rules_of_engagement: String::new(),
             path: String::new(),
             resume: false,
             run_id: None,

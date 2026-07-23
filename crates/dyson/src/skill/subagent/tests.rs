@@ -622,11 +622,12 @@ fn subagent_skill_system_prompt_lists_agents() {
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
     assert_eq!(skill.name(), "subagents");
-    // 1 config-driven subagent + 1 coder + 1 security_engineer = 3
-    assert_eq!(skill.tools().len(), 3);
+    // 1 config-driven subagent + coder + 2 built-in orchestrators = 4
+    assert_eq!(skill.tools().len(), 4);
     assert_eq!(skill.tools()[0].name(), "research_agent");
     assert_eq!(skill.tools()[1].name(), "coder");
     assert_eq!(skill.tools()[2].name(), "security_engineer");
+    assert_eq!(skill.tools()[3].name(), "pentest_agent");
 
     let prompt = skill.system_prompt().unwrap();
     assert!(prompt.contains("research_agent"));
@@ -634,6 +635,7 @@ fn subagent_skill_system_prompt_lists_agents() {
     assert!(prompt.contains("subagents"));
     assert!(prompt.contains("coder"));
     assert!(prompt.contains("security_engineer"));
+    assert!(prompt.contains("pentest_agent"));
 }
 
 #[test]
@@ -659,18 +661,20 @@ fn subagent_skill_skips_unknown_provider() {
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
     // Should have skipped the subagent with unknown provider,
-    // but the built-in coder and security_engineer are always present.
-    assert_eq!(skill.tools().len(), 2);
+    // but the built-in coder and orchestrators are always present.
+    assert_eq!(skill.tools().len(), 3);
     assert_eq!(skill.tools()[0].name(), "coder");
     assert_eq!(skill.tools()[1].name(), "security_engineer");
+    assert_eq!(skill.tools()[2].name(), "pentest_agent");
     assert!(skill.system_prompt().unwrap().contains("coder"));
     assert!(skill.system_prompt().unwrap().contains("security_engineer"));
+    assert!(skill.system_prompt().unwrap().contains("pentest_agent"));
 }
 
 #[test]
 fn name_allowlist_drops_coder_and_orchestrators_when_excluded() {
     // The SPA's tool-picker collapses builtins, coder, and the
-    // orchestrator subagents (security_engineer) into one checklist.
+    // orchestrator subagents into one checklist.
     // When the operator's allowlist excludes those names, dyson must
     // skip registering them — otherwise the agent introspects them
     // as available even though the operator turned them off.
@@ -707,7 +711,7 @@ fn name_allowlist_drops_coder_and_orchestrators_when_excluded() {
     let registry = crate::controller::ClientRegistry::new(&settings, None);
 
     // Allowlist contains only the user-defined subagent and a couple
-    // of (irrelevant) builtin tool names.  coder + security_engineer
+    // of (irrelevant) builtin tool names. The built-in agents
     // are NOT in the list; they must be dropped.
     let allow: std::collections::HashSet<String> = [
         "research_agent".to_string(),
@@ -726,7 +730,7 @@ fn name_allowlist_drops_coder_and_orchestrators_when_excluded() {
         Some(&allow),
     );
 
-    // Only research_agent survives — coder and security_engineer are
+    // Only research_agent survives — coder and both orchestrators are
     // gone because they weren't in the allowlist.
     let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
     assert_eq!(names, vec!["research_agent"]);
@@ -739,6 +743,10 @@ fn name_allowlist_drops_coder_and_orchestrators_when_excluded() {
     assert!(
         !prompt.contains("- **security_engineer**"),
         "security_engineer must not appear in the prompt when filtered out"
+    );
+    assert!(
+        !prompt.contains("- **pentest_agent**"),
+        "pentest_agent must not appear in the prompt when filtered out"
     );
 }
 
@@ -775,6 +783,10 @@ fn name_allowlist_none_preserves_default_registration() {
     assert!(
         names.contains(&"security_engineer"),
         "security_engineer must be present when no allowlist is supplied"
+    );
+    assert!(
+        names.contains(&"pentest_agent"),
+        "pentest_agent must be present when no allowlist is supplied"
     );
 }
 
@@ -975,11 +987,12 @@ fn default_provider_resolves_to_agent_settings() {
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
-    // Should have resolved successfully (1 config-driven + 1 coder + 1 security_engineer = 3 tools).
-    assert_eq!(skill.tools().len(), 3);
+    // Should have resolved successfully (1 config-driven + coder + 2 orchestrators).
+    assert_eq!(skill.tools().len(), 4);
     assert_eq!(skill.tools()[0].name(), "test_default");
     assert_eq!(skill.tools()[1].name(), "coder");
     assert_eq!(skill.tools()[2].name(), "security_engineer");
+    assert_eq!(skill.tools()[3].name(), "pentest_agent");
 }
 
 /// Regression: `SubagentTool` must bill the parent's model when its own
@@ -1362,6 +1375,209 @@ fn security_engineer_config_produces_correct_values() {
             .contains(&"attack_surface_analyzer")
     );
     assert!(config.direct_tool_names.contains(&"exploit_builder"));
+}
+
+#[test]
+fn pentest_agent_config_has_active_test_contract() {
+    let config = pentest_agent_config();
+    assert_eq!(config.name, "pentest_agent");
+    assert!(config.description.contains("authorization"));
+    assert!(config.system_prompt.contains("Hard boundaries"));
+    assert_eq!(config.max_iterations, 80);
+    assert_eq!(config.max_tokens, 8192);
+    assert!(config.injects_protocol.is_some());
+    assert_eq!(
+        config.harness,
+        Some(orchestrator::OrchestratorHarness::PenetrationTest)
+    );
+    assert!(config.direct_tool_names.contains(&"bash"));
+    assert!(config.direct_tool_names.contains(&"ast_query"));
+    assert!(config.direct_tool_names.contains(&"exploit_builder"));
+}
+
+#[test]
+fn pentest_agent_schema_defers_scope_and_authorization_to_preflight() {
+    let tool = OrchestratorTool::new(
+        pentest_agent_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            None,
+        )),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        )),
+        None,
+        &[],
+        vec![],
+    );
+    let schema = tool.input_schema();
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert_eq!(required, vec!["task"]);
+}
+
+/// Regression: a pentest runs an un-checkpointed active-testing loop that the
+/// generic 5-minute tool deadline truncated mid-run (dropping rules-of-
+/// engagement enforcement to the model). It must advertise a wall-clock budget
+/// well above 300s; the checkpointed research harness keeps the conservative
+/// default because the runtime may kill and resume it.
+#[test]
+fn pentest_orchestrator_extends_execution_deadline() {
+    fn tool_for(config: orchestrator::OrchestratorConfig) -> OrchestratorTool {
+        OrchestratorTool::new(
+            config,
+            LlmProvider::Anthropic,
+            "claude-opus-4-20250514".into(),
+            crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+                &crate::config::AgentSettings::default(),
+                None,
+                None,
+            )),
+            Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+                crate::sandbox::SandboxBypassGuard::for_test(),
+            )),
+            None,
+            &[],
+            vec![],
+        )
+    }
+
+    let input = serde_json::json!({ "task": "test" });
+    let ctx = ToolContext::from_cwd().unwrap();
+
+    let pentest = tool_for(pentest_agent_config());
+    assert!(
+        pentest.execution_plan(&input, &ctx).timeout_ms > 300_000,
+        "pentest orchestrator must exceed the 5-minute default deadline"
+    );
+
+    let research = tool_for(security_engineer_config());
+    assert_eq!(
+        research.execution_plan(&input, &ctx).timeout_ms,
+        300_000,
+        "checkpointed research harness keeps the conservative default"
+    );
+}
+
+#[test]
+fn pentest_preflight_schema_requires_boundaries_and_preserves_defaults() {
+    let parsed: orchestrator::OrchestratorInput = serde_json::from_value(serde_json::json!({
+        "task": "test authentication",
+        "target": "https://staging.example.test",
+        "authorization": "I own this staging service.",
+        "rules_of_engagement": "Maximum two requests per second."
+    }))
+    .unwrap();
+    let schema = orchestrator::pentest_preflight_schema(&parsed);
+    assert_eq!(
+        schema["required"],
+        serde_json::json!(["target", "authorization", "rules_of_engagement"])
+    );
+    assert_eq!(
+        schema["properties"]["target"]["default"],
+        "https://staging.example.test"
+    );
+    assert_eq!(
+        schema["properties"]["authorization"]["default"],
+        "I own this staging service."
+    );
+    assert_eq!(
+        schema["properties"]["rules_of_engagement"]["default"],
+        "Maximum two requests per second."
+    );
+}
+
+#[test]
+fn pentest_preflight_accepts_operator_values_and_rejects_cancel() {
+    let mut parsed: orchestrator::OrchestratorInput =
+        serde_json::from_value(serde_json::json!({ "task": "test auth" })).unwrap();
+    orchestrator::apply_pentest_preflight_result(
+        &mut parsed,
+        &serde_json::json!({
+            "action": "accept",
+            "content": {
+                "target": " https://staging.example.test ",
+                "authorization": " I am authorized by the owner. ",
+                "rules_of_engagement": " Read-only; max 2 requests/second. "
+            }
+        }),
+    )
+    .unwrap();
+    assert_eq!(parsed.target, "https://staging.example.test");
+    assert_eq!(parsed.authorization, "I am authorized by the owner.");
+    assert_eq!(
+        parsed.rules_of_engagement,
+        "Read-only; max 2 requests/second."
+    );
+
+    let error = orchestrator::apply_pentest_preflight_result(
+        &mut parsed,
+        &serde_json::json!({ "action": "cancel" }),
+    )
+    .unwrap_err();
+    assert!(error.contains("cancelled"));
+}
+
+#[test]
+fn pentest_preflight_fails_closed_on_empty_content() {
+    let mut parsed: orchestrator::OrchestratorInput =
+        serde_json::from_value(serde_json::json!({ "task": "test auth" })).unwrap();
+    let error = orchestrator::apply_pentest_preflight_result(
+        &mut parsed,
+        &serde_json::json!({
+            "action": "accept",
+            "content": {
+                "target": "",
+                "authorization": "I am authorized.",
+                "rules_of_engagement": "Read-only."
+            }
+        }),
+    )
+    .unwrap_err();
+    assert!(error.contains("no active testing was started"));
+}
+
+#[tokio::test]
+async fn pentest_agent_rejects_missing_authorization_before_running_child() {
+    let tool = OrchestratorTool::new(
+        pentest_agent_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            None,
+        )),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        )),
+        None,
+        &[],
+        vec![],
+    );
+    let result = tool
+        .run(
+            &serde_json::json!({
+                "task": "test authentication",
+                "target": "http://127.0.0.1:8080",
+                "rules_of_engagement": "Local test service only; read-only requests."
+            }),
+            &ToolContext::from_cwd().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(result.is_error);
+    assert_eq!(
+        result.content,
+        "authorization is required for penetration testing"
+    );
 }
 
 #[test]
@@ -2976,10 +3192,11 @@ fn orchestrator_with_custom_config() {
 }
 
 #[test]
-fn builtin_orchestrator_configs_includes_security_engineer() {
+fn builtin_orchestrator_configs_include_security_agents() {
     let configs = builtin_orchestrator_configs();
-    assert_eq!(configs.len(), 1);
+    assert_eq!(configs.len(), 2);
     assert_eq!(configs[0].name, "security_engineer");
+    assert_eq!(configs[1].name, "pentest_agent");
 }
 
 // -----------------------------------------------------------------------

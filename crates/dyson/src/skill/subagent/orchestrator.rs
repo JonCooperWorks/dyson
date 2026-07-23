@@ -8,6 +8,7 @@
 //
 // Any orchestrator role can be composed from an `OrchestratorConfig`:
 //   - security_engineer: AST-aware vuln scanning + exploit generation
+//   - pentest_agent: authorization-scoped active testing
 //   - (future): architect, devops_engineer, data_engineer, etc.
 //
 // Architecture:
@@ -29,7 +30,7 @@ use crate::error::{DysonError, Result};
 use crate::llm::LlmClient;
 use crate::message::{Artefact, ArtefactKind};
 use crate::sandbox::Sandbox;
-use crate::tool::{CheckpointEvent, Tool, ToolContext, ToolOutput};
+use crate::tool::{CheckpointEvent, Tool, ToolContext, ToolExecutionPlan, ToolOutput};
 use crate::workspace::WorkspaceHandle;
 
 use super::{ChildSpawn, spawn_child};
@@ -71,9 +72,23 @@ pub struct OrchestratorConfig {
     pub harness: Option<OrchestratorHarness>,
 }
 
+/// Wall-clock budget for a penetration-test orchestrator invocation. Unlike
+/// the checkpointed `SecurityResearch` harness — which the runtime may kill and
+/// resume — a pentest runs a single un-checkpointed active-testing loop (recon,
+/// hypothesis-driven testing, independent validation, cleanup, reporting). The
+/// generic 5-minute tool deadline truncated that loop mid-run, dropping rules-
+/// of-engagement enforcement to the model's discretion. Thirty minutes covers a
+/// bounded active test (e.g. a 30-request cap at ~1 req/s plus multi-stage
+/// reasoning) without being effectively unbounded.
+const PENTEST_EXECUTION_TIMEOUT_MS: u64 = 1_800_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OrchestratorHarness {
     SecurityResearch,
+    /// Marker for the active-testing input contract. Execution still uses the
+    /// generic orchestrator loop; unlike SecurityResearch it has no private
+    /// checkpointed stage runner.
+    PenetrationTest,
 }
 
 /// A composable `Tool` that spawns an orchestrator child agent.
@@ -150,14 +165,28 @@ impl Tool for OrchestratorTool {
         self.config.description
     }
 
+    /// A pentest orchestrator supervises a long, un-checkpointed active test, so
+    /// it needs a wall-clock budget well beyond the generic 5-minute tool
+    /// deadline; every other orchestrator keeps the conservative exclusive
+    /// default (checkpointed harnesses tolerate being killed and resumed).
+    fn execution_plan(&self, _input: &serde_json::Value, _ctx: &ToolContext) -> ToolExecutionPlan {
+        match self.config.harness {
+            Some(OrchestratorHarness::PenetrationTest) => ToolExecutionPlan {
+                timeout_ms: PENTEST_EXECUTION_TIMEOUT_MS,
+                ..ToolExecutionPlan::exclusive()
+            },
+            _ => ToolExecutionPlan::exclusive(),
+        }
+    }
+
     fn input_schema(&self) -> serde_json::Value {
-        let required = if matches!(
-            self.config.harness,
-            Some(OrchestratorHarness::SecurityResearch)
-        ) {
-            Vec::<&str>::new()
-        } else {
-            vec!["task"]
+        let required = match self.config.harness {
+            Some(OrchestratorHarness::SecurityResearch) => Vec::<&str>::new(),
+            // The browser elicitation modal collects and directly confirms the
+            // active-test boundary before execution. Headless callers can
+            // still provide the three fields inline as a fallback.
+            Some(OrchestratorHarness::PenetrationTest) => vec!["task"],
+            None => vec!["task"],
         };
         serde_json::json!({
             "type": "object",
@@ -170,6 +199,24 @@ impl Tool for OrchestratorTool {
                     "type": "string",
                     "description": "Optional background context about the codebase, \
                         recent changes, or specific areas of concern."
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Optional inline fallback for headless penetration tests. \
+                        In the browser, a preflight elicitation asks the operator for the exact \
+                        authorized URL, hostname, address, range, or local service."
+                },
+                "authorization": {
+                    "type": "string",
+                    "description": "Optional inline fallback for headless penetration tests. \
+                        In the browser, the operator directly supplies an explicit ownership or \
+                        authorization statement during preflight."
+                },
+                "rules_of_engagement": {
+                    "type": "string",
+                    "description": "Optional inline fallback for headless penetration tests. \
+                        In the browser, preflight collects allowed techniques, exclusions, rate \
+                        and concurrency limits, accounts, stop conditions, and test window."
                 },
                 "path": {
                     "type": "string",
@@ -215,6 +262,22 @@ impl Tool for OrchestratorTool {
                 return Ok(ToolOutput::error("task is required"));
             }
         }
+        if self.config.harness == Some(OrchestratorHarness::PenetrationTest) {
+            if let Err(message) = complete_pentest_preflight(&mut parsed).await {
+                return Ok(ToolOutput::error(message));
+            }
+            for (name, value) in [
+                ("target", parsed.target.as_str()),
+                ("authorization", parsed.authorization.as_str()),
+                ("rules_of_engagement", parsed.rules_of_engagement.as_str()),
+            ] {
+                if value.trim().is_empty() {
+                    return Ok(ToolOutput::error(format!(
+                        "{name} is required for penetration testing"
+                    )));
+                }
+            }
+        }
 
         // Validate + canonicalize the optional scope path before handing it
         // to the child.  `canonicalize` also implicitly checks existence.
@@ -245,7 +308,18 @@ impl Tool for OrchestratorTool {
             Some(canonical)
         };
 
-        let user_message = if parsed.context.is_empty() {
+        let user_message = if self.config.harness == Some(OrchestratorHarness::PenetrationTest) {
+            let context = if parsed.context.is_empty() {
+                String::new()
+            } else {
+                format!("\n\nContext:\n{}", parsed.context)
+            };
+            format!(
+                "Authorized target:\n{}\n\nAuthorization statement:\n{}\n\nRules of engagement:\n{}\
+                 {context}\n\nTask:\n{}",
+                parsed.target, parsed.authorization, parsed.rules_of_engagement, parsed.task
+            )
+        } else if parsed.context.is_empty() {
             parsed.task.clone()
         } else {
             format!("Context:\n{}\n\nTask:\n{}", parsed.context, parsed.task)
@@ -560,6 +634,15 @@ pub(crate) struct OrchestratorInput {
     pub(crate) task: String,
     #[serde(default)]
     pub(crate) context: String,
+    /// Exact active-test target. Used only by the penetration-test contract.
+    #[serde(default)]
+    pub(crate) target: String,
+    /// Operator-supplied assertion of authority over the active-test target.
+    #[serde(default)]
+    pub(crate) authorization: String,
+    /// Technique, rate, exclusion, account, and stop-condition boundaries.
+    #[serde(default)]
+    pub(crate) rules_of_engagement: String,
     /// Optional directory to scope the child agent to.  See `input_schema`.
     #[serde(default)]
     pub(crate) path: String,
@@ -572,4 +655,103 @@ pub(crate) struct OrchestratorInput {
     /// Optional bounded-run stage used by smoke tests and operator check-pointing.
     #[serde(default)]
     pub(crate) stop_after_stage: Option<String>,
+}
+
+/// Collect the active-test boundary directly from the browser operator before
+/// a penetration-test child is spawned. Even when the parent model supplied
+/// values, they are shown as editable defaults and require explicit UI
+/// acceptance. Headless controllers retain the strict inline contract.
+async fn complete_pentest_preflight(
+    parsed: &mut OrchestratorInput,
+) -> std::result::Result<(), String> {
+    if !crate::skill::mcp::elicitation::ui_enabled() {
+        return Ok(());
+    }
+
+    let result = crate::skill::mcp::elicitation::broker()
+        .elicit(
+            "pentest_agent".to_string(),
+            "Penetration-test preflight: confirm the exact target, your authority to test it, \
+             and the rules of engagement. No reconnaissance or active requests begin until \
+             you accept this scope."
+                .to_string(),
+            pentest_preflight_schema(parsed),
+        )
+        .await;
+    apply_pentest_preflight_result(parsed, &result)
+}
+
+/// Flat JSON Schema supported by Dyson's elicitation form. Existing inline
+/// values become defaults so the operator can review and amend them.
+pub(crate) fn pentest_preflight_schema(parsed: &OrchestratorInput) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "target": {
+                "type": "string",
+                "title": "Authorized target",
+                "description": "Exact URL, hostname, IP address/range, or local service. \
+                    Redirects, discovered subdomains, adjacent cloud resources, and third-party \
+                    integrations are excluded unless explicitly named.",
+                "minLength": 1,
+                "maxLength": 2048,
+                "default": parsed.target
+            },
+            "authorization": {
+                "type": "string",
+                "title": "Authorization statement",
+                "description": "State that you own the target or have permission from its owner \
+                    to perform this penetration test.",
+                "minLength": 1,
+                "maxLength": 4096,
+                "default": parsed.authorization
+            },
+            "rules_of_engagement": {
+                "type": "string",
+                "title": "Rules of engagement",
+                "description": "Allowed techniques, exclusions, request-rate and concurrency \
+                    limits, test accounts, time window, stop conditions, and data-handling rules.",
+                "minLength": 1,
+                "maxLength": 8192,
+                "default": parsed.rules_of_engagement
+            }
+        },
+        "required": ["target", "authorization", "rules_of_engagement"]
+    })
+}
+
+/// Apply an accepted preflight answer. Cancel, decline, malformed content, or
+/// an empty boundary fails closed before the child agent receives any tools.
+pub(crate) fn apply_pentest_preflight_result(
+    parsed: &mut OrchestratorInput,
+    result: &serde_json::Value,
+) -> std::result::Result<(), String> {
+    if result.get("action").and_then(|value| value.as_str()) != Some("accept") {
+        return Err(
+            "penetration test cancelled during authorization and scope preflight".to_string(),
+        );
+    }
+    let content = result
+        .get("content")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| "penetration-test preflight returned no scope information".to_string())?;
+
+    for (name, destination) in [
+        ("target", &mut parsed.target),
+        ("authorization", &mut parsed.authorization),
+        ("rules_of_engagement", &mut parsed.rules_of_engagement),
+    ] {
+        let value = content
+            .get(name)
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim();
+        if value.is_empty() {
+            return Err(format!(
+                "{name} is required for penetration testing; no active testing was started"
+            ));
+        }
+        *destination = value.to_string();
+    }
+    Ok(())
 }
