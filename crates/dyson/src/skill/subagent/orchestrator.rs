@@ -483,7 +483,16 @@ impl Tool for OrchestratorTool {
             let finished_at = std::time::SystemTime::now();
             let finished_epoch = unix_seconds(finished_at);
             let duration_seconds = finished_epoch.saturating_sub(started_epoch);
-            let target_name = target_name_for(scoped_dir.as_deref(), ctx.working_dir.as_path());
+            // A pentest is scoped to the operator's target (a URL/host), not a
+            // workspace dir — title and target the report after it so the
+            // security-report card reads e.g. "potholeja.com", not "programs".
+            let target_name = if self.config.harness == Some(OrchestratorHarness::PenetrationTest)
+                && !parsed.target.trim().is_empty()
+            {
+                pentest_target_label(&parsed.target)
+            } else {
+                target_name_for(scoped_dir.as_deref(), ctx.working_dir.as_path())
+            };
             let title = match kind {
                 ArtefactKind::SecurityReview => format!("Security review: {target_name}"),
                 ArtefactKind::EvalReport => format!("Eval: {target_name}"),
@@ -668,6 +677,29 @@ fn target_name_for(scoped: Option<&std::path::Path>, fallback: &std::path::Path)
         .and_then(|n| n.to_str())
         .unwrap_or("target")
         .to_string()
+}
+
+/// Short label for a penetration-test target, used for the artefact title and
+/// the report document's `target` field.  A pentest is scoped to an operator
+/// URL/host rather than a workspace directory, so `target_name_for` (which
+/// derives from the working dir) would mislabel the report — e.g. "programs".
+/// Strips the scheme, any userinfo, and any path/query so "https://x.test/a?b"
+/// becomes "x.test".  Falls back to the trimmed input when there is no host.
+fn pentest_target_label(target: &str) -> String {
+    let t = target.trim();
+    let after_scheme = t.split_once("://").map(|(_, rest)| rest).unwrap_or(t);
+    let host = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Drop any userinfo ("user@host") but keep host[:port].
+    let host = host.rsplit_once('@').map(|(_, h)| h).unwrap_or(host);
+    let host = host.trim();
+    if host.is_empty() {
+        t.to_string()
+    } else {
+        host.to_string()
+    }
 }
 
 /// Human-readable provider label for the artefact metadata.
@@ -901,7 +933,26 @@ pub(crate) fn apply_pentest_preflight_result(
 
 #[cfg(test)]
 mod pentest_report_tests {
-    use super::{extract_pentest_findings, pentest_severity_rollup};
+    use super::{extract_pentest_findings, pentest_severity_rollup, pentest_target_label};
+
+    #[test]
+    fn pentest_target_label_strips_scheme_userinfo_and_path() {
+        assert_eq!(
+            pentest_target_label("https://potholeja.com"),
+            "potholeja.com"
+        );
+        assert_eq!(
+            pentest_target_label("https://potholeja.com/api/filter?x=1"),
+            "potholeja.com"
+        );
+        assert_eq!(
+            pentest_target_label("http://user@host.test:8080/a"),
+            "host.test:8080"
+        );
+        assert_eq!(pentest_target_label("  10.0.0.5:3000  "), "10.0.0.5:3000");
+        // No host component: fall back to the trimmed input rather than empty.
+        assert_eq!(pentest_target_label("localhost"), "localhost");
+    }
 
     #[test]
     fn extracts_findings_block_and_ignores_evidence_fences() {
