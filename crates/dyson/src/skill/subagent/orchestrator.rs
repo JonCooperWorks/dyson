@@ -8,7 +8,7 @@
 //
 // Any orchestrator role can be composed from an `OrchestratorConfig`:
 //   - security_engineer: AST-aware vuln scanning + exploit generation
-//   - pentest_agent: authorization-scoped active testing
+//   - pentester: authorization-scoped active testing
 //   - (future): architect, devops_engineer, data_engineer, etc.
 //
 // Architecture:
@@ -569,6 +569,56 @@ impl Tool for OrchestratorTool {
                 progress: Some(1.0),
             });
 
+            // For the PenetrationTest harness, upgrade the plain-markdown
+            // artefact into a structured security-report: the protocol
+            // appends a machine-readable findings block, so persist it as
+            // the report document and point the artefact at it via
+            // `report_path` — the same contract security_engineer uses, and
+            // the field the UI keys the severity-grouped findings card on.
+            // Absent or malformed block falls through to plain markdown.
+            if self.config.harness == Some(OrchestratorHarness::PenetrationTest)
+                && let Some((findings, block)) = extract_pentest_findings(&out.content)
+            {
+                let run_id = format!("pentester-{started_epoch}");
+                let rollup = pentest_severity_rollup(&findings);
+                let doc = serde_json::json!({
+                    "schema_version": 1,
+                    "run_id": run_id,
+                    "generated_by": self.config.name,
+                    "target": target_name,
+                    "model": self.model,
+                    "provider": provider_label(&self.provider),
+                    "created_at": finished_epoch,
+                    "summary": rollup,
+                    "findings": findings,
+                });
+                match write_pentest_report_document(
+                    self.workspace.as_ref(),
+                    ctx.working_dir.as_path(),
+                    &run_id,
+                    &doc,
+                )
+                .await
+                {
+                    Ok(report_path) => {
+                        metadata["report_path"] = serde_json::json!(report_path);
+                        metadata["findings_rollup"] = rollup;
+                        // Strip the machine block so the markdown fallback
+                        // body stays clean prose.
+                        out.content.replace_range(block, "");
+                        while out.content.ends_with('\n') || out.content.ends_with(' ') {
+                            out.content.pop();
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "pentest: report document write failed; keeping markdown artefact"
+                        );
+                    }
+                }
+            }
+
             let artefact =
                 Artefact::markdown(kind, title, out.content.clone()).with_metadata(metadata);
             out.artefacts.push(artefact);
@@ -627,6 +677,99 @@ fn provider_label(provider: &LlmProvider) -> String {
     format!("{provider:?}")
 }
 
+/// Extract the machine-readable findings block the pentest protocol appends
+/// to its report: the last fenced code block whose body parses as a JSON
+/// object carrying a `findings` array. Returns the findings plus the byte
+/// range of the whole fenced block so the caller can strip it from the
+/// markdown body. Other code fences (curl commands, evidence) don't parse as
+/// a findings object and are skipped, so the last real block wins even when
+/// the report quotes shell snippets.
+fn extract_pentest_findings(
+    markdown: &str,
+) -> Option<(Vec<serde_json::Value>, std::ops::Range<usize>)> {
+    let mut from = 0usize;
+    let mut best: Option<(Vec<serde_json::Value>, std::ops::Range<usize>)> = None;
+    while let Some(rel) = markdown[from..].find("```") {
+        let fence_start = from + rel;
+        // Skip past the opening fence's line (which may carry a `json` tag).
+        let after_fence = fence_start + 3;
+        let line_end = markdown[after_fence..]
+            .find('\n')
+            .map(|i| after_fence + i + 1)
+            .unwrap_or(markdown.len());
+        let Some(close_rel) = markdown[line_end..].find("```") else {
+            break;
+        };
+        let body_end = line_end + close_rel;
+        let close_end = body_end + 3;
+        if let Ok(value) =
+            serde_json::from_str::<serde_json::Value>(markdown[line_end..body_end].trim())
+            && let Some(arr) = value.get("findings").and_then(serde_json::Value::as_array)
+        {
+            best = Some((arr.clone(), fence_start..close_end));
+        }
+        from = close_end;
+    }
+    best
+}
+
+/// Count findings into the four-level severity rollup the UI card and
+/// `SeverityRollup` expect. Unknown / `info` severities fold into `low`,
+/// matching the reader so a mistyped severity never drops a finding.
+fn pentest_severity_rollup(findings: &[serde_json::Value]) -> serde_json::Value {
+    let (mut critical, mut high, mut medium, mut low) = (0u32, 0u32, 0u32, 0u32);
+    for finding in findings {
+        match finding
+            .get("severity")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "critical" => critical += 1,
+            "high" => high += 1,
+            "medium" => medium += 1,
+            _ => low += 1,
+        }
+    }
+    serde_json::json!({ "critical": critical, "high": high, "medium": medium, "low": low })
+}
+
+/// Persist a pentest report document into the Swarm-mirrored `kb/` workspace
+/// (or the local `.dyson/` fallback), returning the workspace-relative path
+/// stamped into `report_path`. Mirrors
+/// `security_engineer::report::save_report_document`; best-effort, callers
+/// keep the markdown artefact if it fails.
+async fn write_pentest_report_document(
+    workspace: Option<&WorkspaceHandle>,
+    working_dir: &std::path::Path,
+    run_id: &str,
+    doc: &serde_json::Value,
+) -> std::result::Result<String, String> {
+    let rel = format!("kb/security-harness/reports/{run_id}.json");
+    let body = serde_json::to_string_pretty(doc).map_err(|e| e.to_string())?;
+    if let Some(workspace) = workspace {
+        let mut guard = workspace.write().await;
+        guard.set(&rel, &body);
+        guard.save().map_err(|e| e.to_string())?;
+        return Ok(rel);
+    }
+    let path = working_dir
+        .join(".dyson")
+        .join("security-harness")
+        .join("reports")
+        .join(format!("{run_id}.json"));
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    tokio::fs::write(&path, body)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rel)
+}
+
 /// Parsed input for `OrchestratorTool`.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct OrchestratorInput {
@@ -670,7 +813,7 @@ async fn complete_pentest_preflight(
 
     let result = crate::skill::mcp::elicitation::broker()
         .elicit(
-            "pentest_agent".to_string(),
+            "pentester".to_string(),
             "Penetration-test preflight: confirm the exact target, your authority to test it, \
              and the rules of engagement. No reconnaissance or active requests begin until \
              you accept this scope."
@@ -754,4 +897,61 @@ pub(crate) fn apply_pentest_preflight_result(
         *destination = value.to_string();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod pentest_report_tests {
+    use super::{extract_pentest_findings, pentest_severity_rollup};
+
+    #[test]
+    fn extracts_findings_block_and_ignores_evidence_fences() {
+        let md = "# Penetration Test Report\n\nSome prose.\n\n\
+```bash\ncurl -s https://target/mcp\n```\n\n\
+More prose describing a finding.\n\n\
+```json\n{\"findings\":[{\"title\":\"Open DCR\",\"severity\":\"medium\",\
+\"vulnerability_class\":\"broken_access_control\"}]}\n```\n";
+        let (findings, range) = extract_pentest_findings(md).expect("findings block found");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0]["title"], "Open DCR");
+        // The stripped range must remove the json fence but keep the prose
+        // and the unrelated bash fence.
+        let mut body = md.to_string();
+        body.replace_range(range, "");
+        assert!(!body.contains("\"findings\""), "json block stripped");
+        assert!(
+            body.contains("curl -s https://target/mcp"),
+            "evidence fence kept"
+        );
+        assert!(body.contains("More prose"), "prose kept");
+    }
+
+    #[test]
+    fn returns_none_without_a_findings_block() {
+        let md = "# Report\n\n```json\n{\"notfindings\":1}\n```\n";
+        assert!(extract_pentest_findings(md).is_none());
+    }
+
+    #[test]
+    fn last_findings_block_wins() {
+        let md = "```json\n{\"findings\":[]}\n```\nlater\n\
+```json\n{\"findings\":[{\"severity\":\"high\"}]}\n```";
+        let (findings, _) = extract_pentest_findings(md).expect("block");
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn severity_rollup_buckets_unknown_into_low() {
+        let findings = vec![
+            serde_json::json!({"severity":"CRITICAL"}),
+            serde_json::json!({"severity":"high"}),
+            serde_json::json!({"severity":"medium"}),
+            serde_json::json!({"severity":"info"}),
+            serde_json::json!({"title":"no severity"}),
+        ];
+        let rollup = pentest_severity_rollup(&findings);
+        assert_eq!(rollup["critical"], 1);
+        assert_eq!(rollup["high"], 1);
+        assert_eq!(rollup["medium"], 1);
+        assert_eq!(rollup["low"], 2);
+    }
 }

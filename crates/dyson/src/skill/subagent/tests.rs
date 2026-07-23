@@ -627,7 +627,7 @@ fn subagent_skill_system_prompt_lists_agents() {
     assert_eq!(skill.tools()[0].name(), "research_agent");
     assert_eq!(skill.tools()[1].name(), "coder");
     assert_eq!(skill.tools()[2].name(), "security_engineer");
-    assert_eq!(skill.tools()[3].name(), "pentest_agent");
+    assert_eq!(skill.tools()[3].name(), "pentester");
 
     let prompt = skill.system_prompt().unwrap();
     assert!(prompt.contains("research_agent"));
@@ -635,7 +635,7 @@ fn subagent_skill_system_prompt_lists_agents() {
     assert!(prompt.contains("subagents"));
     assert!(prompt.contains("coder"));
     assert!(prompt.contains("security_engineer"));
-    assert!(prompt.contains("pentest_agent"));
+    assert!(prompt.contains("pentester"));
 }
 
 #[test]
@@ -665,10 +665,10 @@ fn subagent_skill_skips_unknown_provider() {
     assert_eq!(skill.tools().len(), 3);
     assert_eq!(skill.tools()[0].name(), "coder");
     assert_eq!(skill.tools()[1].name(), "security_engineer");
-    assert_eq!(skill.tools()[2].name(), "pentest_agent");
+    assert_eq!(skill.tools()[2].name(), "pentester");
     assert!(skill.system_prompt().unwrap().contains("coder"));
     assert!(skill.system_prompt().unwrap().contains("security_engineer"));
-    assert!(skill.system_prompt().unwrap().contains("pentest_agent"));
+    assert!(skill.system_prompt().unwrap().contains("pentester"));
 }
 
 #[test]
@@ -745,8 +745,8 @@ fn name_allowlist_drops_coder_and_orchestrators_when_excluded() {
         "security_engineer must not appear in the prompt when filtered out"
     );
     assert!(
-        !prompt.contains("- **pentest_agent**"),
-        "pentest_agent must not appear in the prompt when filtered out"
+        !prompt.contains("- **pentester**"),
+        "pentester must not appear in the prompt when filtered out"
     );
 }
 
@@ -785,8 +785,8 @@ fn name_allowlist_none_preserves_default_registration() {
         "security_engineer must be present when no allowlist is supplied"
     );
     assert!(
-        names.contains(&"pentest_agent"),
-        "pentest_agent must be present when no allowlist is supplied"
+        names.contains(&"pentester"),
+        "pentester must be present when no allowlist is supplied"
     );
 }
 
@@ -992,7 +992,7 @@ fn default_provider_resolves_to_agent_settings() {
     assert_eq!(skill.tools()[0].name(), "test_default");
     assert_eq!(skill.tools()[1].name(), "coder");
     assert_eq!(skill.tools()[2].name(), "security_engineer");
-    assert_eq!(skill.tools()[3].name(), "pentest_agent");
+    assert_eq!(skill.tools()[3].name(), "pentester");
 }
 
 /// Regression: `SubagentTool` must bill the parent's model when its own
@@ -1378,9 +1378,9 @@ fn security_engineer_config_produces_correct_values() {
 }
 
 #[test]
-fn pentest_agent_config_has_active_test_contract() {
-    let config = pentest_agent_config();
-    assert_eq!(config.name, "pentest_agent");
+fn pentester_config_has_active_test_contract() {
+    let config = pentester_config();
+    assert_eq!(config.name, "pentester");
     assert!(config.description.contains("authorization"));
     assert!(config.system_prompt.contains("Hard boundaries"));
     assert_eq!(config.max_iterations, 80);
@@ -1396,9 +1396,9 @@ fn pentest_agent_config_has_active_test_contract() {
 }
 
 #[test]
-fn pentest_agent_schema_defers_scope_and_authorization_to_preflight() {
+fn pentester_schema_defers_scope_and_authorization_to_preflight() {
     let tool = OrchestratorTool::new(
-        pentest_agent_config(),
+        pentester_config(),
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
@@ -1452,7 +1452,7 @@ fn pentest_orchestrator_extends_execution_deadline() {
     let input = serde_json::json!({ "task": "test" });
     let ctx = ToolContext::from_cwd().unwrap();
 
-    let pentest = tool_for(pentest_agent_config());
+    let pentest = tool_for(pentester_config());
     assert!(
         pentest.execution_plan(&input, &ctx).timeout_ms > 300_000,
         "pentest orchestrator must exceed the 5-minute default deadline"
@@ -1545,9 +1545,9 @@ fn pentest_preflight_fails_closed_on_empty_content() {
 }
 
 #[tokio::test]
-async fn pentest_agent_rejects_missing_authorization_before_running_child() {
+async fn pentester_rejects_missing_authorization_before_running_child() {
     let tool = OrchestratorTool::new(
-        pentest_agent_config(),
+        pentester_config(),
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
@@ -3196,7 +3196,7 @@ fn builtin_orchestrator_configs_include_security_agents() {
     let configs = builtin_orchestrator_configs();
     assert_eq!(configs.len(), 2);
     assert_eq!(configs[0].name, "security_engineer");
-    assert_eq!(configs[1].name, "pentest_agent");
+    assert_eq!(configs[1].name, "pentester");
 }
 
 // -----------------------------------------------------------------------

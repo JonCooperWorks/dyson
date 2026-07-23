@@ -21,13 +21,13 @@
 
 mod coder;
 mod orchestrator;
-mod pentest_agent;
+mod pentester;
 mod repo_detect;
 mod security_engineer;
 
 pub use coder::CoderTool;
 pub use orchestrator::{OrchestratorConfig, OrchestratorTool};
-pub use pentest_agent::pentest_agent_config;
+pub use pentester::pentester_config;
 pub use security_engineer::security_engineer_config;
 
 use std::path::PathBuf;
@@ -884,7 +884,7 @@ pub fn builtin_subagent_configs() -> Vec<SubagentAgentConfig> {
 /// roles here — they automatically get planner/researcher/coder/verifier
 /// as inner subagents.
 pub fn builtin_orchestrator_configs() -> Vec<OrchestratorConfig> {
-    vec![security_engineer_config(), pentest_agent_config()]
+    vec![security_engineer_config(), pentester_config()]
 }
 
 /// Filter `parent_tools` by the subagent's optional `tools` list.

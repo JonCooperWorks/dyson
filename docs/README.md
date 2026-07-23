@@ -33,7 +33,7 @@ across turns.
 | [Dreaming](dreaming.md) | Background memory and skill-learning tasks |
 | [Public Agents](public-agents.md) | Group chat agents and restricted public-channel tools |
 | [Security Engineer Subagent](security-engineer-subagent.md) | Vulnerability-review subagent design |
-| [Penetration Test Agent](pentest-agent.md) | Authorization-scoped active-testing agent design |
+| [Penetration Test Agent](pentester.md) | Authorization-scoped active-testing agent design |
 | [Testing & Tuning](testing.md) | Test layers, smoke-to-regression workflow, prompt tuning |
 | [Skill Marketplaces](skill-marketplaces.md) | Swarm-hosted skill marketplace draft |
 | [Adding a Provider](adding-a-provider.md) | Provider-registry implementation steps |
