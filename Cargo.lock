@@ -911,7 +911,7 @@ dependencies = [
 [[package]]
 name = "dyson-common"
 version = "0.1.7"
-source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.7#e8a922a7685bfa49345b78aa4c08ec9ba6bc8102"
+source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.8#be5d6c3a31d5b8d439c6d325d80ed75d9c8f5bc3"
 dependencies = [
  "base64",
  "jsonwebtoken",
@@ -3192,7 +3192,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

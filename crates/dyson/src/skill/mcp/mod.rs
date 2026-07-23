@@ -35,6 +35,9 @@ struct OAuthPending {
     token_endpoint: String,
     client_id: String,
     client_secret: Option<String>,
+    /// RFC 8707 resource indicator sent on the authorize request; must be
+    /// echoed on the token exchange when present.
+    resource: Option<String>,
     completed: tokio::sync::Mutex<bool>,
 }
 
@@ -55,6 +58,7 @@ impl OAuthPending {
             &self.client_id,
             self.client_secret.as_deref(),
             &self.redirect_uri,
+            self.resource.as_deref(),
             &client,
         )
         .await?;
@@ -273,6 +277,11 @@ impl McpSkill {
         let (port, callback_handle, callback_rx) =
             oauth::start_callback_server(&state, Duration::from_secs(300)).await?;
 
+        // RFC 8707 resource indicator: the MCP server's own origin. Required by
+        // ASes that bind tokens to a resource (this fleet's exposure AS returns
+        // invalid_target without it); ignored by ASes that don't use it.
+        let resource = oauth::canonical_resource(url);
+
         let redirect_uri = config
             .redirect_uri
             .clone()
@@ -284,6 +293,7 @@ impl McpSkill {
             &redirect_uri,
             &pkce.challenge,
             &state,
+            resource.as_deref(),
         )?;
 
         let pending = Arc::new(OAuthPending {
@@ -293,6 +303,7 @@ impl McpSkill {
             token_endpoint: meta.token_endpoint,
             client_id,
             client_secret,
+            resource,
             completed: tokio::sync::Mutex::new(false),
         });
 

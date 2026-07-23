@@ -81,6 +81,7 @@ pub async fn register_client(
 ///
 /// Thin wrapper over the shared builder (which omits `scope` for an empty
 /// slice — some ASes reject `scope=`).
+#[allow(clippy::too_many_arguments)]
 pub fn build_auth_url(
     authorization_endpoint: &str,
     client_id: &str,
@@ -88,6 +89,7 @@ pub fn build_auth_url(
     redirect_uri: &str,
     code_challenge: &str,
     state: &str,
+    resource: Option<&str>,
 ) -> Result<String> {
     client::build_auth_url(
         authorization_endpoint,
@@ -96,11 +98,20 @@ pub fn build_auth_url(
         redirect_uri,
         code_challenge,
         state,
+        resource,
     )
     .map_err(map_oauth_err(authorization_endpoint))
 }
 
+/// The RFC 8707 resource indicator (origin-only) for an MCP server URL, or
+/// `None` when the URL can't be parsed — in which case the flow simply omits
+/// the indicator (ASes that don't need it are unaffected).
+pub fn canonical_resource(server_url: &str) -> Option<String> {
+    client::canonical_resource(server_url).ok()
+}
+
 /// Exchange an authorization code for tokens.
+#[allow(clippy::too_many_arguments)]
 pub async fn exchange_code(
     token_url: &str,
     code: &str,
@@ -108,6 +119,7 @@ pub async fn exchange_code(
     client_id: &str,
     client_secret: Option<&str>,
     redirect_uri: &str,
+    resource: Option<&str>,
     _client: &reqwest::Client,
 ) -> Result<TokenResponse> {
     let client = pinned_oauth_client(token_url, "token exchange").await?;
@@ -118,6 +130,7 @@ pub async fn exchange_code(
         client_id,
         client_secret,
         redirect_uri,
+        resource,
         &client,
     )
     .await
@@ -647,7 +660,7 @@ mod tests {
 
     #[test]
     fn build_auth_url_rejects_invalid_url() {
-        let result = build_auth_url("not a url", "cid", &[], "http://localhost/cb", "ch", "st");
+        let result = build_auth_url("not a url", "cid", &[], "http://localhost/cb", "ch", "st", None);
         assert!(result.is_err());
     }
 

@@ -17,7 +17,7 @@ dyson-persistence = { path = "../dyson-persistence" }
 # so the contract can't silently re-resolve. NOTE: the transport exposes
 # `&reqwest::Client`, so dyson + swarm + dyson-common must share one reqwest
 # major — all three ride reqwest 0.13 (see the reqwest dep below).
-dyson-common = { git = "ssh://git@github.com/JonCooperWorks/dyson-common.git", tag = "v0.1.7", features = ["oidc", "oauth-client"] }
+dyson-common = { git = "ssh://git@github.com/JonCooperWorks/dyson-common.git", tag = "v0.1.8", features = ["oidc", "oauth-client"] }
 
 # Shared across workspace crates — inherit from [workspace.dependencies]
 # so version bumps live in one place and cargo always dedupes.

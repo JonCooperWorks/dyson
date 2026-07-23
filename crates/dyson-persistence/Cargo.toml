@@ -6,7 +6,7 @@ license.workspace = true
 description = "Durable conversation and execution-journal persistence for Dyson"
 
 [dependencies]
-dyson-common = { git = "ssh://git@github.com/JonCooperWorks/dyson-common.git", tag = "v0.1.7" }
+dyson-common = { git = "ssh://git@github.com/JonCooperWorks/dyson-common.git", tag = "v0.1.8" }
 dyson-core = { path = "../dyson-core" }
 dyson-harness = { path = "../dyson-harness" }
 serde_json.workspace = true
