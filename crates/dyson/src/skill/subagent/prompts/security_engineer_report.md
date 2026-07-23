@@ -2,6 +2,8 @@
 
 Emit the final structured security harness report. Use only checkpoint facts: findings, rejected candidates, vulnerability-class coverage, gaps, dedupe groups, trace evidence, and stage history.
 
+Finding ids and all canonical finding fields are immutable. The harness will deterministically restore checkpoint facts after this stage. You may only add `suggested_patch` for an existing finding id; never rewrite severity, evidence, paths, validation state, or reachability.
+
 Return exactly one JSON object matching this schema:
 
 ```json

@@ -135,6 +135,14 @@ pub(crate) fn validate_decisions_semantic(
                 decision.finding_id
             ));
         }
+        if let Some(severity) = decision.severity.as_deref()
+            && !is_valid_severity(severity)
+        {
+            return Err(format!(
+                "validator returned invalid severity {:?} for {}; expected critical|high|medium|low|informational",
+                severity, decision.finding_id
+            ));
+        }
         if decision.decision == ValidationDecisionKind::Confirmed {
             if decision.evidence.trim().is_empty() {
                 return Err(format!(
@@ -203,6 +211,7 @@ pub(super) fn validate_report_struct(
     if report.class_coverage.is_empty() {
         return Err("class_coverage is required".into());
     }
+    let mut finding_ids = BTreeSet::new();
     for finding in &report.findings {
         if finding.id.trim().is_empty()
             || finding.title.trim().is_empty()
@@ -218,6 +227,9 @@ pub(super) fn validate_report_struct(
                 missing.join(", ")
             ));
         }
+        if !finding_ids.insert(finding.id.as_str()) {
+            return Err(format!("duplicate finding id {}", finding.id));
+        }
     }
     for (idx, group) in report.dedupe_groups.iter().enumerate() {
         if group.id.trim().is_empty()
@@ -228,6 +240,27 @@ pub(super) fn validate_report_struct(
             return Err(format!(
                 "dedupe_groups[{idx}] {} requires id, primary_finding_id, finding_ids, and root_cause",
                 describe_dedupe_group(group)
+            ));
+        }
+        if !finding_ids.contains(group.primary_finding_id.as_str()) {
+            return Err(format!(
+                "dedupe_groups[{idx}] references unknown primary_finding_id {}",
+                group.primary_finding_id
+            ));
+        }
+        for finding_id in &group.finding_ids {
+            if !finding_ids.contains(finding_id.as_str()) {
+                return Err(format!(
+                    "dedupe_groups[{idx}] references unknown finding_id {finding_id}"
+                ));
+            }
+        }
+    }
+    for trace in &report.trace_evidence {
+        if !finding_ids.contains(trace.finding_id.as_str()) {
+            return Err(format!(
+                "trace_evidence references unknown finding_id {}",
+                trace.finding_id
             ));
         }
     }
@@ -301,6 +334,9 @@ pub(super) fn describe_dedupe_group(group: &DedupeGroup) -> String {
 
 pub(super) fn missing_finding_evidence_fields(finding: &SecurityFinding) -> Vec<&'static str> {
     let mut missing = Vec::new();
+    if !is_valid_severity(&finding.severity) {
+        missing.push("severity");
+    }
     if canonical_vulnerability_class(&finding.vulnerability_class).is_none() {
         missing.push("vulnerability_class");
     }
@@ -326,6 +362,13 @@ pub(super) fn missing_finding_evidence_fields(finding: &SecurityFinding) -> Vec<
         missing.push("fix_recommendation");
     }
     missing
+}
+
+pub(super) fn is_valid_severity(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "critical" | "high" | "medium" | "low" | "info" | "informational"
+    )
 }
 
 pub(super) fn is_no_vulnerability_note(finding: &SecurityFinding) -> bool {
@@ -550,10 +593,6 @@ mod extract_json_tests {
 
     #[test]
     fn validate_report_struct_rejects_dedupe_referencing_unknown_finding() {
-        // Note: validate_report_struct itself doesn't cross-check
-        // dedupe finding_ids vs report.findings.ids — it just enforces
-        // structural completeness. Pin that contract here: an unknown
-        // finding_id in a dedupe group is NOT rejected today.
         let report = SecurityHarnessReport {
             schema_version: SECURITY_HARNESS_SCHEMA_VERSION,
             run_id: "run-1".into(),
@@ -579,12 +618,8 @@ mod extract_json_tests {
                 ..Default::default()
             }],
         };
-        // Today this passes — pin the behavior so a future tightening
-        // surfaces here.
-        validate_report_struct(report).expect(
-            "validate_report_struct does not cross-check dedupe_groups.finding_ids; \
-             if you tightened it, update this test",
-        );
+        let err = validate_report_struct(report).unwrap_err();
+        assert!(err.contains("unknown primary_finding_id"), "{err}");
     }
 
     #[test]
@@ -626,10 +661,7 @@ mod extract_json_tests {
     }
 
     #[test]
-    fn validate_report_struct_does_not_flag_duplicate_finding_ids() {
-        // Pin behavior: validate_report_struct does NOT cross-check that
-        // finding ids are unique within findings[]. If that's tightened
-        // later, update this test.
+    fn validate_report_struct_rejects_duplicate_finding_ids() {
         let f = finding_complete("finding-001");
         let report = SecurityHarnessReport {
             schema_version: SECURITY_HARNESS_SCHEMA_VERSION,
@@ -650,10 +682,23 @@ mod extract_json_tests {
                 ..Default::default()
             }],
         };
-        validate_report_struct(report).expect(
-            "validate_report_struct does not de-duplicate finding ids today; \
-             if you tightened it, update this test",
-        );
+        let err = validate_report_struct(report).unwrap_err();
+        assert!(err.contains("duplicate finding id"), "{err}");
+    }
+
+    #[test]
+    fn semantic_gate_rejects_invalid_severity() {
+        let findings = vec![finding_complete("finding-001")];
+        let parsed = ValidateStageOutput {
+            decisions: vec![ValidationDecision {
+                finding_id: "finding-001".into(),
+                decision: ValidationDecisionKind::Confirmed,
+                evidence: "evidence".into(),
+                severity: Some("urgent".into()),
+            }],
+        };
+        let err = validate_decisions_semantic(&parsed, &findings).unwrap_err();
+        assert!(err.contains("invalid severity"), "{err}");
     }
 
     #[test]

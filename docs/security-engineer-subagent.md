@@ -3,7 +3,7 @@
 `security_engineer` is Dyson's staged security research harness.  The parent-facing tool name is stable for allowlists and UI configuration, but the implementation runs a checkpointed pipeline rather than a single broad "review this repo" call:
 
 ```
-Recon → Hunt → Validate → Gapfill → Dedupe → Trace → Feedback → Report
+Recon → Hunt → Validate → Gapfill/follow-up → Dedupe → Trace → Judgment → Feedback/consumer follow-up → Report
 ```
 
 The harness writes durable checkpoint JSON to `kb/security-harness/checkpoints/<run_id>.json` in the Dyson workspace (or `.dyson/security-harness/checkpoints/<run_id>.json` when no workspace is wired up).  In Swarm mode the path is mirrored by the existing state-file sync worker, so a review can resume after instance recreate, rollout, or interruption — no security-specific Swarm API needed.
@@ -15,11 +15,12 @@ The harness does not ask one model to audit a whole repo in one pass.  Each stag
 1. **Recon** maps the architecture and trust boundaries; seeds taxonomy-driven hunt tasks.
 2. **Hunt** fans out one class specialist per vulnerability taxonomy entry.  Every class is hunted unconditionally — see "Always-fan-out" below.
 3. **Validate** decides per-finding: Confirmed, Rejected, NeedsMoreEvidence, Downgrade.  Can only decide on existing findings; cannot emit new ones.
-4. **Gapfill** turns uncovered high-risk areas into more hunt tasks for the next pass.
+4. **Gapfill** turns uncovered high-risk areas into more hunt tasks and immediately executes one bounded Hunt → Validate follow-up pass.
 5. **Dedupe** collapses findings that share a root cause.
 6. **Trace** establishes reachability from real entry points.
-7. **Feedback** turns reachable traces into consumer-path hunts.
-8. **Report** emits the evidence-backed Markdown report.
+7. **Judgment** evaluates confirmed findings against repository-internal production wiring and configuration.
+8. **Feedback** turns explicit reachable `consumer_paths` from Trace into one bounded Hunt → Validate → Trace → Judgment follow-up pass.
+9. **Report** emits the evidence-backed Markdown report.
 
 Checkpoints + reports track which taxonomy classes were considered, applicable, hunted, skipped, checked and cleared, or left for follow-up.
 
@@ -74,7 +75,7 @@ Each stage's child agent loop has its own iteration cap, named in [`security_eng
 Stage outputs are JSON, but the model is the producer.  Three layers of strictness, each calibrated separately:
 
 1. **Field deserialization.**  Every Deserialize struct field carries `#[serde(default)]`.  A model that omits, mistypes, or merely renames a field gets defaults, not a deserialization error.
-2. **Stage-boundary parsing.**  Recon, Hunt, and Validate fall through to defaults on parse failure with a `tracing::warn!` — a single bad specialist no longer takes down the wave; a prose-shaped validate output no longer kills the run.  The next stage proceeds with whatever the prior stage actually produced.
+2. **Stage-boundary parsing.** Recon remains permissive. A malformed Hunt specialist is recorded as degraded coverage and never as checked-and-cleared. Missing Validate, Trace, or Judgment results become explicit `needs_more_evidence`/unknown records plus coverage gaps, so a single bad worker does not kill the run or fabricate a negative verdict.
 3. **Semantic validation.**  Stays strict and fails the run.  The validator cannot reference a finding_id that doesn't exist, cannot confirm a finding missing required evidence fields, cannot confirm a no-vulnerability note as if it were a real finding.  Dedupe groups cannot point at unknown findings.  This is the quality floor — letting it through would put fabricated data into the report.
 
 Every catastrophic failure mode we debugged on live runs was at layer 2 (greedy `extract_json`, missing-field rejection, parse-fail-kills-run).  Each was fixed by moving the failure from "die" to "warn and continue."  Layer 3 keeps the floor intact — the harness still fails loudly when the model violates a contract, just not when the model produces malformed JSON.
@@ -87,7 +88,7 @@ Every catastrophic failure mode we debugged on live runs was at layer 2 (greedy 
   - `checkpoint.rs` — `CheckpointStore`, resume logic, time/scope/git helpers
   - `taxonomy.rs` — the vulnerability class table + class lookup + coverage tracking + per-class fan-out
   - `runtime.rs` — `SecurityHarnessRuntime`, `spawn_stage`, child-output merging
-  - `stages.rs` — the 8 stage runners + hunt fan-out helpers
+  - `stages.rs` — the 9 stage runners + hunt fan-out and bounded follow-up helpers
   - `stack.rs` — language/framework stack specialists + provably-moot class pruning
   - `parse.rs` — JSON extraction + per-stage parsers + report schema validation (shape vs semantic split)
   - `report.rs` — Markdown rendering + dedupe + reportable-finding filtering
@@ -148,7 +149,7 @@ On invocation:
 1. Parent calls `security_engineer({ task, context?, path? })`.
 2. `OrchestratorTool::run` canonicalises `path` to a scoped review root.
 3. The harness creates a checkpoint with run id, target path + ref, scope, current stage, vulnerability-class coverage, completed/pending tasks, findings, validation decisions, dedupe groups, trace results, gapfill tasks, report validation state, timestamps, provider/model metadata, harness version, and schema version.
-4. Each stage worker receives the current checkpoint JSON and a stage-specific prompt.  Recon creates narrow taxonomy-driven hunt tasks; the taxonomy fan-out ensures every class is queued regardless; Hunt completes bounded task batches; Validate decides on existing findings only; Dedupe and Feedback are deterministic; Report must pass schema validation and gets one repair attempt + a deterministic checkpoint-based fallback.
+4. Each stage worker receives the current checkpoint JSON and a stage-specific prompt. Recon creates narrow taxonomy-driven hunt tasks; the taxonomy fan-out ensures every class is queued regardless; Hunt completes bounded task batches; Validate decides on existing findings only; Gapfill and Feedback can execute one bounded follow-up cycle; and Report must pass schema validation. Canonical checkpoint findings remain authoritative even when the report model supplies an optional suggested patch.
 5. After every major stage and completed hunt wave, the harness saves the checkpoint.
 
 On resume:
@@ -253,6 +254,18 @@ grep 'tool call started' /tmp/dyson-live-<target>-<iter>.log \
 ```
 
 Prompt tunes do not get regression tests — LLM outputs are non-deterministic and a test asserting "a tool was called" is too weak.  The iteration transcript (logs + reports under distinct suffixes) is the test artifact.
+
+### Quantitative benchmark scoring
+
+The live-review example now copies each canonical durable report to `<output-dir>/<target>.json`. The versioned benchmark manifest at [`docs/evals/security-engineer-benchmark.json`](evals/security-engineer-benchmark.json) grades exact vulnerability class, path, root-cause language, minimum severity, known false-positive traps, duplicate ids, and line-qualified citations. Pass multiple independent sweep directories to measure variance:
+
+```bash
+cargo run -p dyson --example security_engineer_benchmark_score -- \
+  --manifest docs/evals/security-engineer-benchmark.json \
+  --reports-dir test-output/run-1 test-output/run-2 test-output/run-3
+```
+
+The scorer exits non-zero for missing reports, invalid citations/ids, root-cause recall below the manifest threshold, or forbidden-match rate above its threshold.
 
 Code changes discovered in the loop (e.g. iteration cap bumps, parse-loosening, `OrchestratorTool.path`) get unit tests in the per-module `mod tests` blocks and in `crates/dyson/src/skill/subagent/tests.rs`.
 

@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "min_root_cause_recall": 0.8,
+  "max_forbidden_match_rate": 0.0,
+  "cases": [
+    {
+      "id": "log4j-2.14.1",
+      "expected": [{
+        "class_id": "injection_unsafe_execution",
+        "path_contains_any": ["JndiManager.java"],
+        "root_cause_contains_any": ["jndi", "lookup"],
+        "minimum_severity": "critical"
+      }]
+    },
+    {
+      "id": "nextjs-14.0.0",
+      "expected": [{
+        "class_id": "auth_authorization",
+        "path_contains_any": ["sandbox.ts"],
+        "root_cause_contains_any": ["x-middleware-subrequest", "middleware"],
+        "minimum_severity": "high"
+      }]
+    },
+    {
+      "id": "lodash-4.17.11",
+      "expected": [{
+        "class_id": "injection_unsafe_execution",
+        "path_contains_any": ["lodash.js"],
+        "root_cause_contains_any": ["prototype pollution", "constructor"],
+        "minimum_severity": "high"
+      }]
+    },
+    {
+      "id": "tomcat-9.0.30",
+      "expected": [{
+        "class_id": "auth_authorization",
+        "path_contains_any": ["AjpProcessor.java"],
+        "root_cause_contains_any": ["ajp", "ghostcat", "attribute"],
+        "minimum_severity": "high"
+      }]
+    },
+    {
+      "id": "cashio",
+      "expected": [{
+        "class_id": "auth_authorization",
+        "path_contains_any": ["actions/mod.rs"],
+        "root_cause_contains_any": ["unanchored", "canonical", "validation chain"],
+        "minimum_severity": "critical"
+      }]
+    },
+    {
+      "id": "plausible-2.0.0",
+      "forbidden": [{
+        "class_id": "session_oauth_csrf",
+        "path_contains_any": ["auth_controller.ex"],
+        "root_cause_contains_any": ["open redirect", "logout redirect"],
+        "minimum_severity": "low"
+      }]
+    }
+  ]
+}

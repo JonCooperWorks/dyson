@@ -235,11 +235,18 @@ pub struct TraceResult {
     #[serde(default)]
     pub finding_id: String,
     #[serde(default)]
-    pub reachable: bool,
+    /// Tri-state reachability. `None` means the trace worker did not return a
+    /// usable verdict; it must never be interpreted as "not reachable".
+    pub reachable: Option<bool>,
     #[serde(default)]
     pub severity_effect: String,
     #[serde(default)]
     pub evidence: Vec<String>,
+    /// Concrete downstream caller/entry paths discovered while tracing. Only
+    /// these paths seed the bounded Feedback hunt; the finding's sink paths do
+    /// not count as consumers.
+    #[serde(default)]
+    pub consumer_paths: Vec<String>,
 }
 
 /// A repo-internal production-reachability verdict for one confirmed finding,
@@ -252,7 +259,9 @@ pub struct JudgmentResult {
     #[serde(default)]
     pub finding_id: String,
     #[serde(default)]
-    pub reachable_in_prod: bool,
+    /// Tri-state production reachability. `None` preserves uncertainty when a
+    /// worker omits the field or its output cannot be parsed.
+    pub reachable_in_prod: Option<bool>,
     #[serde(default)]
     pub rationale: String,
     /// Effect on severity, e.g. "keeps high", "downgrade to low (behind a
@@ -310,6 +319,11 @@ pub struct RunHealth {
     /// the model did little work before returning.
     #[serde(default)]
     pub fast_stages: Vec<String>,
+    /// Per-finding stages that returned incomplete or malformed output. Entries
+    /// use `stage:finding-id` so reports can distinguish unknown coverage from
+    /// a negative verdict.
+    #[serde(default)]
+    pub incomplete_results: Vec<String>,
 }
 
 /// Per-finding cross-run ledger status, attached to the report after the
@@ -844,9 +858,10 @@ mod tests {
             }],
             trace_evidence: vec![TraceResult {
                 finding_id: "f1".into(),
-                reachable: true,
+                reachable: Some(true),
                 severity_effect: "keeps".into(),
                 evidence: vec!["te".into()],
+                consumer_paths: vec!["src/caller.rs:4".into()],
             }],
             stage_history: vec![StageHistoryEntry {
                 stage: SecurityHarnessStage::Report,

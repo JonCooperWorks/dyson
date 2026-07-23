@@ -4,7 +4,8 @@
 //! is no longer a single broad "review this repo" child agent. The
 //! orchestrator drives a staged harness:
 //!
-//!   Recon → Hunt → Validate → Gapfill → Dedupe → Trace → Feedback → Report
+//!   Recon → Hunt → Validate → Gapfill/follow-up → Dedupe → Trace → Judgment
+//!   → Feedback/consumer follow-up → Report
 //!
 //! Each stage writes a durable JSON checkpoint under the Dyson workspace's
 //! `kb/` tree. In Swarm mode that path is mirrored by the existing
@@ -17,7 +18,7 @@
 //! - [`checkpoint`] — `CheckpointStore`, resume logic, time/scope/git helpers
 //! - [`taxonomy`]   — vulnerability class table + class lookup/normalization
 //! - [`runtime`]    — `SecurityHarnessRuntime` + `spawn_stage`
-//! - [`stages`]     — eight stage runners + hunt fan-out helpers
+//! - [`stages`]     — nine stage runners + bounded follow-up hunt helpers
 //! - [`stack`]      — language/framework specialists + provably-moot pruning
 //! - [`parse`]      — JSON extraction + stage/report schema validation
 //! - [`report`]     — Markdown rendering + dedupe + reportable filtering
@@ -99,13 +100,15 @@ const DIRECT_TOOLS: &[&str] = &[
 ];
 
 pub const SECURITY_HARNESS_SCHEMA_VERSION: u32 = 1;
-pub const SECURITY_HARNESS_VERSION: &str = "security-harness-v2";
+pub const SECURITY_HARNESS_VERSION: &str = "security-harness-v3";
 /// Harness versions whose checkpoints this binary can still resume. All v1→v2
-/// changes are additive (`#[serde(default)]` fields, a new optional Judgment
-/// stage), so a v1 checkpoint deserializes and resumes cleanly — any new stage
-/// simply isn't in its `stage_history` yet and runs once. Keep the current
-/// version in this list.
-pub const SUPPORTED_HARNESS_VERSIONS: &[&str] = &["security-harness-v1", "security-harness-v2"];
+/// and v2→v3 changes are additive/default-tolerant, so older checkpoints
+/// deserialize and resume cleanly. Keep the current version in this list.
+pub const SUPPORTED_HARNESS_VERSIONS: &[&str] = &[
+    "security-harness-v1",
+    "security-harness-v2",
+    "security-harness-v3",
+];
 /// Pure runaway backstop on class-specialist hunters spawned in one Hunt
 /// stage.  Specialist count is driven by the work list (one per applicable
 /// class), not by this number — it only stops a pathological recon that
@@ -202,8 +205,9 @@ pub(crate) fn resolve_stage_models() -> std::collections::BTreeMap<SecurityHarne
     resolve_stage_models_from(|var| std::env::var(var).ok())
 }
 
-/// Only the LLM-backed stages are listed; Gapfill/Dedupe/Feedback run no child,
-/// so an override would be inert.
+/// Only directly LLM-backed stages are listed. Gapfill and Feedback may invoke
+/// bounded follow-up Hunt/Validate/Trace/Judgment workers, which use those
+/// workers' overrides; an override for the bookkeeping stage itself is inert.
 const STAGE_MODEL_ENV: &[(SecurityHarnessStage, &str)] = &[
     (SecurityHarnessStage::Recon, "DYSON_SEC_RECON_MODEL"),
     (SecurityHarnessStage::Hunt, "DYSON_SEC_HUNT_MODEL"),
@@ -663,8 +667,31 @@ async fn run_security_harness_inner(
             SecurityHarnessStage::Hunt => run_hunt_stage(rt, &store, &mut checkpoint).await,
             SecurityHarnessStage::Validate => run_validate_stage(rt, &mut checkpoint).await,
             SecurityHarnessStage::Gapfill => {
-                run_gapfill_stage(&mut checkpoint);
-                Ok(None)
+                async {
+                    run_gapfill_stage(&mut checkpoint);
+                    // Gapfill creates real pending work. Execute it once here,
+                    // then validate any newly discovered candidates before the
+                    // normal Dedupe/Trace stages continue.
+                    let mut aggregate = ToolOutput::success(String::new());
+                    let mut ran = false;
+                    if checkpoint
+                        .pending_tasks
+                        .iter()
+                        .any(|task| task.status == TaskStatus::Pending)
+                    {
+                        if let Some(stage_out) = run_hunt_stage(rt, &store, &mut checkpoint).await?
+                        {
+                            self::runtime::merge_stage_tool_output(&mut aggregate, stage_out);
+                            ran = true;
+                        }
+                        if let Some(stage_out) = run_validate_stage(rt, &mut checkpoint).await? {
+                            self::runtime::merge_stage_tool_output(&mut aggregate, stage_out);
+                            ran = true;
+                        }
+                    }
+                    Ok::<_, String>(ran.then_some(aggregate))
+                }
+                .await
             }
             SecurityHarnessStage::Dedupe => {
                 run_dedupe_stage(&mut checkpoint);
@@ -673,8 +700,40 @@ async fn run_security_harness_inner(
             SecurityHarnessStage::Trace => run_trace_stage(rt, &mut checkpoint).await,
             SecurityHarnessStage::Judgment => run_judgment_stage(rt, &mut checkpoint).await,
             SecurityHarnessStage::Feedback => {
-                run_feedback_stage(&mut checkpoint);
-                Ok(None)
+                async {
+                    run_feedback_stage(&mut checkpoint);
+                    // One bounded consumer-path cycle. Hunt already drains its
+                    // own follow-up queue in bounded waves; this does not recurse
+                    // back into Feedback and therefore cannot loop indefinitely.
+                    let mut aggregate = ToolOutput::success(String::new());
+                    let mut ran = false;
+                    if checkpoint
+                        .pending_tasks
+                        .iter()
+                        .any(|task| task.status == TaskStatus::Pending)
+                    {
+                        if let Some(stage_out) = run_hunt_stage(rt, &store, &mut checkpoint).await?
+                        {
+                            self::runtime::merge_stage_tool_output(&mut aggregate, stage_out);
+                            ran = true;
+                        }
+                        if let Some(stage_out) = run_validate_stage(rt, &mut checkpoint).await? {
+                            self::runtime::merge_stage_tool_output(&mut aggregate, stage_out);
+                            ran = true;
+                        }
+                        if let Some(stage_out) = run_trace_stage(rt, &mut checkpoint).await? {
+                            self::runtime::merge_stage_tool_output(&mut aggregate, stage_out);
+                            ran = true;
+                        }
+                        if let Some(stage_out) = run_judgment_stage(rt, &mut checkpoint).await? {
+                            self::runtime::merge_stage_tool_output(&mut aggregate, stage_out);
+                            ran = true;
+                        }
+                        run_dedupe_stage(&mut checkpoint);
+                    }
+                    Ok::<_, String>(ran.then_some(aggregate))
+                }
+                .await
             }
             SecurityHarnessStage::Report => run_report_stage(rt, &mut checkpoint).await,
         };

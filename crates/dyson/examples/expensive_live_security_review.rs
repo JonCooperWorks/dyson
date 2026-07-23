@@ -1155,6 +1155,37 @@ async fn run_target(
     let report_path = output_dir.join(filename);
     std::fs::write(&report_path, &output.content)?;
 
+    // Also copy the canonical durable JSON into a stable case-id filename so
+    // `security_engineer_benchmark_score` grades checkpoint facts rather than
+    // scraping rendered Markdown. The harness stores local example reports
+    // under `.dyson/security-harness/reports/<run-id>.json`.
+    let run_id = output.artefacts.iter().find_map(|artefact| {
+        artefact
+            .metadata
+            .as_ref()
+            .and_then(|value| value.get("run_id"))
+            .and_then(|value| value.as_str())
+    });
+    if let Some(run_id) = run_id {
+        let source = std::env::current_dir()?
+            .join(".dyson/security-harness/reports")
+            .join(format!("{run_id}.json"));
+        let json_filename = match report_suffix {
+            Some(s) => format!("{}-{s}.json", t.name),
+            None => format!("{}.json", t.name),
+        };
+        let json_path = output_dir.join(json_filename);
+        if source.is_file() {
+            std::fs::copy(&source, &json_path)?;
+            println!("  structured report -> {}", json_path.display());
+        } else {
+            eprintln!(
+                "  warning: canonical structured report missing at {}",
+                source.display()
+            );
+        }
+    }
+
     println!(
         "  finished in {:.1}s | {} bytes | report -> {}{}",
         elapsed.as_secs_f32(),

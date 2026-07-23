@@ -4178,9 +4178,10 @@ async fn security_engineer_e2e_resume_at_report() {
         .trace_results_so_far
         .push(security_engineer::TraceResult {
             finding_id: "finding-001".into(),
-            reachable: true,
+            reachable: Some(true),
             severity_effect: "keeps".into(),
             evidence: vec!["trace ev".into()],
+            consumer_paths: vec![],
         });
     checkpoint
         .class_coverage

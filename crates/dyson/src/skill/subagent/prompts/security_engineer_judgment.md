@@ -11,11 +11,13 @@ Use only signals you can read from the checked-out repository at its current `HE
 
 For each confirmed finding decide:
 
-- `reachable_in_prod`: `true` if an attacker can reach the vulnerable path in a default production deployment; `false` if it is gated off, dead, test-only, or otherwise not deployed.
+- `reachable_in_prod`: `true` if an attacker can reach the vulnerable path in a default production deployment; `false` only when repo evidence proves it is gated off, dead, test-only, or otherwise not deployed; `null` when the repository does not contain enough evidence.
 - `rationale`: the specific in-repo evidence for that verdict (cite the config/flag/wiring you read with your tools).
 - `severity_effect`: the effect on severity, e.g. `keeps high`, `downgrade to low (route not mounted in prod compose)`, `downgrade to medium (behind disabled feature flag X)`.
 
-A `false` verdict NEVER deletes a finding — it annotates it. When you are not sure, prefer `reachable_in_prod: true` (assume reachable) and say why the evidence is inconclusive.
+A `false` verdict NEVER deletes a finding — it annotates it. When you are not sure, use `reachable_in_prod: null`; uncertainty must not be represented as unreachable.
+
+Return exactly one judgment for every confirmed finding in the checkpoint.
 
 Return exactly one JSON object:
 

@@ -48,7 +48,7 @@ pub(super) fn render_report_markdown(
     let reachable = report
         .trace_evidence
         .iter()
-        .filter(|trace| trace.reachable)
+        .filter(|trace| trace.reachable == Some(true))
         .count();
     out.push_str("## Summary\n\n");
     out.push_str(&format!("- Findings: {}\n", report.findings.len()));
@@ -239,6 +239,12 @@ pub(super) fn render_run_health(
             inline_code_list(&health.fast_stages)
         ));
     }
+    if !health.incomplete_results.is_empty() {
+        out.push_str(&format!(
+            "- Incomplete per-finding results: {}\n",
+            inline_code_list(&health.incomplete_results)
+        ));
+    }
     // The one signal worth shouting about: nothing found AND something broke.
     // A zero-finding run with degraded specialists is far likelier "we missed
     // it" than "the code is clean" — tell the operator to re-run.
@@ -340,10 +346,10 @@ pub(super) fn render_finding_markdown(
     {
         out.push_str(&format!(
             "- Trace: `{}`",
-            if trace.reachable {
-                "reachable"
-            } else {
-                "not reachable"
+            match trace.reachable {
+                Some(true) => "reachable",
+                Some(false) => "not reachable",
+                None => "unknown",
             }
         ));
         if !trace.severity_effect.is_empty() {
@@ -360,10 +366,10 @@ pub(super) fn render_finding_markdown(
     {
         out.push_str(&format!(
             "- Prod reachability: `{}`",
-            if judgment.reachable_in_prod {
-                "reachable"
-            } else {
-                "not reachable"
+            match judgment.reachable_in_prod {
+                Some(true) => "reachable",
+                Some(false) => "not reachable",
+                None => "unknown",
             }
         ));
         if !judgment.severity_effect.trim().is_empty() {
@@ -602,6 +608,31 @@ pub(crate) fn report_from_checkpoint(checkpoint: &SecurityCheckpoint) -> Securit
         stage_history: checkpoint.stage_history.clone(),
         class_coverage: checkpoint.class_coverage.clone(),
     }
+}
+
+/// Make checkpoint facts authoritative. The report model is useful for an
+/// optional small suggested patch, but it must not rewrite, add, omit, renumber,
+/// or re-severity validated findings or orchestration evidence.
+pub(super) fn reconcile_report_with_checkpoint(
+    checkpoint: &SecurityCheckpoint,
+    model_report: &SecurityHarnessReport,
+) -> SecurityHarnessReport {
+    let mut canonical = report_from_checkpoint(checkpoint);
+    for finding in &mut canonical.findings {
+        if !finding.suggested_patch.trim().is_empty() {
+            continue;
+        }
+        if let Some(model_finding) = model_report
+            .findings
+            .iter()
+            .find(|item| item.id == finding.id)
+            && !model_finding.suggested_patch.trim().is_empty()
+        {
+            finding.suggested_patch = model_finding.suggested_patch.clone();
+        }
+    }
+    canonical.dedupe_groups = dedupe_findings(&canonical.findings);
+    canonical
 }
 
 /// Where the per-run structured report documents live in the workspace `kb/`
@@ -853,6 +884,41 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_keeps_checkpoint_findings_authoritative() {
+        let mut cp = cp_with_target("/repo");
+        cp.class_coverage = report_with(&cp, vec![]).class_coverage;
+        cp.findings_so_far
+            .push(finding("finding-001", "canonical root cause"));
+        cp.validation_decisions_so_far.push(ValidationDecision {
+            finding_id: "finding-001".into(),
+            decision: ValidationDecisionKind::Confirmed,
+            evidence: "validated".into(),
+            severity: Some("medium".into()),
+        });
+        let mut rewritten = finding("finding-001", "model rewrite");
+        rewritten.title = "invented title".into();
+        rewritten.severity = "critical".into();
+        rewritten.suggested_patch = "--- a/x\n+++ b/x\n@@\n-bad\n+good\n".into();
+        let mut invented = finding("finding-999", "invented");
+        invented.severity = "critical".into();
+        let model_report = report_with(&cp, vec![rewritten, invented]);
+
+        let reconciled = reconcile_report_with_checkpoint(&cp, &model_report);
+        assert_eq!(
+            reconciled.findings.len(),
+            1,
+            "invented finding must be dropped"
+        );
+        assert_eq!(reconciled.findings[0].title, "title for finding-001");
+        assert_eq!(reconciled.findings[0].severity, "medium");
+        assert_eq!(reconciled.findings[0].root_cause, "canonical root cause");
+        assert!(
+            reconciled.findings[0].suggested_patch.contains("+good"),
+            "the one model-owned field may be retained"
+        );
+    }
+
+    #[test]
     fn append_suggested_patch_emits_diff_fence_only_when_present() {
         let mut empty = String::new();
         append_suggested_patch(&mut empty, "   ");
@@ -894,6 +960,7 @@ mod tests {
         cp.run_health.degraded_specialists = 2;
         cp.run_health.fast_stages = vec!["recon:1s".into()];
         cp.run_health.requeued_classes = vec!["auth_authorization".into()];
+        cp.run_health.incomplete_results = vec!["trace:finding-001".into()];
         // Zero confirmed findings + degraded specialists → the loud warning.
         let report = report_with(&cp, vec![]);
         let md = render_report_markdown(&report, &cp);
@@ -904,6 +971,7 @@ mod tests {
             md.contains("auth_authorization"),
             "retried classes must be listed"
         );
+        assert!(md.contains("trace:finding-001"));
         assert!(
             md.contains("WARNING"),
             "zero findings with degraded specialists must warn to re-run"
@@ -930,7 +998,7 @@ mod tests {
         let mut cp = cp_with_target("/repo");
         cp.judgment_results.push(JudgmentResult {
             finding_id: "finding-001".into(),
-            reachable_in_prod: false,
+            reachable_in_prod: Some(false),
             rationale: "route not mounted in deploy/compose.prod.yaml".into(),
             severity_effect: "downgrade to low".into(),
         });

@@ -18,7 +18,9 @@ use super::checkpoint::{CheckpointStore, unix_seconds};
 use super::parse::{
     parse_report_output, parse_stage_json, parse_validate_output_shape, validate_decisions_semantic,
 };
-use super::report::{report_checkpoint_for_prompt, report_from_checkpoint};
+use super::report::{
+    reconcile_report_with_checkpoint, report_checkpoint_for_prompt, report_from_checkpoint,
+};
 use super::runtime::{SecurityHarnessRuntime, merge_stage_tool_output, spawn_stage};
 use super::stack::{StackSpecialist, prune_inapplicable_class_tasks, stack_specialists};
 use super::taxonomy::{
@@ -210,7 +212,14 @@ pub(super) async fn run_hunt_stage(
     // deterministic detection, spawned as its own hunter briefed with only its
     // own reference material.  Augments the class specialists with
     // idiomatic-sink coverage without bloating any shared prompt.  One wave.
-    let stack = stack_specialists(&detection);
+    // Stack specialists are a broad augmentation pass and should run only on
+    // the first Hunt stage. Follow-up Hunt calls execute the newly queued
+    // class-scoped work without duplicating the full language/framework pass.
+    let stack = if stage_completed(checkpoint, SecurityHarnessStage::Hunt) {
+        Vec::new()
+    } else {
+        stack_specialists(&detection)
+    };
     if !stack.is_empty() {
         ran_batch = true;
         let dispatches = stack
@@ -363,8 +372,9 @@ pub(super) fn fold_hunt_wave(
     }
 }
 
-/// Fold a specialist that did not complete — a transport error, a timeout, or
-/// a spawn failure.  Mirrors the prose-fallback path in [`fold_hunt_result`]:
+/// Fold a specialist that did not complete — a transport error, a timeout, a
+/// spawn failure, or malformed output. Shared by [`fold_hunt_result`] so every
+/// unusable response gets identical retry and coverage-gap bookkeeping:
 /// mark the specialist's batch complete (so a still-pending class is not
 /// re-dispatched into an infinite loop), record a coverage gap so the report
 /// surfaces the blind spot honestly, and emit a panel event.  Then the wave
@@ -445,21 +455,22 @@ pub(super) fn fold_hunt_result(
     stage_out: ToolOutput,
 ) {
     merge_stage_tool_output(aggregate, stage_out);
-    // Loose at the shape boundary: a specialist that returns prose instead
-    // of JSON drops ITS findings, not the whole wave.  The class still gets
-    // marked complete below (the specialist had its turn), and the next
-    // stage proceeds with what other specialists returned.  Mirrors recon's
-    // non-fatal pattern — every previous catastrophic failure we debugged
-    // was a stage-boundary parse killing the run.
-    let hunt: HuntStageOutput = parse_stage_json(&raw).unwrap_or_else(|e| {
-        tracing::warn!(
-            error = %e,
-            specialist = %d.label,
-            "hunt specialist output did not parse as JSON; dropping its findings, \
-             marking its batch complete"
-        );
-        HuntStageOutput::default()
-    });
+    // A malformed response is degraded coverage, not a clean empty result.
+    // Route it through the same retry/gap bookkeeping as a transport failure
+    // so the class can never be reported as checked-and-cleared.
+    let hunt: HuntStageOutput = match parse_stage_json(&raw) {
+        Ok(hunt) => hunt,
+        Err(e) => {
+            fold_hunt_degraded(
+                checkpoint,
+                aggregate,
+                d,
+                &format!("output was not parseable JSON: {e}"),
+                requeue_shallow_enabled(),
+            );
+            return;
+        }
+    };
     if d.is_class {
         let completed_ids: BTreeSet<String> = if hunt.completed_task_ids.is_empty() {
             d.batch_ids.iter().cloned().collect()
@@ -637,7 +648,20 @@ pub(super) async fn run_validate_stage(
     let prompt = include_str!("../prompts/security_engineer_validate.md");
     // One shard per up-to-STAGE_SHARD_SIZE findings; the small-review case is a
     // single child identical to before.
-    let findings = checkpoint.findings_so_far.clone();
+    let decided: BTreeSet<&str> = checkpoint
+        .validation_decisions_so_far
+        .iter()
+        .map(|decision| decision.finding_id.as_str())
+        .collect();
+    let findings = checkpoint
+        .findings_so_far
+        .iter()
+        .filter(|finding| !decided.contains(finding.id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if findings.is_empty() {
+        return Ok(None);
+    }
     let shards = shard_by_findings(checkpoint, &findings);
     let results = dispatch_checkpoint_shards(
         rt,
@@ -674,9 +698,44 @@ pub(super) async fn run_validate_stage(
     // fails loudly — letting it through would put junk in the report.
     let combined = ValidateStageOutput { decisions };
     validate_decisions_semantic(&combined, &checkpoint.findings_so_far)?;
-    checkpoint
-        .validation_decisions_so_far
-        .extend(combined.decisions);
+    let expected: BTreeSet<&str> = findings.iter().map(|finding| finding.id.as_str()).collect();
+    let mut returned = BTreeSet::new();
+    for decision in &combined.decisions {
+        if !expected.contains(decision.finding_id.as_str()) {
+            return Err(format!(
+                "validator returned finding {} outside its pending shard set",
+                decision.finding_id
+            ));
+        }
+        if !returned.insert(decision.finding_id.clone()) {
+            return Err(format!(
+                "validator returned duplicate decision for {}",
+                decision.finding_id
+            ));
+        }
+    }
+    let mut decisions = combined.decisions;
+    for finding in &findings {
+        if returned.contains(&finding.id) {
+            continue;
+        }
+        checkpoint
+            .run_health
+            .incomplete_results
+            .push(format!("validate:{}", finding.id));
+        checkpoint.coverage_gaps.push(CoverageGap {
+            area: format!("Validation for {}", finding.id),
+            reason: "validator returned no decision; preserved as needs_more_evidence".into(),
+            risk: finding.severity.clone(),
+        });
+        decisions.push(super::types::ValidationDecision {
+            finding_id: finding.id.clone(),
+            decision: ValidationDecisionKind::NeedsMoreEvidence,
+            evidence: "validator returned no usable decision".into(),
+            severity: None,
+        });
+    }
+    checkpoint.validation_decisions_so_far.extend(decisions);
     Ok(Some(aggregate))
 }
 
@@ -736,7 +795,28 @@ pub(super) async fn run_trace_stage(
     let prompt = include_str!("../prompts/security_engineer_trace.md");
     // Shard the full finding set (each shard's child traces its own confirmed
     // findings); single child for a small review.
-    let findings = checkpoint.findings_so_far.clone();
+    let confirmed_ids: BTreeSet<&str> = checkpoint
+        .validation_decisions_so_far
+        .iter()
+        .filter(|decision| decision.decision == ValidationDecisionKind::Confirmed)
+        .map(|decision| decision.finding_id.as_str())
+        .collect();
+    let traced_ids: BTreeSet<&str> = checkpoint
+        .trace_results_so_far
+        .iter()
+        .map(|trace| trace.finding_id.as_str())
+        .collect();
+    let findings = checkpoint
+        .findings_so_far
+        .iter()
+        .filter(|finding| {
+            confirmed_ids.contains(finding.id.as_str()) && !traced_ids.contains(finding.id.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if findings.is_empty() {
+        return Ok(None);
+    }
     let shards = shard_by_findings(checkpoint, &findings);
     let results = dispatch_checkpoint_shards(
         rt,
@@ -766,6 +846,7 @@ pub(super) async fn run_trace_stage(
             }
         }
     }
+    complete_trace_results(checkpoint, &findings)?;
     if let Some(err) = last_parse_err {
         checkpoint.report_validation_state = ReportValidationState {
             status: "trace_unparsed".into(),
@@ -773,6 +854,80 @@ pub(super) async fn run_trace_stage(
         };
     }
     Ok(Some(aggregate))
+}
+
+/// Enforce one trace result per newly-confirmed finding without converting a
+/// missing/malformed result into `reachable = false`. Unknowns are durable and
+/// visible in both coverage gaps and Run Health.
+fn complete_trace_results(
+    checkpoint: &mut SecurityCheckpoint,
+    findings: &[SecurityFinding],
+) -> std::result::Result<(), String> {
+    let expected: BTreeSet<&str> = findings.iter().map(|finding| finding.id.as_str()).collect();
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for trace in &checkpoint.trace_results_so_far {
+        if expected.contains(trace.finding_id.as_str()) {
+            *counts.entry(trace.finding_id.clone()).or_default() += 1;
+        } else if !checkpoint
+            .findings_so_far
+            .iter()
+            .any(|f| f.id == trace.finding_id)
+        {
+            return Err(format!(
+                "trace worker referenced unknown finding_id {}",
+                trace.finding_id
+            ));
+        }
+    }
+    for (id, count) in &counts {
+        if *count > 1 {
+            return Err(format!("trace worker returned duplicate results for {id}"));
+        }
+    }
+    for finding in findings {
+        let result = checkpoint
+            .trace_results_so_far
+            .iter_mut()
+            .find(|trace| trace.finding_id == finding.id);
+        let incomplete = match result.as_ref() {
+            Some(trace) => {
+                trace.reachable.is_none()
+                    || (trace.reachable.is_some() && trace.evidence.is_empty())
+            }
+            None => true,
+        };
+        if !incomplete {
+            continue;
+        }
+        if let Some(trace) = result {
+            trace.reachable = None;
+            if trace.evidence.is_empty() {
+                trace
+                    .evidence
+                    .push("trace worker returned no supporting evidence".into());
+            }
+        } else {
+            checkpoint
+                .trace_results_so_far
+                .push(super::types::TraceResult {
+                    finding_id: finding.id.clone(),
+                    reachable: None,
+                    severity_effect: "unknown".into(),
+                    evidence: vec!["trace worker returned no usable result".into()],
+                    consumer_paths: Vec::new(),
+                });
+        }
+        checkpoint
+            .run_health
+            .incomplete_results
+            .push(format!("trace:{}", finding.id));
+        checkpoint.coverage_gaps.push(CoverageGap {
+            area: format!("Trace for {}", finding.id),
+            reason: "trace worker returned no complete evidence-backed verdict".into(),
+            risk: finding.severity.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// Repo-internal production-reachability judgment. Re-examines the confirmed
@@ -791,12 +946,37 @@ pub(super) async fn run_judgment_stage(
     if !has_confirmed {
         return Ok(None);
     }
+    let judged_ids: BTreeSet<&str> = checkpoint
+        .judgment_results
+        .iter()
+        .map(|judgment| judgment.finding_id.as_str())
+        .collect();
+    let pending = checkpoint
+        .findings_so_far
+        .iter()
+        .filter(|finding| {
+            checkpoint
+                .validation_decisions_so_far
+                .iter()
+                .any(|decision| {
+                    decision.finding_id == finding.id
+                        && decision.decision == ValidationDecisionKind::Confirmed
+                })
+                && !judged_ids.contains(finding.id.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(None);
+    }
     let prompt = include_str!("../prompts/security_engineer_judgment.md");
+    let mut judgment_checkpoint = checkpoint.clone();
+    judgment_checkpoint.findings_so_far = pending.clone();
     let (raw, stage_out) = spawn_stage(
         rt,
         SecurityHarnessStage::Judgment,
         prompt,
-        checkpoint,
+        &judgment_checkpoint,
         JUDGMENT_MAX_ITERATIONS,
     )
     .await?;
@@ -814,7 +994,79 @@ pub(super) async fn run_judgment_stage(
             });
         }
     }
+    complete_judgment_results(checkpoint, &pending)?;
     Ok(Some(stage_out))
+}
+
+/// Enforce one production judgment per pending confirmed finding. As with
+/// tracing, missing evidence is represented as unknown, never unreachable.
+fn complete_judgment_results(
+    checkpoint: &mut SecurityCheckpoint,
+    findings: &[SecurityFinding],
+) -> std::result::Result<(), String> {
+    let expected: BTreeSet<&str> = findings.iter().map(|finding| finding.id.as_str()).collect();
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for judgment in &checkpoint.judgment_results {
+        if expected.contains(judgment.finding_id.as_str()) {
+            *counts.entry(judgment.finding_id.clone()).or_default() += 1;
+        } else if !checkpoint
+            .findings_so_far
+            .iter()
+            .any(|finding| finding.id == judgment.finding_id)
+        {
+            return Err(format!(
+                "judgment worker referenced unknown finding_id {}",
+                judgment.finding_id
+            ));
+        }
+    }
+    for (id, count) in &counts {
+        if *count > 1 {
+            return Err(format!(
+                "judgment worker returned duplicate results for {id}"
+            ));
+        }
+    }
+    for finding in findings {
+        let result = checkpoint
+            .judgment_results
+            .iter_mut()
+            .find(|judgment| judgment.finding_id == finding.id);
+        let incomplete = match result.as_ref() {
+            Some(judgment) => {
+                judgment.reachable_in_prod.is_none() || judgment.rationale.trim().is_empty()
+            }
+            None => true,
+        };
+        if !incomplete {
+            continue;
+        }
+        if let Some(judgment) = result {
+            judgment.reachable_in_prod = None;
+            if judgment.rationale.trim().is_empty() {
+                judgment.rationale = "judgment worker returned no supporting rationale".into();
+            }
+        } else {
+            checkpoint
+                .judgment_results
+                .push(super::types::JudgmentResult {
+                    finding_id: finding.id.clone(),
+                    reachable_in_prod: None,
+                    rationale: "judgment worker returned no usable result".into(),
+                    severity_effect: "unknown".into(),
+                });
+        }
+        checkpoint
+            .run_health
+            .incomplete_results
+            .push(format!("judgment:{}", finding.id));
+        checkpoint.coverage_gaps.push(CoverageGap {
+            area: format!("Production judgment for {}", finding.id),
+            reason: "judgment worker returned no complete evidence-backed verdict".into(),
+            risk: finding.severity.clone(),
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn run_feedback_stage(checkpoint: &mut SecurityCheckpoint) {
@@ -826,7 +1078,7 @@ pub(super) fn run_feedback_stage(checkpoint: &mut SecurityCheckpoint) {
         .map(|t| t.scope_hint.clone())
         .collect();
     for trace in &checkpoint.trace_results_so_far {
-        if !trace.reachable {
+        if trace.reachable != Some(true) {
             continue;
         }
         let Some(finding) = checkpoint
@@ -836,7 +1088,7 @@ pub(super) fn run_feedback_stage(checkpoint: &mut SecurityCheckpoint) {
         else {
             continue;
         };
-        for path in &finding.affected_paths {
+        for path in &trace.consumer_paths {
             if !existing.insert(path.clone()) {
                 continue;
             }
@@ -903,7 +1155,7 @@ pub(super) async fn run_report_stage(
         }
     };
     checkpoint.report_validation_state = validation_state;
-    checkpoint.report_draft = Some(parsed);
+    checkpoint.report_draft = Some(reconcile_report_with_checkpoint(checkpoint, &parsed));
     Ok(Some(stage_out))
 }
 
@@ -1160,6 +1412,83 @@ mod tests {
     }
 
     #[test]
+    fn missing_trace_result_is_preserved_as_unknown() {
+        let mut c = cp();
+        let finding = finding_with_id("finding-001");
+        c.findings_so_far.push(finding.clone());
+        complete_trace_results(&mut c, &[finding]).expect("unknown trace should be synthesized");
+        assert_eq!(c.trace_results_so_far.len(), 1);
+        assert_eq!(c.trace_results_so_far[0].reachable, None);
+        assert!(
+            c.run_health
+                .incomplete_results
+                .contains(&"trace:finding-001".to_string())
+        );
+        assert!(
+            c.coverage_gaps
+                .iter()
+                .any(|gap| gap.area == "Trace for finding-001")
+        );
+    }
+
+    #[test]
+    fn evidence_backed_unreachable_trace_remains_false() {
+        let mut c = cp();
+        let finding = finding_with_id("finding-001");
+        c.findings_so_far.push(finding.clone());
+        c.trace_results_so_far
+            .push(super::super::types::TraceResult {
+                finding_id: finding.id.clone(),
+                reachable: Some(false),
+                severity_effect: "downgrades".into(),
+                evidence: vec!["route is not registered".into()],
+                consumer_paths: Vec::new(),
+            });
+        complete_trace_results(&mut c, &[finding]).expect("complete trace should pass");
+        assert_eq!(c.trace_results_so_far[0].reachable, Some(false));
+        assert!(c.run_health.incomplete_results.is_empty());
+    }
+
+    #[test]
+    fn missing_judgment_is_preserved_as_unknown() {
+        let mut c = cp();
+        let finding = finding_with_id("finding-001");
+        c.findings_so_far.push(finding.clone());
+        complete_judgment_results(&mut c, &[finding])
+            .expect("unknown judgment should be synthesized");
+        assert_eq!(c.judgment_results.len(), 1);
+        assert_eq!(c.judgment_results[0].reachable_in_prod, None);
+        assert!(
+            c.run_health
+                .incomplete_results
+                .contains(&"judgment:finding-001".to_string())
+        );
+    }
+
+    #[test]
+    fn feedback_queues_only_explicit_consumer_paths() {
+        let mut c = cp();
+        let mut finding = finding_with_id("finding-001");
+        finding.vulnerability_class = "auth_authorization".into();
+        finding.affected_paths = vec!["src/vulnerable_sink.rs:9".into()];
+        c.findings_so_far.push(finding);
+        c.trace_results_so_far
+            .push(super::super::types::TraceResult {
+                finding_id: "finding-001".into(),
+                reachable: Some(true),
+                severity_effect: "keeps".into(),
+                evidence: vec!["resolved caller to sink".into()],
+                consumer_paths: vec!["src/shipped_route.rs:42".into()],
+            });
+
+        run_feedback_stage(&mut c);
+
+        assert_eq!(c.pending_tasks.len(), 1);
+        assert_eq!(c.pending_tasks[0].scope_hint, "src/shipped_route.rs:42");
+        assert_ne!(c.pending_tasks[0].scope_hint, "src/vulnerable_sink.rs:9");
+    }
+
+    #[test]
     fn complete_tasks_moves_matching_ids_and_flips_status() {
         let mut c = cp();
         c.pending_tasks.push(pending("t1", "auth_authorization"));
@@ -1322,13 +1651,9 @@ mod tests {
     // ---- Loose-at-shape regressions for hunt + validate -------------------
 
     #[test]
-    fn fold_hunt_result_with_prose_drops_findings_marks_class_complete() {
-        // The specialist returned prose instead of JSON.  Before: that
-        // bubbled up as Err and killed the whole hunt wave.  Now: the
-        // specialist's batch_ids get marked complete (it had its turn,
-        // produced nothing) and the harness moves on.  This is the single
-        // most important loosening — one bad specialist no longer takes
-        // down the run.
+    fn fold_hunt_result_with_prose_records_degraded_coverage() {
+        // Malformed output remains non-fatal, but must not masquerade as a
+        // successful empty hunt or a checked-and-cleared class.
         let mut c = cp();
         c.pending_tasks.push(pending("t1", "auth_authorization"));
         c.pending_tasks.push(pending("t2", "ssrf_outbound_network"));
@@ -1344,10 +1669,20 @@ mod tests {
         let prose = String::from("I will now write the report.\nNo JSON forthcoming.");
         fold_hunt_result(&mut c, &mut aggregate, &dispatch, prose, stage_out);
         assert_eq!(c.findings_so_far.len(), 0);
-        // t1 should be in completed_tasks (its specialist had its turn).
-        // t2 (different class) should still be pending.
+        // The failed batch is closed to prevent an infinite redispatch loop,
+        // while its degraded state remains explicit.
         assert!(c.completed_tasks.iter().any(|t| t.id == "t1"));
         assert!(c.pending_tasks.iter().any(|t| t.id == "t2"));
+        assert_eq!(c.run_health.degraded_specialists, 1);
+        assert!(c.coverage_gaps.iter().any(|gap| {
+            gap.area == "auth_authorization" && gap.reason.contains("not parseable JSON")
+        }));
+        assert!(
+            !aggregate
+                .checkpoints
+                .iter()
+                .any(|event| event.message.contains("auth_authorization cleared"))
+        );
     }
 
     #[test]
