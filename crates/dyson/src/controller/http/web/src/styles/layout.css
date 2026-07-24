@@ -653,7 +653,8 @@
   box-shadow: -1px 0 12px -2px var(--accent-glow);
 }
 .artefact-row .title {
-  flex: 1 1 auto;
+  flex: 1 1 0;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

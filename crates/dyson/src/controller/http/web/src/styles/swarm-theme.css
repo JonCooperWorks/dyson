@@ -952,7 +952,8 @@ textarea {
   box-shadow: none;
 }
 .artefact-row .title {
-  flex: 1 1 auto;
+  flex: 1 1 0;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1814,11 +1815,14 @@ textarea {
   min-width: 0;
   max-width: 100%;
 }
+/* The row's actions never shrink: sharing the row's spare width with the
+   filename crushed "share…" down to "sh" against the rail's edge. All the
+   shrink belongs to the title, which ellipsises. */
 .artefact-row-share {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-width: 0;
+  flex: 0 0 auto;
   margin-left: auto;
 }
 .artefact-share-reader-result {
