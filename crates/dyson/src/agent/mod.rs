@@ -850,7 +850,9 @@ impl Agent {
 
     /// Check whether a tool is registered by name.
     pub fn has_tool(&self, name: &str) -> bool {
-        self.tool_registry.tools.contains_key(name)
+        // Through `get`, so a dotted tool name resolves the same way a
+        // dispatch does — see `provider_tool_name`.
+        self.tool_registry.get(name).is_some()
     }
 
     /// Register an extra tool not owned by any skill.
