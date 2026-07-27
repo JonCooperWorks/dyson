@@ -208,6 +208,23 @@ RUN set -eux; \
 # the image carries two 48 MB copies of the same bytes — Docker
 # dedupes within a local image but not across registry pulls, so
 # every `docker push` ate the duplicate over the wire.
+# Fleet egress CA (IronProxy). The build context always carries this
+# file; it is EMPTY on a host that has not generated a CA, and the RUN
+# below then does nothing. That is why this is a plain COPY rather than
+# a conditional — Docker has no conditional COPY, and an empty file is a
+# cheaper way to express "optional" than two Dockerfiles.
+#
+# Baking the anchor here rather than composing a bundle at boot is what
+# makes enabling credential injection safe: this image ships no sidecar,
+# so there is no boot-time hook that could have done it, and the swarm's
+# CA-bundle env vars point at the system store this updates.
+COPY dyson-egress-ca.crt /usr/local/share/ca-certificates/dyson-egress.crt
+RUN if [ -s /usr/local/share/ca-certificates/dyson-egress.crt ]; then \
+        update-ca-certificates; \
+    else \
+        rm -f /usr/local/share/ca-certificates/dyson-egress.crt; \
+    fi
+
 COPY --chmod=0755 dyson-bin /usr/local/bin/dyson
 
 # Workspace lives at /var/lib/dyson; the swarm subcommand creates it on
