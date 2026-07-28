@@ -644,30 +644,25 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     let any_config_changed =
         provider_changed || image_changed || skills_changed || mcp_changed || telegram_changed;
 
-    let agent_secrets_patch = agent_secrets_runtime_patch(
+    let swarm_patch = swarm_runtime_patch(
         body.proxy_base.as_deref(),
         body.proxy_token
             .as_ref()
             .map(crate::tokens::ProxyToken::as_str),
         body.instance_id.as_deref(),
     );
-    let agent_secrets_applied = agent_secrets_patch.is_some();
-    let agent_secrets_changed = match &agent_secrets_patch {
-        Some(AgentSecretsRuntimePatch::Set {
+    let swarm_runtime_applied = swarm_patch.is_some();
+    let swarm_runtime_changed = match &swarm_patch {
+        Some(SwarmRuntimePatch::Set {
             proxy_url,
             proxy_token,
             instance_id,
         }) => {
-            crate::tool::agent_secrets::set_runtime_config_from_parts(
-                proxy_url,
-                proxy_token,
-                instance_id,
-            );
             crate::swarm_cost::set_runtime_config_from_parts(proxy_url, proxy_token);
+            let _ = instance_id;
             true
         }
-        Some(AgentSecretsRuntimePatch::Clear) => {
-            crate::tool::agent_secrets::set_runtime_config(None);
+        Some(SwarmRuntimePatch::Clear) => {
             crate::swarm_cost::set_runtime_config(None);
             true
         }
@@ -791,8 +786,8 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         "ingest_applied": ingest_applied,
         "state_sync_updated": state_sync_changed,
         "state_sync_applied": state_sync_applied,
-        "agent_secrets_updated": agent_secrets_changed,
-        "agent_secrets_applied": agent_secrets_applied,
+        "swarm_runtime_updated": swarm_runtime_changed,
+        "swarm_runtime_applied": swarm_runtime_applied,
     }))
 }
 
@@ -811,7 +806,7 @@ enum RuntimePatch<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum AgentSecretsRuntimePatch<'a> {
+enum SwarmRuntimePatch<'a> {
     Set {
         proxy_url: &'a str,
         proxy_token: &'a str,
@@ -834,22 +829,22 @@ fn runtime_patch<'a>(url: Option<&'a str>, token: Option<&'a str>) -> Option<Run
     }
 }
 
-fn agent_secrets_runtime_patch<'a>(
+fn swarm_runtime_patch<'a>(
     proxy_url: Option<&'a str>,
     proxy_token: Option<&'a str>,
     instance_id: Option<&'a str>,
-) -> Option<AgentSecretsRuntimePatch<'a>> {
+) -> Option<SwarmRuntimePatch<'a>> {
     match (proxy_url, proxy_token, instance_id) {
         (Some(proxy_url), Some(proxy_token), Some(instance_id))
             if !proxy_url.is_empty() && !proxy_token.is_empty() && !instance_id.is_empty() =>
         {
-            Some(AgentSecretsRuntimePatch::Set {
+            Some(SwarmRuntimePatch::Set {
                 proxy_url,
                 proxy_token,
                 instance_id,
             })
         }
-        (Some(""), Some(""), Some("")) => Some(AgentSecretsRuntimePatch::Clear),
+        (Some(""), Some(""), Some("")) => Some(SwarmRuntimePatch::Clear),
         _ => None,
     }
 }

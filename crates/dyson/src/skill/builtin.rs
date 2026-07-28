@@ -27,7 +27,6 @@ use async_trait::async_trait;
 
 use crate::skill::Skill;
 use crate::tool::Tool;
-use crate::tool::agent_secrets::AgentSecretsTool;
 use crate::tool::artefacts::ArtefactsTool;
 use crate::tool::bash::BashTool;
 use crate::tool::bulk_edit::BulkEditTool;
@@ -95,22 +94,6 @@ impl BuiltinSkill {
         image_model_override: Option<&str>,
         filter: &[String],
     ) -> Self {
-        Self::new_filtered_with_agent_secrets(
-            web_search_config,
-            image_provider_config,
-            image_model_override,
-            filter,
-            AgentSecretsTool::from_runtime(),
-        )
-    }
-
-    fn new_filtered_with_agent_secrets(
-        web_search_config: Option<&crate::config::WebSearchConfig>,
-        image_provider_config: Option<&crate::config::ProviderConfig>,
-        image_model_override: Option<&str>,
-        filter: &[String],
-        agent_secrets: Option<AgentSecretsTool>,
-    ) -> Self {
         let mut tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(BashTool::default()),
             Arc::new(ReadFileTool),
@@ -169,10 +152,6 @@ impl BuiltinSkill {
                     );
                 }
             }
-        }
-
-        if let Some(tool) = agent_secrets {
-            tools.push(Arc::new(tool));
         }
 
         // Apply tool filter if specified.
@@ -279,23 +258,13 @@ impl Skill for BuiltinSkill {
 mod tests {
     use super::*;
 
-    fn skill_without_agent_secrets() -> BuiltinSkill {
-        BuiltinSkill::new_filtered_with_agent_secrets(None, None, None, &[], None)
-    }
-
-    fn agent_secrets_tool() -> AgentSecretsTool {
-        let config = crate::tool::agent_secrets::AgentSecretsConfig::new(
-            "https://swarm.test/llm/openrouter",
-            "pt_test",
-            "inst-1",
-        )
-        .expect("valid config");
-        AgentSecretsTool::from_config(config).expect("tool")
+    fn default_skill() -> BuiltinSkill {
+        BuiltinSkill::new_filtered(None, None, None, &[])
     }
 
     #[test]
     fn has_builtin_tools() {
-        let skill = skill_without_agent_secrets();
+        let skill = default_skill();
         let tools = skill.tools();
         assert_eq!(tools.len(), 23);
         assert_eq!(tools[0].name(), "bash");
@@ -328,7 +297,7 @@ mod tests {
     /// can't quietly hide them behind the security_engineer dispatch again.
     #[test]
     fn security_tools_available_on_base_agent() {
-        let skill = skill_without_agent_secrets();
+        let skill = default_skill();
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         for required in [
             "ast_describe",
@@ -345,41 +314,8 @@ mod tests {
     }
 
     #[test]
-    fn filter_restricts_tools() {
-        let skill = BuiltinSkill::new_filtered_with_agent_secrets(
-            None,
-            None,
-            None,
-            &["bash".to_string(), "read_file".to_string()],
-            None,
-        );
-        let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
-        assert_eq!(names, vec!["bash", "read_file"]);
-    }
-
-    #[test]
-    fn filter_accepts_artefact_spelling_for_artifacts_tool() {
-        let skill = BuiltinSkill::new_filtered_with_agent_secrets(
-            None,
-            None,
-            None,
-            &["artefacts".to_string()],
-            None,
-        );
-        let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
-        assert_eq!(names, vec!["artifacts"]);
-    }
-
-    #[test]
-    fn empty_filter_includes_all() {
-        let all = skill_without_agent_secrets();
-        let filtered = BuiltinSkill::new_filtered_with_agent_secrets(None, None, None, &[], None);
-        assert_eq!(all.tools().len(), filtered.tools().len());
-    }
-
-    #[test]
     fn has_system_prompt() {
-        let skill = skill_without_agent_secrets();
+        let skill = default_skill();
         let prompt = skill.system_prompt().unwrap();
         assert!(prompt.contains("bash"));
         assert!(!prompt.is_empty());
@@ -387,91 +323,13 @@ mod tests {
 
     #[test]
     fn skill_name() {
-        let skill = skill_without_agent_secrets();
+        let skill = default_skill();
         assert_eq!(skill.name(), "builtin");
-    }
-
-    #[test]
-    fn agent_secrets_absent_without_swarm_runtime_config() {
-        let skill = BuiltinSkill::new_filtered_with_agent_secrets(None, None, None, &[], None);
-        let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
-        assert!(!names.contains(&"agent_secrets"));
-    }
-
-    #[test]
-    fn agent_secrets_present_with_required_runtime_config() {
-        let skill = BuiltinSkill::new_filtered_with_agent_secrets(
-            None,
-            None,
-            None,
-            &[],
-            Some(agent_secrets_tool()),
-        );
-        let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"agent_secrets"));
-    }
-
-    #[test]
-    fn agent_secrets_respects_builtin_allowlist_after_registration() {
-        let excluded = BuiltinSkill::new_filtered_with_agent_secrets(
-            None,
-            None,
-            None,
-            &["bash".to_string()],
-            Some(agent_secrets_tool()),
-        );
-        let names: Vec<&str> = excluded.tools().iter().map(|t| t.name()).collect();
-        assert_eq!(names, vec!["bash"]);
-
-        let included = BuiltinSkill::new_filtered_with_agent_secrets(
-            None,
-            None,
-            None,
-            &["agent_secrets".to_string()],
-            Some(agent_secrets_tool()),
-        );
-        let names: Vec<&str> = included.tools().iter().map(|t| t.name()).collect();
-        assert_eq!(names, vec!["agent_secrets"]);
-    }
-
-    #[test]
-    fn image_generate_tool_registered_when_configured() {
-        let config = crate::config::ProviderConfig {
-            provider_type: crate::config::LlmProvider::Gemini,
-            models: vec!["gemini-3-pro-image-preview".into()],
-            api_key: crate::auth::Credential::new("test-key".into()),
-            base_url: None,
-        };
-        let skill =
-            BuiltinSkill::new_filtered_with_agent_secrets(None, Some(&config), None, &[], None);
-        let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"image_generate"));
-        assert_eq!(skill.tools().len(), 24);
-    }
-
-    #[test]
-    fn image_model_override_respected() {
-        let config = crate::config::ProviderConfig {
-            provider_type: crate::config::LlmProvider::Gemini,
-            models: vec!["gemini-2.5-flash".into()],
-            api_key: crate::auth::Credential::new("test-key".into()),
-            base_url: None,
-        };
-        // With override, should still register the tool successfully.
-        let skill = BuiltinSkill::new_filtered_with_agent_secrets(
-            None,
-            Some(&config),
-            Some("gemini-3-pro-image-preview"),
-            &[],
-            None,
-        );
-        let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"image_generate"));
     }
 
     #[tokio::test]
     async fn before_turn_injects_datetime() {
-        let skill = skill_without_agent_secrets();
+        let skill = default_skill();
         let fragment = skill.before_turn().await.unwrap();
         assert!(fragment.is_some(), "before_turn should return Some");
         let text = fragment.unwrap();
