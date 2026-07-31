@@ -462,7 +462,7 @@ impl McpHttpServer {
                 tracing::warn!(error = %e, "MCP server: invalid JSON");
                 return json_response(
                     StatusCode::BAD_REQUEST,
-                    &JsonRpcResponse::rpc_error(None, -32700, "Parse error"),
+                    &json_rpc_wire(&JsonRpcResponse::rpc_error(None, -32700, "Parse error")),
                 );
             }
         };
@@ -480,7 +480,17 @@ impl McpHttpServer {
         tracing::debug!(method = method, id = ?id, "MCP server: handling request");
 
         let response = self.dispatch(id, method, params).await;
-        json_response(StatusCode::OK, &response)
+        // JSON-RPC notifications deliberately have no response envelope.
+        // Streamable HTTP acknowledges a successfully processed notification
+        // with 202 and an empty body; returning `{ "id": null, ... }` makes
+        // strict MCP clients (including Codex/rmcp) reject the handshake.
+        if id.is_none() {
+            return Response::builder()
+                .status(StatusCode::ACCEPTED)
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+        }
+        json_response(StatusCode::OK, &json_rpc_wire(&response))
     }
 
     /// Dispatch a JSON-RPC method to the appropriate handler.
@@ -962,6 +972,27 @@ fn json_response<T: serde::Serialize>(status: StatusCode, body: &T) -> Response<
         .header("Content-Type", "application/json")
         .body(Full::new(Bytes::from(json)))
         .unwrap()
+}
+
+/// Render the shared response type as a standards-compliant JSON-RPC wire
+/// envelope. The shared DTO predates its use as an HTTP server response and
+/// intentionally has no `jsonrpc` field; MCP clients require that field and
+/// require exactly one of `result` or `error` to be present.
+fn json_rpc_wire(response: &JsonRpcResponse) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    body.insert("jsonrpc".to_owned(), serde_json::json!("2.0"));
+    body.insert("id".to_owned(), serde_json::json!(response.id));
+    if let Some(result) = response.result.as_ref() {
+        body.insert("result".to_owned(), result.clone());
+    } else if let Some(error) = response.error.as_ref() {
+        body.insert(
+            "error".to_owned(),
+            serde_json::to_value(error).unwrap_or_else(
+                |_| serde_json::json!({"code": -32603, "message": "Internal error"}),
+            ),
+        );
+    }
+    serde_json::Value::Object(body)
 }
 
 #[cfg(test)]

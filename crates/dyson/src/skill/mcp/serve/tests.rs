@@ -394,7 +394,24 @@ async fn server_binds_and_accepts() {
 
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["jsonrpc"], "2.0");
+    assert_eq!(body["id"], 1);
+    assert!(body.get("error").is_none());
     assert_eq!(body["result"]["protocolVersion"], "2024-11-05");
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/mcp"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 202);
+    assert_eq!(resp.bytes().await.unwrap().len(), 0);
 
     handle.abort();
 }

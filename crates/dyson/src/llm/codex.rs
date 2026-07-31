@@ -132,7 +132,7 @@ struct TempCodexProfile {
 }
 
 impl TempCodexProfile {
-    fn new(token: &str) -> Result<Self> {
+    fn new(token: &str, url: &str) -> Result<Self> {
         let home = codex_home_dir()?;
         std::fs::create_dir_all(&home).map_err(DysonError::Io)?;
         let mut file = tempfile::Builder::new()
@@ -140,9 +140,20 @@ impl TempCodexProfile {
             .suffix(".config.toml")
             .tempfile_in(&home)
             .map_err(DysonError::Io)?;
+        // Codex validates every config layer before merging later CLI
+        // overrides. The profile must therefore contain a complete transport,
+        // not just the secret header with the URL supplied separately via -c.
         let body = format!(
-            "[mcp_servers.dyson-workspace.http_headers]\nAuthorization = \"Bearer {}\"\n",
-            toml_escape(token)
+            concat!(
+                "[mcp_servers.dyson-workspace]\n",
+                "url = \"{}\"\n",
+                "required = true\n",
+                "default_tools_approval_mode = \"approve\"\n",
+                "\n[mcp_servers.dyson-workspace.http_headers]\n",
+                "Authorization = \"Bearer {}\"\n",
+            ),
+            toml_escape(url),
+            toml_escape(token),
         );
         file.write_all(body.as_bytes()).map_err(DysonError::Io)?;
         file.flush().map_err(DysonError::Io)?;
@@ -303,8 +314,8 @@ impl LlmClient for CodexClient {
                 .clone();
             let info = super::start_mcp_server(workspace, extra).await?;
             tracing::info!(port = info.port, "MCP server started for Codex");
+            mcp_profile = Some(TempCodexProfile::new(&info.token, &info.url)?);
             mcp_url = Some(info.url);
-            mcp_profile = Some(TempCodexProfile::new(&info.token)?);
             _mcp_server_handle = Some(info.handle);
         }
 
@@ -961,5 +972,57 @@ mod tests {
             Some("--"),
             "prompt-like flags must be separated from Codex CLI options"
         );
+    }
+
+    /// Live regression for the complete Codex CLI -> loopback MCP -> Dyson
+    /// workspace path. Deliberately ignored because it consumes a signed-in
+    /// Codex turn; run explicitly while validating managed-image upgrades.
+    #[tokio::test]
+    #[ignore = "requires an installed, signed-in Codex CLI"]
+    async fn live_codex_exec_calls_workspace_mcp() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use tokio::sync::RwLock;
+
+        let workspace: crate::workspace::WorkspaceHandle = Arc::new(RwLock::new(Box::new(
+            crate::workspace::InMemoryWorkspace::new()
+                .with_file("USER.md", "DYSON_CODEX_MCP_LIVE_OK"),
+        )));
+        let info = crate::llm::start_mcp_server(&workspace, HashMap::new())
+            .await
+            .expect("start live MCP server");
+        let profile =
+            TempCodexProfile::new(&info.token, &info.url).expect("create transient MCP profile");
+        let client = CodexClient::new(Some("codex"), Some(workspace), false);
+        let args = client.build_args(
+            "gpt-5.6-sol",
+            "Use the requested MCP tool. Do not answer from memory.",
+            "Call the dyson-workspace workspace tool with op=view and file=USER.md, then reply with exactly its contents.",
+            Some(&info.url),
+            Some(profile.name()),
+        );
+
+        let output = tokio::process::Command::new("codex")
+            .args(&args)
+            .output()
+            .await
+            .expect("launch Codex CLI");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("codex stdout:\n{stdout}");
+        eprintln!("codex stderr:\n{stderr}");
+        assert!(output.status.success(), "Codex CLI failed: {stderr}");
+        assert!(
+            stdout.contains("\"server\":\"dyson-workspace\"")
+                && stdout.contains("\"tool\":\"workspace\""),
+            "Codex never called the Dyson workspace MCP server: {stdout}"
+        );
+        assert!(
+            stdout.contains("DYSON_CODEX_MCP_LIVE_OK"),
+            "Codex did not return the workspace marker: {stdout}"
+        );
+
+        info.handle.abort();
     }
 }
