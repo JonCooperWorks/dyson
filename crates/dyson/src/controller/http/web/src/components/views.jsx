@@ -6,7 +6,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
-import { DysonMark, createThemeController } from 'dyson-common-ui';
+import { DysonMark, Modal, createThemeController } from 'dyson-common-ui';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useEscapeKey } from 'dyson-common-ui';
@@ -28,6 +28,8 @@ const NAVS = [
   { id: 'activity',  name: 'Activity',      k: '4', icon: 'activity' },
   { id: 'audit',     name: 'Audit',         k: '5', icon: 'gauge' },
 ];
+
+const CHATGPT_SUBSCRIPTION_PROVIDER = 'chatgpt-subscription';
 
 // Brand label + initial pulled from the swarm-set agent name (lives in
 // IDENTITY.md `Name:`, populated by SWARM_NAME).  Falls back to "Dyson"
@@ -76,6 +78,7 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
   // list from GET /api/models (or [] off-swarm / on error).
   const [catalogue, setCatalogue] = useState(null);
   const [cataLoading, setCataLoading] = useState(false);
+  const [codexConnect, setCodexConnect] = useState(null);
   const drawerTitle = view === 'mind'
     ? 'Workspace files'
     : view === 'artefacts'
@@ -99,6 +102,18 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
   const switchTo = async (provider, modelName) => {
     setBusy(true);
     try {
+      if (provider === CHATGPT_SUBSCRIPTION_PROVIDER
+          && typeof client.getCodexAuth === 'function'
+          && typeof client.startCodexAuth === 'function') {
+        const current = await client.getCodexAuth();
+        if (!current?.connected) {
+          const auth = await client.startCodexAuth();
+          setCodexConnect({ auth, provider, modelName });
+          setBusy(false);
+          setMenuOpen(false);
+          return;
+        }
+      }
       if (typeof onPickModel === 'function') {
         await onPickModel(provider, modelName);
       } else {
@@ -110,7 +125,20 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
     setMenuOpen(false);
   };
 
+  const finishCodexConnect = async () => {
+    const pending = codexConnect;
+    if (!pending) return;
+    if (typeof onPickModel === 'function') {
+      await onPickModel(pending.provider, pending.modelName);
+    } else {
+      await client.postModel(pending.provider, pending.modelName);
+      switchProviderModel(pending.provider, pending.modelName);
+    }
+    setCodexConnect(null);
+  };
+
   return (
+    <>
     <div className="topbar">
       <button className="menu-toggle" title={drawerTitle} aria-label={drawerTitle} onClick={onToggleLeft}>
         <Icon name="menu" size={14}/>
@@ -153,6 +181,80 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
         )}
       </div>
     </div>
+    {codexConnect && (
+      <CodexConnectModal
+        client={client}
+        initial={codexConnect.auth}
+        onConnected={finishCodexConnect}
+        onClose={() => setCodexConnect(null)}
+      />
+    )}
+    </>
+  );
+}
+
+function CodexConnectModal({ client, initial, onConnected, onClose }) {
+  const [auth, setAuth] = useState(initial || {});
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    let completed = false;
+    const poll = async () => {
+      try {
+        const next = await client.getCodexAuth();
+        if (!alive) return;
+        setAuth(next || {});
+        if (next?.connected && !completed) {
+          completed = true;
+          try {
+            await onConnected();
+          } catch {
+            completed = false;
+            if (alive) setAuth({...next, error: 'Connected, but the model switch failed. Retrying…'});
+          }
+        }
+      } catch {
+        // A transient proxy failure should not discard a still-valid code.
+      }
+    };
+    const timer = setInterval(poll, 1000);
+    poll();
+    return () => { alive = false; clearInterval(timer); };
+  }, [client, onConnected]);
+
+  const copyCode = async () => {
+    if (!auth.user_code || !navigator.clipboard?.writeText) return;
+    await navigator.clipboard.writeText(auth.user_code);
+    setCopied(true);
+  };
+
+  return (
+    <Modal className="codex-connect" label="Connect ChatGPT subscription" onClose={onClose}>
+      <div style={{padding:24, maxWidth:460}}>
+        <h2 style={{marginTop:0}}>Connect ChatGPT</h2>
+        <p className="muted">Use OpenAI's device sign-in. Your tokens stay inside this Dyson's memory-only credential store.</p>
+        {auth.verification_uri && auth.user_code ? (
+          <>
+            <a className="btn primary" href={auth.verification_uri} target="_blank" rel="noreferrer">
+              Open ChatGPT sign-in
+            </a>
+            <p className="muted" style={{marginBottom:6}}>Enter this one-time code:</p>
+            <button type="button" className="select" onClick={copyCode} aria-label="Copy device code"
+                    style={{fontSize:20, letterSpacing:2, padding:'10px 14px'}}>
+              <span className="mono">{auth.user_code}</span>
+            </button>
+            {copied && <span className="muted" style={{marginLeft:8}}>copied</span>}
+          </>
+        ) : auth.state === 'failed' || auth.state === 'unavailable' ? (
+          <p className="error-block">{auth.error || 'ChatGPT sign-in could not start.'}</p>
+        ) : auth.error ? (
+          <p className="error-block">{auth.error}</p>
+        ) : (
+          <p className="muted">Starting device sign-in…</p>
+        )}
+      </div>
+    </Modal>
   );
 }
 

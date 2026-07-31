@@ -200,6 +200,17 @@ Same pattern as Claude Code — spawns `codex exec --json` as a subprocess with
 `--dangerous-no-sandbox` is set. Workspace MCP and stateless history work the
 same way.
 
+Swarm-managed Dysons expose a `chatgpt-subscription` named provider backed by
+this client. Selecting one of its models in the web UI starts Codex's device
+authorization flow when the Dyson is not signed in. The UI receives only the
+verification URL, one-time code, and connection state; Codex performs the OAuth
+exchange and token refresh itself.
+
+In the managed image, `CODEX_HOME` is `/dev/shm/dyson-subscriptions/codex` on a
+private tmpfs. Authentication therefore survives provider turns and a paused
+microVM, but is deliberately absent from the writable image layer and Swarm's
+state mirror. Destroying or recreating the microVM requires another sign-in.
+
 ---
 
 ## Thinking / Reasoning Tokens

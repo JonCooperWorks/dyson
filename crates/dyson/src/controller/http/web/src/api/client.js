@@ -108,6 +108,13 @@ export class DysonClient {
   }
 
   listProviders() { return this._json('/api/providers'); }
+  getCodexAuth() { return this._json('/api/provider-auth/codex'); }
+  startCodexAuth() {
+    return this._json('/api/provider-auth/codex', { method: 'POST' });
+  }
+  logoutCodex() {
+    return this._json('/api/provider-auth/codex', { method: 'DELETE' });
+  }
   listCommands()  { return this._json('/api/commands'); }
 
   // Full model catalogue the active provider can reach (via the swarm

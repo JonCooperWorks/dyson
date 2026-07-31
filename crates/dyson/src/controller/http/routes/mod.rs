@@ -38,6 +38,7 @@ mod mcp;
 mod mind;
 mod model;
 mod models;
+mod provider_auth;
 mod providers;
 mod sse;
 mod static_assets;
@@ -302,6 +303,15 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         (&Method::GET, ["api", "mcp", "servers"]) => mcp::list_servers(&state).await,
 
         (&Method::GET, ["api", "providers"]) => providers::list(&state),
+        (&Method::GET, ["api", "provider-auth", "codex"]) => {
+            provider_auth::codex_status(&state).await
+        }
+        (&Method::POST, ["api", "provider-auth", "codex"]) => {
+            provider_auth::codex_start(&state).await
+        }
+        (&Method::DELETE, ["api", "provider-auth", "codex"]) => {
+            provider_auth::codex_logout(&state).await
+        }
         (&Method::GET, ["api", "models"]) => models::list(&state).await,
         (&Method::GET, ["api", "commands"]) => commands::get(&state).await,
         (&Method::POST, ["api", "model"]) => model::post(req, Arc::clone(&state)).await,

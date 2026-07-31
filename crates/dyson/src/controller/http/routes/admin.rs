@@ -14,8 +14,8 @@
 // instance id).  This handler:
 //   1. Writes IDENTITY.md to the workspace — picked up by the
 //      `HotReloader` on the next agent turn (no process restart).
-//   2. Patches dyson.json's `providers.openrouter.models` (or the
-//      configured agent provider) — also `HotReloader`-watched, so
+//   2. Patches dyson.json's named Swarm provider (normally `openrouter`) —
+//      also `HotReloader`-watched, so
 //      the next agent build uses the new model list.
 //
 // Auth: same as every `/api/*` route — `state.auth` validates the
@@ -110,11 +110,17 @@ pub(super) struct ConfigureBody {
     #[serde(default)]
     identity_doc: Option<String>,
     /// New ordered model list.  First entry becomes the primary; the
-    /// full list is written to `providers.<agent_provider>.models`
+    /// full list is written to the Swarm-owned provider's `models`
     /// in dyson.json so the next `HotReloader::check` picks it up.
     /// Empty list is a no-op (existing config is left alone).
     #[serde(default)]
     models: Vec<String>,
+    /// Provider entry the swarm-owned model list/token/base URL belong to.
+    /// Older Swarm callers omit this field; credential-bearing legacy payloads
+    /// are mapped to the stable `openrouter` entry. Other callers fall back to
+    /// `agent.provider`.
+    #[serde(default)]
+    provider_name: Option<String>,
     /// Swarm-side instance id.  Surfaced in IDENTITY.md as
     /// `Swarm instance id: <value>` so the agent can reference it
     /// in tool calls back to swarm.
@@ -530,10 +536,10 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         false
     };
 
-    // 2. dyson.json: patch the agent provider's `models`, `api_key`,
+    // 2. dyson.json: patch the named Swarm provider's `models`, `api_key`,
     //    and/or `base_url` if the body supplies them.  All three
     //    targets share the same patch helper because the surface is
-    //    a single `providers.<agent.provider>` object — one
+    //    a single named `providers` object — one
     //    read-modify-write keeps the file in a consistent state and
     //    the HotReloader fires once per change cluster instead of
     //    three times.  Empty / None on a field means "leave alone".
@@ -586,6 +592,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         match patch_config_once(
             path,
             ConfigureConfigPatch {
+                provider_name: body.provider_name.as_deref(),
                 models: if want_models {
                     Some(body.models.as_slice())
                 } else {
@@ -1431,6 +1438,7 @@ fn extract_section(body: &str, name: &str) -> Option<String> {
 }
 
 struct ConfigureConfigPatch<'a> {
+    provider_name: Option<&'a str>,
     models: Option<&'a [String]>,
     api_key: Option<&'a str>,
     base_url: Option<&'a str>,
@@ -1516,7 +1524,13 @@ async fn patch_config_once(
     let mut applied = AppliedConfigPatch::default();
 
     if patch.models.is_some() || patch.api_key.is_some() || patch.base_url.is_some() {
-        patch_provider_doc(&mut doc, patch.models, patch.api_key, patch.base_url)?;
+        patch_provider_doc(
+            &mut doc,
+            patch.provider_name,
+            patch.models,
+            patch.api_key,
+            patch.base_url,
+        )?;
         applied.provider_changed = true;
     }
     if patch.image_provider_block.is_some()
@@ -1551,18 +1565,35 @@ async fn patch_config_once(
 
 fn patch_provider_doc(
     doc: &mut Value,
+    provider_name: Option<&str>,
     models: Option<&[String]>,
     api_key: Option<&str>,
     base_url: Option<&str>,
 ) -> std::result::Result<(), ConfigureConfigPatchError> {
-    let provider_name = doc
+    let active_provider = doc
         .get("agent")
         .and_then(|a| a.get("provider"))
         .and_then(|p| p.as_str())
-        .ok_or(ConfigureConfigPatchError::MissingAgentProvider)?
-        .to_owned();
+        .map(str::to_owned);
+    // Pre-provider_name Swarm versions still send the proxy token/base URL
+    // without naming their provider. Recognize that legacy managed payload by
+    // its credential fields and stable `openrouter` entry, so a runtime sync
+    // cannot overwrite a user-selected CLI subscription provider.
+    let legacy_swarm_openrouter = provider_name.is_none()
+        && (api_key.is_some() || base_url.is_some())
+        && doc
+            .get("providers")
+            .and_then(|providers| providers.get("openrouter"))
+            .is_some_and(Value::is_object);
+    let provider_name = provider_name
+        .map(str::to_owned)
+        .or_else(|| legacy_swarm_openrouter.then(|| "openrouter".to_owned()))
+        .or_else(|| active_provider.clone())
+        .ok_or(ConfigureConfigPatchError::MissingAgentProvider)?;
     let primary_model = models.and_then(|ms| ms.first().filter(|m| !m.trim().is_empty()).cloned());
-    if let Some(primary) = primary_model.as_ref() {
+    if active_provider.as_deref() == Some(provider_name.as_str())
+        && let Some(primary) = primary_model.as_ref()
+    {
         let agent = doc
             .as_object_mut()
             .ok_or(ConfigureConfigPatchError::RootNotObject)?
@@ -1774,7 +1805,7 @@ async fn write_config_doc(
     Ok(())
 }
 
-/// Read dyson.json, patch any of `providers.<agent.provider>.models`,
+/// Read dyson.json, patch a named provider's `models`,
 /// `.api_key`, `.base_url` that the caller supplies, write back
 /// atomically.  `None` for a field means "leave alone"; an empty
 /// `Some("")` would also be no-op but the caller is expected to filter
@@ -2296,6 +2327,47 @@ mod tests {
         // visits.
         assert_eq!(after["agent"]["provider"], "openrouter");
         assert_eq!(after["providers"]["openrouter"]["api_key"], "x");
+    }
+
+    #[test]
+    fn named_swarm_provider_patch_preserves_active_subscription_provider() {
+        let mut doc = serde_json::json!({
+            "agent": {
+                "provider": "chatgpt-subscription",
+                "model": "gpt-5.6-sol"
+            },
+            "providers": {
+                "openrouter": {
+                    "type": "openai",
+                    "api_key": "old",
+                    "base_url": "https://old.example",
+                    "models": ["old/model"]
+                },
+                "chatgpt-subscription": {
+                    "type": "codex",
+                    "models": ["gpt-5.6-sol"]
+                }
+            }
+        });
+        let models = vec!["anthropic/claude-sonnet-4-5".to_owned()];
+
+        patch_provider_doc(
+            &mut doc,
+            None,
+            Some(&models),
+            Some("pt_new"),
+            Some("https://swarm.example/llm/openrouter"),
+        )
+        .unwrap();
+
+        assert_eq!(doc["agent"]["provider"], "chatgpt-subscription");
+        assert_eq!(doc["agent"]["model"], "gpt-5.6-sol");
+        assert_eq!(doc["providers"]["openrouter"]["api_key"], "pt_new");
+        assert_eq!(
+            doc["providers"]["openrouter"]["models"],
+            serde_json::json!(["anthropic/claude-sonnet-4-5"])
+        );
+        assert!(doc["providers"]["chatgpt-subscription"]["base_url"].is_null());
     }
 
     #[test]

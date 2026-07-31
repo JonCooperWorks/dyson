@@ -110,4 +110,30 @@ describe('TopBar — catalogue picker', () => {
     // "current" group.
     expect(screen.getAllByText('seed').length).toBeGreaterThanOrEqual(2);
   });
+
+  it('starts device auth before selecting the ChatGPT subscription provider', async () => {
+    setProviders([{
+      id: 'chatgpt-subscription', name: 'ChatGPT subscription', active: false,
+      activeModel: 'gpt-5.6-sol', models: ['gpt-5.6-sol'],
+    }, {
+      id: 'openrouter', name: 'Swarm', active: true, activeModel: 'seed', models: ['seed'],
+    }], 'seed');
+    const client = {
+      listModels: vi.fn(async () => ({ models: [] })),
+      postModel: vi.fn(async () => ({})),
+      getCodexAuth: vi.fn(async () => ({ connected: false, state: 'pending', verification_uri: 'https://auth.openai.com/codex/device', user_code: 'ABCD-12345' })),
+      startCodexAuth: vi.fn(async () => ({ connected: false, state: 'pending', verification_uri: 'https://auth.openai.com/codex/device', user_code: 'ABCD-12345' })),
+    };
+    renderTopBar(client);
+
+    fireEvent.click(screen.getByTitle('Switch model'));
+    const menu = document.querySelector('.modelmenu');
+    fireEvent.click(within(menu).getByText('gpt-5.6-sol'));
+
+    await waitFor(() => expect(client.startCodexAuth).toHaveBeenCalledTimes(1));
+    expect(client.postModel).not.toHaveBeenCalled();
+    expect(await screen.findByText('ABCD-12345')).toBeTruthy();
+    expect(screen.getByText('Open ChatGPT sign-in').getAttribute('href'))
+      .toBe('https://auth.openai.com/codex/device');
+  });
 });

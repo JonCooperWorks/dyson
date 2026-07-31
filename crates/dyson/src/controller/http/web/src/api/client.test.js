@@ -46,6 +46,18 @@ describe('DysonClient — GET endpoints', () => {
     expect(args(fetch)[0]).toBe('/api/providers');
   });
 
+  it('Codex subscription auth maps status, start, and logout methods', async () => {
+    const fetch = mockFetch(() => ({ body: { connected: false } }));
+    const client = new DysonClient({ fetch });
+    await client.getCodexAuth();
+    await client.startCodexAuth();
+    await client.logoutCodex();
+    expect(args(fetch, 0)[0]).toBe('/api/provider-auth/codex');
+    expect(args(fetch, 0)[1].method).toBeUndefined();
+    expect(args(fetch, 1)[1].method).toBe('POST');
+    expect(args(fetch, 2)[1].method).toBe('DELETE');
+  });
+
   it('listCommands → GET /api/commands', async () => {
     const fetch = mockFetch(() => ({ body: [{ cmd: '/clear' }] }));
     const client = new DysonClient({ fetch });

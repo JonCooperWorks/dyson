@@ -80,6 +80,7 @@ RUN apt-get update \
         tar \
         file \
         procps \
+        mount \
         htop \
         lsof \
         iputils-ping \
@@ -118,6 +119,12 @@ RUN apt-get update \
         /usr/share/man \
         /usr/share/locale \
     && find /usr -type d -name __pycache__ -prune -exec rm -rf {} +
+
+# Subscription-backed inference uses Dyson's existing Codex subprocess
+# provider. The image contains no account material; the one-time device login
+# happens after hire and writes only to CODEX_HOME on tmpfs (entrypoint below).
+RUN npm install -g @openai/codex \
+    && npm cache clean --force
 
 # Pinned, checksum-verified web discovery stack. These release binaries keep
 # the runtime image free of a Go toolchain and make image rebuilds independent
@@ -192,7 +199,7 @@ RUN python3 -m venv /opt/pentest-venv \
 # suppressed; existence and executable linkage are the contract here.
 RUN set -eux; \
     for tool in \
-        curl ncat nmap nikto sqlmap gobuster dirb wfuzz whatweb wapiti \
+        codex mount curl ncat nmap nikto sqlmap gobuster dirb wfuzz whatweb wapiti \
         dnsrecon smbclient ldapsearch snmpwalk redis-cli psql mariadb \
         nuclei httpx katana ffuf testssl playwright; \
     do \
@@ -226,6 +233,7 @@ RUN if [ -s /usr/local/share/ca-certificates/dyson-egress.crt ]; then \
     fi
 
 COPY --chmod=0755 dyson-bin /usr/local/bin/dyson
+COPY --chmod=0755 swarm-entrypoint.sh /usr/local/bin/dyson-swarm-entrypoint
 
 # Workspace lives at /var/lib/dyson; the swarm subcommand creates it on
 # first boot. Pre-create with the right perms so the agent can write
@@ -266,5 +274,5 @@ EXPOSE 80
 # inside it is paranoia + a debug nightmare).  Pre-CLI-restructure the
 # flag was a top-level `dyson --dangerous-no-sandbox swarm`; the newer
 # CLI rejects unknown top-level flags, so the flag is gone from here.
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/dyson"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/dyson-swarm-entrypoint"]
 CMD ["swarm"]

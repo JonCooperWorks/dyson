@@ -54,6 +54,11 @@ const IMAGE_PROVIDER_NAME: &str = "openrouter-image";
 /// image model available through the OpenRouter proxy today.
 const DEFAULT_IMAGE_MODEL: &str = "google/gemini-3-pro-image-preview";
 
+/// Codex CLI provider backed by the user's ChatGPT subscription. The CLI owns
+/// OAuth and refresh; Dyson only selects it like any other `LlmClient`.
+const CHATGPT_SUBSCRIPTION_PROVIDER: &str = "chatgpt-subscription";
+const CHATGPT_SUBSCRIPTION_MODELS: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+
 pub async fn run() -> Result<()> {
     // SWARM_BEARER_TOKEN is the per-instance auth secret swarm injects on
     // create. It's NOT set during template build — Cube boots the rootfs
@@ -348,7 +353,13 @@ fn build_swarm_config(inputs: SwarmConfigInputs<'_>) -> serde_json::Value {
         }))
     };
 
-    let mut providers = json!({ "openrouter": chat_block });
+    let mut providers = json!({
+        "openrouter": chat_block,
+        (CHATGPT_SUBSCRIPTION_PROVIDER): {
+            "type": "codex",
+            "models": CHATGPT_SUBSCRIPTION_MODELS,
+        }
+    });
     let mut agent = json!({ "provider": "openrouter" });
     if let Some(block) = image_block {
         providers[IMAGE_PROVIDER_NAME] = block;
@@ -544,6 +555,31 @@ mod tests {
             agent["image_generation_model"],
             "google/gemini-3-pro-image-preview"
         );
+    }
+
+    #[test]
+    fn swarm_config_offers_chatgpt_subscription_through_codex() {
+        let cfg = cfg_with_proxy();
+        let provider = &cfg["providers"][CHATGPT_SUBSCRIPTION_PROVIDER];
+        assert_eq!(provider["type"], "codex");
+        assert_eq!(
+            provider["models"],
+            serde_json::json!(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
+        );
+        assert_eq!(cfg["agent"]["provider"], "openrouter");
+    }
+
+    #[test]
+    fn managed_image_installs_codex_and_keeps_its_home_on_tmpfs() {
+        let dockerfile = include_str!("../../../../Dockerfile");
+        let entrypoint = include_str!("../../../../deploy/swarm-entrypoint.sh");
+        assert!(dockerfile.contains("npm install -g @openai/codex"));
+        assert!(dockerfile.contains("codex mount curl ncat"));
+        assert!(dockerfile.contains("swarm-entrypoint.sh"));
+        assert!(entrypoint.contains("/dev/shm/dyson-subscriptions"));
+        assert!(entrypoint.contains("stat -f -c %T"));
+        assert!(entrypoint.contains("export CODEX_HOME="));
+        assert!(entrypoint.contains("cli_auth_credentials_store = \"file\""));
     }
 
     #[test]
