@@ -40,6 +40,9 @@ pub(super) fn list(state: &HttpState) -> Resp {
             ProviderDto {
                 id: id.clone(),
                 name: id.clone(),
+                backend: crate::llm::registry::lookup(&pc.provider_type)
+                    .canonical_name
+                    .to_owned(),
                 models: pc.models.clone(),
                 active_model,
                 active: is_active,

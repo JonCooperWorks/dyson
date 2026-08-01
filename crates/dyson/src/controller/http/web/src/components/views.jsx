@@ -31,6 +31,30 @@ const NAVS = [
 
 const CHATGPT_SUBSCRIPTION_PROVIDER = 'chatgpt-subscription';
 
+// Provider ids are operator-defined labels; `backend` is the concrete client
+// that executes the turn.  Keep the two visible and separate so a model name
+// cannot be mistaken for proof that Codex/Claude is actually in the path.
+export function providerPresentation(provider) {
+  const backend = (provider?.backend || '').trim().toLowerCase();
+  if (backend === 'codex') {
+    return { backend, label: 'Codex', detail: 'ChatGPT subscription', tone: 'codex' };
+  }
+  if (backend === 'claude-code') {
+    return { backend, label: 'Claude Code', detail: 'Claude subscription', tone: 'claude' };
+  }
+  if (backend === 'openrouter') {
+    return { backend, label: 'Swarm', detail: 'OpenRouter proxy', tone: 'swarm' };
+  }
+  if (backend === 'anthropic') {
+    return { backend, label: 'Anthropic API', detail: 'API key', tone: 'api' };
+  }
+  if (backend === 'openai') {
+    return { backend, label: 'OpenAI API', detail: 'API key', tone: 'api' };
+  }
+  const fallback = provider?.name || provider?.id || backend || 'Provider';
+  return { backend: backend || provider?.id || '', label: fallback, detail: backend || 'configured provider', tone: 'other' };
+}
+
 // Brand label + initial pulled from the swarm-set agent name (lives in
 // IDENTITY.md `Name:`, populated by SWARM_NAME).  Falls back to "Dyson"
 // when the agent hasn't been named yet — same fallback the per-turn
@@ -60,11 +84,16 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
   const agentName = useAppState(s => s.agentName);
   // The active provider a catalogue pick switches to.  Falls back to the
   // first provider when none is flagged active (fresh boot).
-  const activeProvider = (providers.find(p => p.active) || providers[0])?.id || '';
+  const activeProvider = providers.find(p => p.active) || providers[0] || null;
+  const selectedProvider = providers.find(p => p.id === nextRunModel?.provider) || activeProvider;
+  const execution = providerPresentation(selectedProvider);
   // The models named in dyson.json — shown as the "current" group so the
   // seeded/active model is always one click away without a catalogue fetch.
   const configured = providers.flatMap(p =>
-    (p.models || []).map(m => ({ provider: p.id, id: m, active: !!p.active && m === model }))
+    (p.models || []).map(m => ({
+      provider: p.id, providerName: p.name, backend: p.backend,
+      id: m, active: !!p.active && m === model,
+    }))
   );
   // There's always something to switch *from* once a model is active, and
   // the catalogue is fetched lazily on open — so the control is enabled
@@ -161,21 +190,23 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
       <div className="meta" style={{position:'relative'}}>
         <ThemeToggle/>
         {model && (
-          <button type="button" className="select"
+          <button type="button" className={`select provider-select backend-${execution.tone}`}
                   onClick={() => canSwitch && setMenuOpen(o => !o)}
                   disabled={!canSwitch}
                   aria-haspopup="menu" aria-expanded={menuOpen}
-                  aria-label={canSwitch ? 'Switch model' : 'Active model'}
+                  aria-label={`${canSwitch ? 'Switch model' : 'Active model'}. Execution backend ${execution.label}, ${execution.detail}. Model ${nextRunModel ? nextRunModel.model : model}`}
                   style={{opacity: busy ? 0.5 : 1}}
                   title={canSwitch ? 'Switch model' : 'Active model'}>
             <span className="label">{nextRunModel ? 'next' : 'model'}</span>
+            <span className="provider-proof"><span className="provider-live-dot"/>{execution.label}</span>
             <span className="mono">{nextRunModel ? nextRunModel.model : model}</span>
             {canSwitch && <Icon name="chevd" size={10}/>}
           </button>
         )}
         {menuOpen && canSwitch && (
           <ModelMenu configured={configured} catalogue={catalogue} loading={cataLoading}
-                     activeProvider={activeProvider} activeModel={model}
+                     activeProvider={activeProvider} selectedProvider={selectedProvider}
+                     activeModel={model}
                      nextRunModel={nextRunModel}
                      onPick={switchTo} onDismiss={() => setMenuOpen(false)}/>
         )}
@@ -272,7 +303,7 @@ function fmtCtx(n) {
 // active model one click away; the rest of the list is type-to-filter
 // over the catalogue, bounded so a 300-model list never renders whole.
 const CATALOGUE_LIMIT = 30;
-function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel, nextRunModel, onPick, onDismiss }) {
+function ModelMenu({ configured, catalogue, loading, activeProvider, selectedProvider, activeModel, nextRunModel, onPick, onDismiss }) {
   useEscapeKey(onDismiss);
   const [query, setQuery] = useState('');
   const q = query.trim().toLowerCase();
@@ -293,11 +324,21 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
   });
   const shown = matches.slice(0, CATALOGUE_LIMIT);
   const overflow = matches.length - shown.length;
+  const execution = providerPresentation(selectedProvider);
+  const catalogueExecution = providerPresentation(activeProvider);
+  const selectedModel = nextRunModel?.model || activeModel;
+  const configuredBackends = new Set(configured.map(c => c.backend));
 
   return (
     <>
       <div className="modelmenu-scrim" onClick={onDismiss}/>
       <div className="modelmenu">
+        <div className={`mm-runtime backend-${execution.tone}`} aria-label="Active execution backend">
+          <span className="mm-runtime-state"><span className="provider-live-dot"/>RUNNING NEXT TURN</span>
+          <span className="mm-runtime-backend">{execution.label}</span>
+          <span className="mm-runtime-detail">{execution.detail}</span>
+          <span className="mm-runtime-model mono">{selectedModel}</span>
+        </div>
         <div className="mm-search">
           <Icon name="search" size={13}/>
           <input autoFocus placeholder="Search models" value={query}
@@ -307,14 +348,18 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
 
         {configShown.length > 0 && (
           <div className="mm-section">
-            <div className="mm-label">Current</div>
+            <div className="mm-label">Configured providers</div>
             {configShown.map(c => {
               const next = nextRunModel?.provider === c.provider && nextRunModel?.model === c.id;
+              const providerView = providerPresentation({
+                id: c.provider, name: c.providerName, backend: c.backend,
+              });
               return (
                 <div key={`${c.provider}/${c.id}`}
                      className={`item ${c.active ? 'on' : ''} ${next ? 'next' : ''}`}
                      onClick={() => onPick(c.provider, c.id)}>
                   <span className="dot"/>
+                  <span className={`mm-provider backend-${providerView.tone}`}>{providerView.label}</span>
                   <span className="model mono">{c.id}</span>
                   {next && <span className="badge">next run</span>}
                 </div>
@@ -329,22 +374,25 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
             nothing matched anywhere. */}
         {(shown.length > 0 || loading || cata.length === 0 || configShown.length === 0) && (
         <div className="mm-section">
-          <div className="mm-label">Catalogue{loading ? ' · loading' : ''}</div>
+          <div className="mm-label">
+            Catalogue · via {catalogueExecution.label}{loading ? ' · loading' : ''}
+          </div>
           {!loading && shown.length === 0 && (
             <div className="mm-empty">
               {cata.length === 0 ? 'No catalogue available.' : 'No matches.'}
             </div>
           )}
           {shown.map(m => {
-            const next = nextRunModel?.provider === activeProvider && nextRunModel?.model === m.id;
-            const current = !!activeProvider && m.id === activeModel;
+            const next = nextRunModel?.provider === activeProvider?.id && nextRunModel?.model === m.id;
+            const current = !!activeProvider?.id && m.id === activeModel;
             const ctx = fmtCtx(m.context_length);
             return (
               <div key={m.id}
                    className={`item ${current ? 'on' : ''} ${next ? 'next' : ''}`}
-                   onClick={() => onPick(activeProvider, m.id)}
+                   onClick={() => onPick(activeProvider?.id, m.id)}
                    title={m.name || m.id}>
                 <span className="dot"/>
+                <span className={`mm-provider backend-${catalogueExecution.tone}`}>{catalogueExecution.label}</span>
                 <span className="model mono">{m.id}</span>
                 {ctx && <span className="mm-ctx">{ctx}</span>}
               </div>
@@ -354,6 +402,16 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
             <div className="mm-hint">+{overflow} more — keep typing to narrow</div>
           )}
         </div>
+        )}
+        {(configuredBackends.has('codex') || configuredBackends.has('claude-code')) && (
+          <div className="mm-help">
+            {configuredBackends.has('codex') && (
+              <p><strong>Codex</strong> uses your ChatGPT subscription. Pick a Codex model; Dyson opens device sign-in if this agent is disconnected.</p>
+            )}
+            {configuredBackends.has('claude-code') && (
+              <p><strong>Claude Code</strong> uses this agent's existing Claude CLI sign-in.</p>
+            )}
+          </div>
         )}
       </div>
     </>

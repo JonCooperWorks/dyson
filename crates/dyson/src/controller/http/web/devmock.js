@@ -18,17 +18,22 @@ const CONVERSATIONS = [
 
 const PROVIDERS = [
   {
-    id: 'anthropic', name: 'Anthropic', active: true,
+    id: 'chatgpt-subscription', name: 'ChatGPT subscription', backend: 'codex', active: true,
+    active_model: 'gpt-5.6-sol',
+    models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+  },
+  {
+    id: 'anthropic', name: 'Anthropic', backend: 'anthropic', active: false,
     active_model: 'claude-opus-4-7',
     models: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
   },
   {
-    id: 'claude-code', name: 'Claude Code (CLI)', active: false,
+    id: 'claude-code', name: 'Claude Code (CLI)', backend: 'claude-code', active: false,
     active_model: 'sonnet',
     models: ['sonnet', 'opus', 'haiku'],
   },
   {
-    id: 'openai', name: 'OpenAI', active: false,
+    id: 'openai', name: 'OpenAI', backend: 'openai', active: false,
     active_model: 'gpt-4.1',
     models: ['gpt-4.1', 'gpt-4.1-mini', 'o3'],
   },

@@ -44,7 +44,7 @@ export function boot(client, { pollMs = 10_000, doc = (typeof document !== 'unde
     client.listProviders().then(provs => {
       if (disposed) return;
       const providers = (provs || []).map(p => ({
-        id: p.id, name: p.name, models: p.models || [],
+        id: p.id, name: p.name, backend: p.backend || '', models: p.models || [],
         activeModel: p.active_model || '', active: !!p.active,
       }));
       setProviders(providers, providers[0]?.activeModel || '');

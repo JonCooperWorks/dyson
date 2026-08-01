@@ -90,9 +90,9 @@ describe('TopBar — catalogue picker', () => {
     // Found via the current group (scope to the menu — the top-bar button
     // also shows the active model), and no misleading "No matches".
     const menu = document.querySelector('.modelmenu');
-    await waitFor(() => expect(within(menu).getByText('deepseek/deepseek-v4-pro')).toBeTruthy());
+    await waitFor(() => expect(within(menu).getAllByText('deepseek/deepseek-v4-pro').length).toBeGreaterThanOrEqual(2));
     expect(screen.queryByText('No matches.')).toBeNull();
-    fireEvent.click(within(menu).getByText('deepseek/deepseek-v4-pro'));
+    fireEvent.click(menu.querySelector('.item .model'));
     await waitFor(() => expect(postModel).toHaveBeenCalledWith('p', 'deepseek/deepseek-v4-pro'));
   });
 
@@ -113,10 +113,10 @@ describe('TopBar — catalogue picker', () => {
 
   it('starts device auth before selecting the ChatGPT subscription provider', async () => {
     setProviders([{
-      id: 'chatgpt-subscription', name: 'ChatGPT subscription', active: false,
+      id: 'chatgpt-subscription', name: 'ChatGPT subscription', backend: 'codex', active: false,
       activeModel: 'gpt-5.6-sol', models: ['gpt-5.6-sol'],
     }, {
-      id: 'openrouter', name: 'Swarm', active: true, activeModel: 'seed', models: ['seed'],
+      id: 'openrouter', name: 'Swarm', backend: 'openrouter', active: true, activeModel: 'seed', models: ['seed'],
     }], 'seed');
     const client = {
       listModels: vi.fn(async () => ({ models: [] })),
@@ -135,5 +135,30 @@ describe('TopBar — catalogue picker', () => {
     expect(await screen.findByText('ABCD-12345')).toBeTruthy();
     expect(screen.getByText('Open ChatGPT sign-in').getAttribute('href'))
       .toBe('https://auth.openai.com/codex/device');
+  });
+
+  it('shows the concrete execution backend separately from the model and provider id', async () => {
+    setProviders([{
+      id: 'chatgpt-subscription', name: 'chatgpt-subscription', backend: 'codex', active: true,
+      activeModel: 'gpt-5.6-sol', models: ['gpt-5.6-sol', 'gpt-5.6-terra'],
+    }, {
+      id: 'openrouter', name: 'openrouter', backend: 'openrouter', active: false,
+      activeModel: 'deepseek/deepseek-v4-pro', models: ['deepseek/deepseek-v4-pro'],
+    }], 'gpt-5.6-sol');
+    renderTopBar({ listModels: vi.fn(async () => ({ models: [] })), postModel: vi.fn(async () => ({})) });
+
+    const switcher = screen.getByTitle('Switch model');
+    expect(within(switcher).getByText('Codex')).toBeTruthy();
+    expect(switcher.getAttribute('aria-label')).toContain('Execution backend Codex, ChatGPT subscription');
+
+    fireEvent.click(switcher);
+    const proof = await screen.findByLabelText('Active execution backend');
+    expect(within(proof).getByText('RUNNING NEXT TURN')).toBeTruthy();
+    expect(within(proof).getByText('Codex')).toBeTruthy();
+    expect(within(proof).getByText('ChatGPT subscription')).toBeTruthy();
+    expect(within(proof).getByText('gpt-5.6-sol')).toBeTruthy();
+
+    const menu = document.querySelector('.modelmenu');
+    expect(within(menu).getByText('Swarm')).toBeTruthy();
   });
 });

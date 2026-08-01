@@ -79,4 +79,20 @@ describe('boot — first-login auto-create', () => {
     expect(snapshot.skills.mcp.map(s => s.name)).toEqual(['mcp_massive', 'brave-search']);
     dispose();
   });
+
+  it('preserves the concrete execution backend from /api/providers', async () => {
+    const dispose = boot(
+      noopClient({
+        listConversations: async () => [{ id: 'c-existing', title: 't', live: false }],
+        listProviders: async () => [{
+          id: 'chatgpt-subscription', name: 'chatgpt-subscription', backend: 'codex',
+          models: ['gpt-5.6-sol'], active_model: 'gpt-5.6-sol', active: true,
+        }],
+      }),
+      { pollMs: 1_000_000 },
+    );
+    await flush();
+    expect(app.getSnapshot().providers[0].backend).toBe('codex');
+    dispose();
+  });
 });

@@ -206,6 +206,26 @@ authorization flow when the Dyson is not signed in. The UI receives only the
 verification URL, one-time code, and connection state; Codex performs the OAuth
 exchange and token refresh itself.
 
+### Using CLI subscription providers
+
+The model switcher deliberately shows both the model and its concrete execution
+backend. A `Codex · ChatGPT subscription` badge means the next turn spawns
+`codex exec`; `Swarm · OpenRouter proxy` means the next turn uses Swarm's LLM
+proxy instead. To use Codex in a managed Dyson:
+
+1. Open the model switcher in the top bar.
+2. Select a model under **Codex** (for example `gpt-5.6-sol`).
+3. If prompted, open the ChatGPT device-login page and enter the one-time code.
+4. Wait for the modal to close. The top bar must then read **Codex** beside the
+   selected model before sending the next message.
+
+Claude Code uses the same provider-switch mechanism when a `claude-code`
+provider is configured. Authenticate the runtime once with `claude auth login`,
+then choose a model under **Claude Code**. Unlike Codex on managed Dysons, Dyson
+does not currently broker Claude's login through the web UI; the CLI login must
+already exist inside that Dyson. Managed Swarm images currently seed the Codex
+subscription provider and OpenRouter only.
+
 In the managed image, `CODEX_HOME` is `/dev/shm/dyson-subscriptions/codex` on a
 private tmpfs. Authentication therefore survives provider turns and a paused
 microVM, but is deliberately absent from the writable image layer and Swarm's

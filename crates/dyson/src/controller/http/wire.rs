@@ -281,6 +281,10 @@ pub enum SseEvent {
 pub(crate) struct ProviderDto {
     pub(crate) id: String,
     pub(crate) name: String,
+    /// Concrete execution backend, distinct from the operator-defined provider
+    /// name.  For example, `chatgpt-subscription` executes through `codex`,
+    /// while the managed `openrouter` entry executes through `openrouter`.
+    pub(crate) backend: String,
     /// All models configured for this provider in dyson.json, plus any
     /// added via POST /api/providers/:id/models during this session.
     pub(crate) models: Vec<String>,

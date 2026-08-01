@@ -616,7 +616,11 @@ Tools without a view fall back to plain text.  See
 
 ```
 GET /api/providers
-[ { id, name, models, active_model, active } ]   # active sorted first
+[ { id, name, backend, models, active_model, active } ]   # active sorted first
+
+# `id` is the configured provider name; `backend` is the concrete execution
+# path (`codex`, `claude-code`, `openrouter`, etc.).  Keeping both prevents a
+# friendly provider label from being mistaken for proof of the active runtime.
 
 POST /api/model
 { provider, model?, chat_id? }

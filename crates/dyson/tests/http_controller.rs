@@ -646,6 +646,7 @@ async fn providers_returns_full_models_list_with_active_first() {
     assert_eq!(provs.len(), 1);
     let p = &provs[0];
     assert_eq!(p["id"], "default");
+    assert_eq!(p["backend"], "openrouter");
     assert_eq!(p["active"], true);
     assert_eq!(p["active_model"], "qwen/qwen3.6-plus");
     let models: Vec<&str> = p["models"]
