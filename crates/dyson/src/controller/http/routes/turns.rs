@@ -957,7 +957,14 @@ async fn generate_title(
     let messages = vec![Message::user(&user)];
     let response = client
         .access()?
-        .stream(&messages, system, "", &[], &config)
+        .stream(
+            &messages,
+            system,
+            "",
+            &[],
+            &std::collections::HashMap::new(),
+            &config,
+        )
         .await?;
     let mut stream = response.stream;
     let mut raw = String::new();
@@ -1066,6 +1073,10 @@ mod tests {
             _system: &str,
             _system_suffix: &str,
             _tools: &[ToolDefinition],
+            _tool_instances: &std::collections::HashMap<
+                String,
+                std::sync::Arc<dyn crate::tool::Tool>,
+            >,
             _config: &CompletionConfig,
         ) -> crate::Result<crate::llm::StreamResponse> {
             panic!("slash skill dispatch must not call the LLM");

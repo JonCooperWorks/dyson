@@ -72,6 +72,7 @@ impl LlmClient for GeminiClient {
         system: &str,
         system_suffix: &str,
         tools: &[ToolDefinition],
+        _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn crate::tool::Tool>>,
         config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
         // -- Build contents array --

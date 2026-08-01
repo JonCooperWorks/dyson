@@ -9,9 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 
 use crate::message::MessageCostMetadata;
-
-const ENV_PROXY_URL: &str = "SWARM_PROXY_URL";
-const ENV_PROXY_TOKEN: &str = "SWARM_PROXY_TOKEN";
+use dyson_common::state_sync::{ENV_PROXY_TOKEN, ENV_PROXY_URL};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CostLookupConfig {

@@ -75,7 +75,6 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::io::AsyncWriteExt as _;
@@ -120,9 +119,6 @@ pub struct CodexClient {
 
     /// Whether sandbox enforcement is disabled.
     dangerous_no_sandbox: bool,
-
-    /// Dyson's agent tools to expose via MCP alongside workspace tools.
-    mcp_tools: std::sync::Mutex<std::collections::HashMap<String, Arc<dyn Tool>>>,
 }
 
 struct TempCodexProfile {
@@ -247,7 +243,6 @@ impl CodexClient {
             codex_path: resolved,
             workspace,
             dangerous_no_sandbox,
-            mcp_tools: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -299,10 +294,13 @@ impl LlmClient for CodexClient {
         system: &str,
         system_suffix: &str,
         tools: &[ToolDefinition],
+        tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
         config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
+        let extra = cli_subprocess::forwarded_tools_for_call(tools, tool_instances);
+        let has_mcp_tools = !extra.is_empty();
         // When MCP is active, tools are structured — skip text descriptions.
-        let prompt_tools = cli_subprocess::filter_tools_for_cli(tools, self.workspace.is_some());
+        let prompt_tools = cli_subprocess::filter_tools_for_cli(tools, has_mcp_tools);
         let prompt = super::format_prompt(messages, &prompt_tools);
 
         tracing::debug!(
@@ -318,17 +316,12 @@ impl LlmClient for CodexClient {
         let mut mcp_url: Option<String> = None;
         let mut mcp_token: Option<String> = None;
 
-        let extra = self
-            .mcp_tools
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let server_info = if let Some(ref workspace) = self.workspace {
-            Some(super::start_mcp_server(workspace, extra).await?)
-        } else if !extra.is_empty() {
-            Some(super::start_mcp_tools_server(extra).await?)
-        } else {
+        let server_info = if !has_mcp_tools {
             None
+        } else if let Some(ref workspace) = self.workspace {
+            Some(super::start_mcp_server(workspace, extra).await?)
+        } else {
+            Some(super::start_mcp_tools_server(extra).await?)
         };
         if let Some(info) = server_info {
             tracing::info!(port = info.port, "MCP server started for Codex");
@@ -398,16 +391,6 @@ impl LlmClient for CodexClient {
         let event_stream = cli_event_stream(stdout, StreamParserState::new(), keep_alive);
 
         Ok(cli_subprocess::build_observe_response(event_stream))
-    }
-
-    fn set_mcp_tools(&self, tools: std::collections::HashMap<String, Arc<dyn Tool>>) {
-        let filtered: std::collections::HashMap<_, _> =
-            tools.into_iter().filter(|(_, t)| !t.agent_only()).collect();
-        tracing::info!(tool_count = filtered.len(), "MCP tools registered");
-        *self
-            .mcp_tools
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = filtered;
     }
 }
 

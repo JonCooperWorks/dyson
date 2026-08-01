@@ -703,6 +703,7 @@ impl Agent {
                 &self.system_prompt,
                 skill_fragments,
                 tools_for_llm,
+                &self.tool_registry.tools,
                 &self.config,
             )
             .await

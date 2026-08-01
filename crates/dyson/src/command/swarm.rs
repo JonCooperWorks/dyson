@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use dyson_common::state_sync::{ENV_INSTANCE_ID, ENV_PROXY_TOKEN, ENV_PROXY_URL};
 use serde_json::json;
 
 use dyson::auth::HashedBearerAuth;
@@ -79,11 +80,11 @@ pub async fn run() -> Result<()> {
 
     let bind = std::env::var("DYSON_BIND").unwrap_or_else(|_| DEFAULT_BIND.into());
     let home = std::env::var("DYSON_HOME").unwrap_or_else(|_| DEFAULT_DYSON_HOME.into());
-    let proxy_url = std::env::var("SWARM_PROXY_URL").unwrap_or_default();
-    let proxy_token = std::env::var("SWARM_PROXY_TOKEN").unwrap_or_default();
+    let proxy_url = std::env::var(ENV_PROXY_URL).unwrap_or_default();
+    let proxy_token = std::env::var(ENV_PROXY_TOKEN).unwrap_or_default();
     let task = std::env::var("SWARM_TASK").unwrap_or_default();
     let name = std::env::var("SWARM_NAME").unwrap_or_default();
-    let instance_id = std::env::var("SWARM_INSTANCE_ID").unwrap_or_default();
+    let instance_id = std::env::var(ENV_INSTANCE_ID).unwrap_or_default();
     let model = std::env::var("SWARM_MODEL").unwrap_or_default();
     let state_sync = dyson::swarm_state_sync::config_from_env();
     dyson::swarm_cost::set_runtime_config_from_parts(&proxy_url, &proxy_token);

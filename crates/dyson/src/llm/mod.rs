@@ -201,6 +201,9 @@ pub trait LlmClient: Send + Sync {
     ///   every turn, so providers should NOT cache this part.  Pass `""` when
     ///   there is nothing to append.
     /// - `tools`: Available tool definitions (the LLM decides which to use).
+    /// - `tool_instances`: Concrete implementations for this call. CLI
+    ///   providers expose the visible subset through their per-turn MCP server;
+    ///   API providers ignore them and use only the definitions.
     /// - `config`: Model, max_tokens, temperature.
     ///
     /// ## Returns
@@ -213,12 +216,9 @@ pub trait LlmClient: Send + Sync {
         system: &str,
         system_suffix: &str,
         tools: &[ToolDefinition],
+        tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
         config: &CompletionConfig,
     ) -> Result<StreamResponse>;
-
-    /// Pass Dyson's tools to CLI-based backends for MCP exposure.
-    /// API-based clients (Anthropic, OpenAI) ignore this — no-op default.
-    fn set_mcp_tools(&self, _tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -624,13 +624,21 @@ impl LlmClient for RetryingLlmClient {
         system: &str,
         system_suffix: &str,
         tools: &[ToolDefinition],
+        tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
         config: &CompletionConfig,
     ) -> Result<StreamResponse> {
         let mut attempt: usize = 0;
         loop {
             match self
                 .inner
-                .stream(messages, system, system_suffix, tools, config)
+                .stream(
+                    messages,
+                    system,
+                    system_suffix,
+                    tools,
+                    tool_instances,
+                    config,
+                )
                 .await
             {
                 Ok(r) => return Ok(r),
@@ -663,10 +671,6 @@ impl LlmClient for RetryingLlmClient {
                 Err(e) => return Err(e),
             }
         }
-    }
-
-    fn set_mcp_tools(&self, tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>) {
-        self.inner.set_mcp_tools(tools);
     }
 }
 
@@ -720,6 +724,7 @@ impl LlmClient for ConcurrencyLimitedLlmClient {
         system: &str,
         system_suffix: &str,
         tools: &[ToolDefinition],
+        tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
         config: &CompletionConfig,
     ) -> Result<StreamResponse> {
         // Acquire before issuing the request, then move the permit into the
@@ -733,17 +738,20 @@ impl LlmClient for ConcurrencyLimitedLlmClient {
             .expect("semaphore is never closed");
         let mut response = self
             .inner
-            .stream(messages, system, system_suffix, tools, config)
+            .stream(
+                messages,
+                system,
+                system_suffix,
+                tools,
+                tool_instances,
+                config,
+            )
             .await?;
         response.stream = Box::pin(ConcurrencyPermitStream {
             inner: response.stream,
             _permit: permit,
         });
         Ok(response)
-    }
-
-    fn set_mcp_tools(&self, tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>) {
-        self.inner.set_mcp_tools(tools);
     }
 }
 
@@ -1268,6 +1276,7 @@ mod tests {
             _system: &str,
             _system_suffix: &str,
             _tools: &[ToolDefinition],
+            _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
             _config: &CompletionConfig,
         ) -> Result<StreamResponse> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
@@ -1322,7 +1331,16 @@ mod tests {
         ]);
         let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 3, 1);
 
-        let result = client.stream(&[], "", "", &[], &empty_config()).await;
+        let result = client
+            .stream(
+                &[],
+                "",
+                "",
+                &[],
+                &std::collections::HashMap::new(),
+                &empty_config(),
+            )
+            .await;
         assert!(result.is_ok());
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
@@ -1336,7 +1354,18 @@ mod tests {
         ]);
         let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 2, 1);
 
-        let err = assert_err(client.stream(&[], "", "", &[], &empty_config()).await);
+        let err = assert_err(
+            client
+                .stream(
+                    &[],
+                    "",
+                    "",
+                    &[],
+                    &std::collections::HashMap::new(),
+                    &empty_config(),
+                )
+                .await,
+        );
         assert!(matches!(err, DysonError::LlmRateLimit { .. }));
         // initial + 2 retries = 3 attempts.
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
@@ -1348,7 +1377,18 @@ mod tests {
             ScriptedClient::new(vec![Err(DysonError::Llm("auth failed".into()))]);
         let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 5, 1);
 
-        let err = assert_err(client.stream(&[], "", "", &[], &empty_config()).await);
+        let err = assert_err(
+            client
+                .stream(
+                    &[],
+                    "",
+                    "",
+                    &[],
+                    &std::collections::HashMap::new(),
+                    &empty_config(),
+                )
+                .await,
+        );
         assert!(matches!(err, DysonError::Llm(_)));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
@@ -1358,7 +1398,18 @@ mod tests {
         let (scripted, attempts) = ScriptedClient::new(vec![Err(overloaded_err(None))]);
         let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 0, 1);
 
-        let err = assert_err(client.stream(&[], "", "", &[], &empty_config()).await);
+        let err = assert_err(
+            client
+                .stream(
+                    &[],
+                    "",
+                    "",
+                    &[],
+                    &std::collections::HashMap::new(),
+                    &empty_config(),
+                )
+                .await,
+        );
         assert!(matches!(err, DysonError::LlmOverloaded { .. }));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
@@ -1544,7 +1595,14 @@ mod tests {
         let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 3, 1);
         let start = tokio::time::Instant::now();
         client
-            .stream(&[], "", "", &[], &empty_config())
+            .stream(
+                &[],
+                "",
+                "",
+                &[],
+                &std::collections::HashMap::new(),
+                &empty_config(),
+            )
             .await
             .expect("retry should succeed");
         let elapsed = start.elapsed();
@@ -1567,7 +1625,14 @@ mod tests {
         let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 1, 1);
         let start = tokio::time::Instant::now();
         client
-            .stream(&[], "", "", &[], &empty_config())
+            .stream(
+                &[],
+                "",
+                "",
+                &[],
+                &std::collections::HashMap::new(),
+                &empty_config(),
+            )
             .await
             .expect("retry should succeed");
         let elapsed = start.elapsed();
@@ -1621,6 +1686,7 @@ mod tests {
             _system: &str,
             _system_suffix: &str,
             _tools: &[ToolDefinition],
+            _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
             _config: &CompletionConfig,
         ) -> Result<StreamResponse> {
             let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1636,12 +1702,6 @@ mod tests {
                 model: None,
             })
         }
-
-        fn set_mcp_tools(
-            &self,
-            _tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
-        ) {
-        }
     }
 
     #[tokio::test]
@@ -1654,7 +1714,16 @@ mod tests {
         for _ in 0..6 {
             let c = Arc::clone(&client);
             handles.push(tokio::spawn(async move {
-                c.stream(&[], "", "", &[], &empty_config()).await.unwrap();
+                c.stream(
+                    &[],
+                    "",
+                    "",
+                    &[],
+                    &std::collections::HashMap::new(),
+                    &empty_config(),
+                )
+                .await
+                .unwrap();
             }));
         }
 
@@ -1691,7 +1760,16 @@ mod tests {
         for _ in 0..3 {
             let c = Arc::clone(&client);
             handles.push(tokio::spawn(async move {
-                c.stream(&[], "", "", &[], &empty_config()).await.unwrap();
+                c.stream(
+                    &[],
+                    "",
+                    "",
+                    &[],
+                    &std::collections::HashMap::new(),
+                    &empty_config(),
+                )
+                .await
+                .unwrap();
             }));
         }
         for _ in 0..3 {
@@ -1728,6 +1806,7 @@ mod tests {
             _system: &str,
             _system_suffix: &str,
             _tools: &[ToolDefinition],
+            _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
             _config: &CompletionConfig,
         ) -> Result<StreamResponse> {
             let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1750,12 +1829,6 @@ mod tests {
                 model: None,
             })
         }
-
-        fn set_mcp_tools(
-            &self,
-            _tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
-        ) {
-        }
     }
 
     #[tokio::test]
@@ -1777,7 +1850,14 @@ mod tests {
             let client = Arc::clone(&client);
             handles.push(tokio::spawn(async move {
                 let mut response = client
-                    .stream(&[], "", "", &[], &empty_config())
+                    .stream(
+                        &[],
+                        "",
+                        "",
+                        &[],
+                        &std::collections::HashMap::new(),
+                        &empty_config(),
+                    )
                     .await
                     .unwrap();
                 let _ = response.stream.next().await;

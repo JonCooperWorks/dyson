@@ -138,6 +138,7 @@ impl Agent {
                 &self.system_prompt,
                 skill_fragments,
                 empty_tools,
+                &std::collections::HashMap::new(),
                 &self.config,
             )
             .await

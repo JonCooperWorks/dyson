@@ -333,6 +333,7 @@ impl crate::llm::LlmClient for MockLlm {
         _system: &str,
         _system_suffix: &str,
         _tools: &[crate::llm::ToolDefinition],
+        _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn crate::tool::Tool>>,
         config: &crate::llm::CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
         self.models_seen.lock().unwrap().push(config.model.clone());

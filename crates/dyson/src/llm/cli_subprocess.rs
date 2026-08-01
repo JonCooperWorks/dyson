@@ -15,6 +15,7 @@
 // ===========================================================================
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::ChildStdout;
@@ -22,6 +23,7 @@ use tokio::process::ChildStdout;
 use crate::error::{DysonError, Result};
 use crate::llm::stream::StreamEvent;
 use crate::llm::{StreamResponse, ToolDefinition, ToolMode};
+use crate::tool::Tool;
 
 /// Trait for JSONL line parsers used by CLI subprocess clients.
 ///
@@ -106,15 +108,36 @@ pub fn build_observe_response(
 
 /// Filter tool definitions for CLI clients.
 ///
-/// When a workspace is available, tools are served to the subprocess via
-/// MCP — return an empty list so the text prompt doesn't duplicate them.
+/// When a per-turn MCP server is available, tools are served to the subprocess
+/// through it — return an empty list so the text prompt doesn't duplicate them.
 /// Otherwise, include non-agent-only tools for text-based tool descriptions.
-pub fn filter_tools_for_cli(tools: &[ToolDefinition], has_workspace: bool) -> Vec<&ToolDefinition> {
-    if has_workspace {
+pub fn filter_tools_for_cli(
+    tools: &[ToolDefinition],
+    has_mcp_server: bool,
+) -> Vec<&ToolDefinition> {
+    if has_mcp_server {
         vec![]
     } else {
         tools.iter().filter(|t| !t.agent_only).collect()
     }
+}
+
+/// Select the concrete tool implementations advertised for this exact LLM
+/// call. The client registry is shared across conversations, so keeping this
+/// map on a cached CLI client would let the last-created agent overwrite every
+/// other chat's MCP surface.
+pub fn forwarded_tools_for_call(
+    definitions: &[ToolDefinition],
+    instances: &HashMap<String, Arc<dyn Tool>>,
+) -> HashMap<String, Arc<dyn Tool>> {
+    definitions
+        .iter()
+        .filter(|definition| !definition.agent_only)
+        .filter_map(|definition| {
+            let tool = instances.get(&definition.name)?;
+            (!tool.agent_only()).then(|| (definition.name.clone(), Arc::clone(tool)))
+        })
+        .collect()
 }
 
 pub(crate) fn sanitized_child_env<I>(env: I) -> HashMap<String, String>
@@ -169,6 +192,84 @@ fn is_secret_env_name(name: &str) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    struct NamedTool {
+        name: &'static str,
+        agent_only: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn agent_only(&self) -> bool {
+            self.agent_only
+        }
+
+        async fn run(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &crate::tool::ToolContext,
+        ) -> crate::Result<crate::tool::ToolOutput> {
+            Ok(crate::tool::ToolOutput::success("ok"))
+        }
+    }
+
+    fn definition(name: &str, agent_only: bool) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_owned(),
+            description: "test tool".to_owned(),
+            input_schema: serde_json::json!({"type": "object"}),
+            agent_only,
+        }
+    }
+
+    #[test]
+    fn forwarded_tools_are_scoped_to_the_current_call() {
+        let mut instances: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+        instances.insert(
+            "axelrod_tool".into(),
+            Arc::new(NamedTool {
+                name: "axelrod_tool",
+                agent_only: false,
+            }),
+        );
+        instances.insert(
+            "other_chat_tool".into(),
+            Arc::new(NamedTool {
+                name: "other_chat_tool",
+                agent_only: false,
+            }),
+        );
+        instances.insert(
+            "agent_only".into(),
+            Arc::new(NamedTool {
+                name: "agent_only",
+                agent_only: true,
+            }),
+        );
+
+        let selected = forwarded_tools_for_call(
+            &[
+                definition("axelrod_tool", false),
+                definition("agent_only", true),
+            ],
+            &instances,
+        );
+        assert_eq!(selected.len(), 1);
+        assert!(selected.contains_key("axelrod_tool"));
+        assert!(forwarded_tools_for_call(&[], &instances).is_empty());
+    }
 
     #[test]
     fn sanitized_child_env_removes_swarm_and_provider_secrets() {

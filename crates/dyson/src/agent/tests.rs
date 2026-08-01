@@ -52,6 +52,7 @@ impl LlmClient for FallibleMockLlm {
         _system: &str,
         _system_suffix: &str,
         _tools: &[ToolDefinition],
+        _tool_instances: &std::collections::HashMap<String, Arc<dyn Tool>>,
         _config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -119,6 +120,7 @@ impl LlmClient for RecordingMessagesLlm {
         _system: &str,
         _system_suffix: &str,
         _tools: &[ToolDefinition],
+        _tool_instances: &std::collections::HashMap<String, Arc<dyn Tool>>,
         _config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
         self.seen.lock().unwrap().push(messages.to_vec());
@@ -142,6 +144,7 @@ impl LlmClient for MockLlm {
         _system: &str,
         _system_suffix: &str,
         _tools: &[ToolDefinition],
+        _tool_instances: &std::collections::HashMap<String, Arc<dyn Tool>>,
         _config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
         let events = self.responses.lock().unwrap().remove(0);
@@ -2229,6 +2232,7 @@ async fn quick_response_caps_max_tokens() {
             _system: &str,
             _system_suffix: &str,
             _tools: &[ToolDefinition],
+            _tool_instances: &std::collections::HashMap<String, Arc<dyn Tool>>,
             config: &CompletionConfig,
         ) -> Result<crate::llm::StreamResponse> {
             *self.captured_max_tokens.lock().unwrap() = Some(config.max_tokens);
@@ -2284,6 +2288,7 @@ async fn quick_response_sends_no_tools() {
             _system: &str,
             _system_suffix: &str,
             tools: &[ToolDefinition],
+            _tool_instances: &std::collections::HashMap<String, Arc<dyn Tool>>,
             _config: &CompletionConfig,
         ) -> Result<crate::llm::StreamResponse> {
             *self.captured_tools.lock().unwrap() = Some(tools.len());

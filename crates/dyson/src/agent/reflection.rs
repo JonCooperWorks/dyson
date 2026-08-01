@@ -153,7 +153,14 @@ async fn run_mini_loop(
         };
 
         let response = match client
-            .stream(&messages, system_prompt, "", &tool_defs, &ctx.config)
+            .stream(
+                &messages,
+                system_prompt,
+                "",
+                &tool_defs,
+                &tool_map,
+                &ctx.config,
+            )
             .await
         {
             Ok(r) => r,
@@ -534,7 +541,14 @@ pub(super) async fn synthesize_to_workspace(
     let empty_tools: Vec<ToolDefinition> = Vec::new();
 
     let response = client
-        .stream(&messages, &system, "", &empty_tools, config)
+        .stream(
+            &messages,
+            &system,
+            "",
+            &empty_tools,
+            &HashMap::new(),
+            config,
+        )
         .await?;
 
     let mut silent = SilentOutput;

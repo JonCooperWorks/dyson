@@ -50,6 +50,7 @@ impl LlmClient for MockLlm {
         _system: &str,
         _system_suffix: &str,
         _tools: &[ToolDefinition],
+        _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn dyson::tool::Tool>>,
         _config: &CompletionConfig,
     ) -> Result<dyson::llm::StreamResponse> {
         let events = self.responses.lock().unwrap().remove(0);

@@ -28,6 +28,7 @@
 // ===========================================================================
 
 use std::collections::HashMap;
+use std::io::BufRead as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -139,20 +140,28 @@ impl ActivityRegistry {
                 continue;
             };
             let jsonl = chat_path.join("activity.jsonl");
-            let Ok(text) = std::fs::read_to_string(&jsonl) else {
+            let Ok(file) = std::fs::File::open(&jsonl) else {
                 continue;
             };
             // Fold by id: later lines (terminal states) overwrite
-            // earlier lines (Running).  BTreeMap keeps the result
-            // sorted by id, which happens to be chronological too.
+            // earlier lines (Running). Keep only the newest hot entries while
+            // streaming the append-only file so startup memory stays bounded
+            // even after years of activity.
             let mut folded: std::collections::BTreeMap<u64, ActivityEntry> =
                 std::collections::BTreeMap::new();
             let mut max_id: u64 = 0;
-            for line in text.lines() {
+            for line in std::io::BufReader::new(file).lines() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(e) => {
+                        tracing::warn!(error = %e, chat_id, "failed to read activity.jsonl line — skipping remainder");
+                        break;
+                    }
+                };
                 if line.trim().is_empty() {
                     continue;
                 }
-                let mut entry: ActivityEntry = match serde_json::from_str(line) {
+                let mut entry: ActivityEntry = match serde_json::from_str(&line) {
                     Ok(e) => e,
                     Err(e) => {
                         tracing::warn!(error = %e, chat_id, "malformed activity.jsonl line — skipping");
@@ -180,16 +189,14 @@ impl ActivityRegistry {
                 }
                 max_id = max_id.max(entry.id);
                 folded.insert(entry.id, entry);
+                if folded.len() > CAP_PER_CHAT {
+                    folded.pop_first();
+                }
             }
             if folded.is_empty() {
                 continue;
             }
-            // Keep newest CAP_PER_CHAT per chat in memory.
-            let mut entries: Vec<ActivityEntry> = folded.into_values().collect();
-            if entries.len() > CAP_PER_CHAT {
-                let drop = entries.len() - CAP_PER_CHAT;
-                entries.drain(0..drop);
-            }
+            let entries: Vec<ActivityEntry> = folded.into_values().collect();
             by_chat.insert(chat_id.to_string(), entries);
             next_id.insert(chat_id.to_string(), max_id.saturating_add(1));
         }
@@ -515,6 +522,37 @@ mod tests {
         assert_eq!(snap.len(), 1, "entry should survive restart");
         assert_eq!(snap[0].status, ActivityStatus::Ok);
         assert_eq!(snap[0].name, "security_engineer");
+    }
+
+    #[test]
+    fn hydrate_keeps_only_newest_entries_and_preserves_next_id() {
+        let dir = tempdir();
+        let chat_dir = dir.path().join("c-many");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        let mut body = String::new();
+        for id in 1..=(CAP_PER_CHAT as u64 + 20) {
+            let entry = ActivityEntry {
+                chat_id: "c-many".into(),
+                lane: LANE_SUBAGENT.into(),
+                name: format!("task-{id}"),
+                note: String::new(),
+                status: ActivityStatus::Ok,
+                started_at: id,
+                finished_at: Some(id),
+                last_progress_at: None,
+                id,
+            };
+            body.push_str(&serde_json::to_string(&entry).unwrap());
+            body.push('\n');
+        }
+        std::fs::write(chat_dir.join("activity.jsonl"), body).unwrap();
+
+        let reg = ActivityRegistry::new(Some(dir.path().to_path_buf()));
+        let snap = reg.snapshot_chat("c-many");
+        assert_eq!(snap.len(), CAP_PER_CHAT);
+        assert_eq!(snap.first().unwrap().id, CAP_PER_CHAT as u64 + 20);
+        assert_eq!(snap.last().unwrap().id, 21);
+        assert_eq!(reg.next_id("c-many"), CAP_PER_CHAT as u64 + 21);
     }
 
     #[test]

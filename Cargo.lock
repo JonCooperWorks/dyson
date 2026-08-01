@@ -945,11 +945,9 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml",
- "wiremock",
 ]
 
 [[package]]
@@ -969,7 +967,6 @@ dependencies = [
  "dyson-core",
  "dyson-harness",
  "serde_json",
- "tempfile",
  "tokio",
  "tracing",
 ]

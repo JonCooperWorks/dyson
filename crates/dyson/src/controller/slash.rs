@@ -47,6 +47,7 @@ impl LlmClient for DirectSlashLlm {
         _system: &str,
         _system_suffix: &str,
         _tools: &[ToolDefinition],
+        _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn crate::tool::Tool>>,
         _config: &CompletionConfig,
     ) -> crate::Result<StreamResponse> {
         Err(crate::error::DysonError::Config(

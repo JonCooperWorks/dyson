@@ -1611,6 +1611,10 @@ mod eviction_tests {
             _system: &str,
             _system_suffix: &str,
             _tools: &[crate::llm::ToolDefinition],
+            _tool_instances: &std::collections::HashMap<
+                String,
+                std::sync::Arc<dyn crate::tool::Tool>,
+            >,
             _config: &crate::llm::CompletionConfig,
         ) -> crate::error::Result<crate::llm::StreamResponse> {
             Err(crate::error::DysonError::Llm("noop".into()))

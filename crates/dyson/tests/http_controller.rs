@@ -50,6 +50,7 @@ impl LlmClient for StubLlmClient {
         _system: &str,
         _system_suffix: &str,
         _tools: &[ToolDefinition],
+        _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn dyson::tool::Tool>>,
         _config: &CompletionConfig,
     ) -> dyson::error::Result<StreamResponse> {
         let events = vec![
@@ -92,6 +93,7 @@ impl LlmClient for BlockingLlmClient {
         _system: &str,
         _system_suffix: &str,
         _tools: &[ToolDefinition],
+        _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn dyson::tool::Tool>>,
         _config: &CompletionConfig,
     ) -> dyson::error::Result<StreamResponse> {
         self.started
@@ -125,6 +127,7 @@ impl LlmClient for ToolThenRecordMessagesLlm {
         _system: &str,
         _system_suffix: &str,
         _tools: &[ToolDefinition],
+        _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn dyson::tool::Tool>>,
         _config: &CompletionConfig,
     ) -> dyson::error::Result<StreamResponse> {
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -173,6 +176,7 @@ impl LlmClient for CaptureToolsLlm {
         _system: &str,
         _system_suffix: &str,
         tools: &[ToolDefinition],
+        _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn dyson::tool::Tool>>,
         _config: &CompletionConfig,
     ) -> dyson::error::Result<StreamResponse> {
         self.calls.lock().unwrap().push(
@@ -231,6 +235,7 @@ async fn rig_with_auth_and_client(auth: Arc<dyn Auth>, client: Box<dyn LlmClient
     rig_with_auth_client_and_config_path(auth, client, None).await
 }
 
+#[cfg(target_os = "linux")]
 async fn rig_with_config_path(config_path: std::path::PathBuf) -> Rig {
     rig_with_auth_client_and_config_path(
         Arc::new(DangerousNoAuth),

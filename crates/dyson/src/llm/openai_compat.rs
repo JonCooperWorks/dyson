@@ -91,6 +91,7 @@ impl LlmClient for OpenAiCompatClient {
         system: &str,
         system_suffix: &str,
         tools: &[ToolDefinition],
+        tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn crate::tool::Tool>>,
         config: &CompletionConfig,
     ) -> Result<StreamResponse> {
         // Check if this model needs dialect-specific tool handling.
@@ -141,7 +142,14 @@ impl LlmClient for OpenAiCompatClient {
 
         // No dialect needed — pass through unchanged.
         self.inner
-            .stream(messages, system, system_suffix, tools, config)
+            .stream(
+                messages,
+                system,
+                system_suffix,
+                tools,
+                tool_instances,
+                config,
+            )
             .await
     }
 }

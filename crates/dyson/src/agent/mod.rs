@@ -412,9 +412,6 @@ impl Agent {
             api_tool_injections,
         };
 
-        // Expose tools via MCP for CLI backends (no-op for API clients).
-        client.get_ref().set_mcp_tools(tool_registry.tools.clone());
-
         tracing::info!(
             skill_count = skills.len(),
             tool_count = tool_registry.definitions.len(),
@@ -808,10 +805,6 @@ impl Agent {
     ) {
         self.client = new_client;
         self.config.model = model.to_string();
-        self.client
-            .get_ref()
-            .set_mcp_tools(self.tool_registry.tools.clone());
-
         // Patch the "You are running on model …" line in the system prompt.
         let marker = "\n\nYou are running on model '";
         if let Some(pos) = self.system_prompt.find(marker) {
@@ -1073,7 +1066,14 @@ pub async fn quick_response(
         You have no tools available right now.";
 
     let response = client
-        .stream(&msgs, system_prompt, quick_suffix, &[], &quick_config)
+        .stream(
+            &msgs,
+            system_prompt,
+            quick_suffix,
+            &[],
+            &std::collections::HashMap::new(),
+            &quick_config,
+        )
         .await?;
 
     // Process the stream — reuse the standard handler.

@@ -128,7 +128,6 @@
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::process::Stdio;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::io::AsyncWriteExt;
@@ -191,9 +190,6 @@ pub struct ClaudeCodeClient {
     /// When `None`, no MCP server is started and Claude Code runs without
     /// workspace tools.  This happens in tests or when no workspace is configured.
     workspace: Option<WorkspaceHandle>,
-
-    /// Dyson tools exposed via MCP (set by agent via `set_mcp_tools`).
-    mcp_tools: std::sync::Mutex<HashMap<String, Arc<dyn Tool>>>,
 }
 
 struct TempMcpConfig(tempfile::NamedTempFile);
@@ -249,7 +245,6 @@ impl ClaudeCodeClient {
             claude_path: resolved,
             mcp_configs,
             workspace,
-            mcp_tools: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -324,8 +319,11 @@ impl LlmClient for ClaudeCodeClient {
         system: &str,
         system_suffix: &str,
         tools: &[ToolDefinition],
+        tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
         config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
+        let extra = cli_subprocess::forwarded_tools_for_call(tools, tool_instances);
+        let has_mcp_tools = !extra.is_empty();
         // -- Format conversation history into a prompt string --
         //
         // The claude CLI in -p mode takes a single prompt.  We format the
@@ -333,7 +331,7 @@ impl LlmClient for ClaudeCodeClient {
         // has context from previous turns.
         //
         // When MCP is active, tools are structured — skip text descriptions.
-        let prompt_tools = cli_subprocess::filter_tools_for_cli(tools, self.workspace.is_some());
+        let prompt_tools = cli_subprocess::filter_tools_for_cli(tools, has_mcp_tools);
         let prompt = super::format_prompt(messages, &prompt_tools);
 
         tracing::debug!(
@@ -352,13 +350,12 @@ impl LlmClient for ClaudeCodeClient {
         let mut mcp_config_json: Option<String> = None;
         let mut mcp_config_file: Option<TempMcpConfig> = None;
 
-        if let Some(ref workspace) = self.workspace {
-            let extra = self
-                .mcp_tools
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            let info = super::start_mcp_server(workspace, extra).await?;
+        if has_mcp_tools {
+            let info = if let Some(ref workspace) = self.workspace {
+                super::start_mcp_server(workspace, extra).await?
+            } else {
+                super::start_mcp_tools_server(extra).await?
+            };
 
             // Build MCP config JSON for Claude Code's --mcp-config flag.
             let config = serde_json::json!({
@@ -451,15 +448,6 @@ impl LlmClient for ClaudeCodeClient {
         let event_stream = cli_event_stream(stdout, StreamParserState::new(), keep_alive);
 
         Ok(cli_subprocess::build_observe_response(event_stream))
-    }
-
-    fn set_mcp_tools(&self, tools: HashMap<String, Arc<dyn Tool>>) {
-        let filtered: HashMap<_, _> = tools.into_iter().filter(|(_, t)| !t.agent_only()).collect();
-        tracing::info!(tool_count = filtered.len(), "MCP tools registered");
-        *self
-            .mcp_tools
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = filtered;
     }
 }
 

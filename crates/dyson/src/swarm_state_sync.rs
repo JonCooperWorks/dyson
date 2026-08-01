@@ -13,7 +13,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use dyson_common::state_sync::{ENV_STATE_SYNC_TOKEN, ENV_STATE_SYNC_URL};
+use dyson_common::state_sync::{
+    ENV_STATE_SYNC_TOKEN, ENV_STATE_SYNC_URL, has_hidden_or_unclean_component,
+    is_durable_state_path,
+};
 use serde::Serialize;
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(5);
@@ -586,74 +589,16 @@ fn should_descend(namespace: &str, rel: &Path) -> bool {
 }
 
 fn should_sync(namespace: &str, rel: &Path) -> bool {
-    if has_hidden_or_unclean_component(rel) {
-        return false;
-    }
-    if namespace == "chats" {
-        return true;
-    }
-    if namespace != "workspace" {
-        return false;
-    }
-    let parts: Vec<&str> = rel
-        .components()
-        .filter_map(|c| match c {
-            Component::Normal(s) => s.to_str(),
-            _ => None,
-        })
-        .collect();
-    match parts.as_slice() {
-        [file] => has_extension(file, "md"),
-        ["memory", ..] => rel
-            .extension()
-            .and_then(|s| s.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("md")),
-        ["kb", ..] | ["skills", ..] => true,
-        ["channels", _channel, rest @ ..] => should_sync_channel_workspace(rest, rel),
-        _ => false,
-    }
+    rel.to_str()
+        .is_some_and(|path| is_durable_state_path(namespace, path))
 }
 
 pub(crate) fn is_durable_state_file_path(namespace: &str, rel_path: &str) -> bool {
-    should_sync(namespace, Path::new(rel_path))
-}
-
-fn should_sync_channel_workspace(parts: &[&str], rel: &Path) -> bool {
-    match parts {
-        [file] => has_extension(file, "md") || *file == "_audit.jsonl",
-        ["memory", ..] => rel
-            .extension()
-            .and_then(|s| s.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("md")),
-        _ => false,
-    }
-}
-
-fn has_extension(file_name: &str, expected: &str) -> bool {
-    Path::new(file_name)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case(expected))
+    is_durable_state_path(namespace, rel_path)
 }
 
 pub(crate) fn is_zero_byte_chat_transcript(namespace: &str, rel_path: &str, len: u64) -> bool {
-    namespace == "chats" && len == 0 && rel_path.ends_with("/transcript.json")
-}
-
-fn has_hidden_or_unclean_component(path: &Path) -> bool {
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => {
-                let Some(s) = part.to_str() else {
-                    return true;
-                };
-                if s.is_empty() || s.starts_with('.') {
-                    return true;
-                }
-            }
-            _ => return true,
-        }
-    }
-    false
+    len == 0 && dyson_common::state_sync::is_zero_byte_chat_transcript(namespace, rel_path, &[])
 }
 
 fn slash_path(path: &Path) -> String {

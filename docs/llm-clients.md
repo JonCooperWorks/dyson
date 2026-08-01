@@ -29,12 +29,9 @@ pub trait LlmClient: Send + Sync {
         system: &str,
         system_suffix: &str,
         tools: &[ToolDefinition],
+        tool_instances: &HashMap<String, Arc<dyn Tool>>,
         config: &CompletionConfig,
     ) -> Result<StreamResponse>;
-
-    /// API clients ignore this. CLI providers use it to expose Dyson tools
-    /// through a loopback MCP server.
-    fn set_mcp_tools(&self, tools: HashMap<String, Arc<dyn Tool>>) {}
 }
 ```
 
@@ -44,6 +41,7 @@ pub trait LlmClient: Send + Sync {
 | `system` | Stable system prompt prefix (passed separately, not as a message) |
 | `system_suffix` | Per-turn ephemeral system context such as time and skill fragments |
 | `tools` | Available tools — the LLM decides which to call |
+| `tool_instances` | Concrete tools for this call; CLI providers expose the visible subset through loopback MCP |
 | `config` | Model name, max_tokens, temperature |
 
 Returns a `StreamResponse` containing the event stream, optional input-token
@@ -195,10 +193,15 @@ Thin wrapper around `OpenAiCompatClient` for [Ollama Cloud](https://ollama.com) 
 `CodexClient` in `src/llm/codex.rs`.
 
 Same pattern as Claude Code — spawns `codex exec --json` as a subprocess with
-`ToolMode::Observe`. Uses `--full-auto` by default;
+`ToolMode::Observe`. Uses `--sandbox workspace-write` by default;
 `--dangerously-bypass-approvals-and-sandbox` only when Dyson's
 `--dangerous-no-sandbox` is set. Workspace MCP and stateless history work the
 same way.
+
+The provider client and rate limiter are shared across conversations, but the
+concrete MCP tool map is passed with each LLM call. A chat, public controller,
+or background agent therefore cannot replace another chat's Codex tool
+catalogue, and explicitly tool-free calls do not inherit MCP tools.
 
 Swarm-managed Dysons expose a `chatgpt-subscription` named provider backed by
 this client. Selecting one of its models in the web UI starts Codex's device

@@ -251,7 +251,14 @@ impl super::Agent {
         let response = self
             .client
             .access()?
-            .stream(messages, &compaction_system, "", empty_tools, &self.config)
+            .stream(
+                messages,
+                &compaction_system,
+                "",
+                empty_tools,
+                &std::collections::HashMap::new(),
+                &self.config,
+            )
             .await?;
 
         let (assistant_msg, _tool_calls, _output_tokens, _stop_reason) =

@@ -122,6 +122,7 @@ impl LlmClient for OpenAiClient {
         system: &str,
         system_suffix: &str,
         tools: &[ToolDefinition],
+        _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn crate::tool::Tool>>,
         config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
         // OpenAI puts the system prompt as the first message with role "system".
@@ -944,7 +945,14 @@ mod tests {
         };
 
         let response = client
-            .stream(&[Message::user("hello")], "system", "", &[], &config)
+            .stream(
+                &[Message::user("hello")],
+                "system",
+                "",
+                &[],
+                &std::collections::HashMap::new(),
+                &config,
+            )
             .await
             .unwrap();
 
