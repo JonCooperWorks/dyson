@@ -132,6 +132,12 @@ where
 pub(crate) fn subscription_proxy(route: &str) -> Option<(String, String)> {
     let (base, token) = crate::swarm_cost::runtime_proxy_parts()?;
     let base = base.trim().trim_end_matches('/');
+    // The post-warmup configure patch carries the active OpenAI-compatible
+    // provider URL (`.../llm/openrouter`), while native subscription routes
+    // are siblings beneath the `/llm` apex. Boot-time SWARM_PROXY_URL uses
+    // the apex already, so accept both shapes without ever falling through
+    // the OpenRouter funding/key path.
+    let base = base.strip_suffix("/openrouter").unwrap_or(base);
     let token = token.trim();
     if base.is_empty() || token.is_empty() {
         return None;
@@ -207,7 +213,7 @@ mod tests {
         }
         let _reset = Reset;
         crate::swarm_cost::set_runtime_config_from_parts(
-            "http://169.254.68.5:8080/llm/",
+            "http://169.254.68.5:8080/llm/openrouter/",
             "pt_runtime_only",
         );
 
