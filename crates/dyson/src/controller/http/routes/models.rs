@@ -1,17 +1,23 @@
 // ===========================================================================
-// /api/models — the full model *catalogue* the active provider can reach.
+// /api/models — the full model *catalogue* the Swarm route can reach.
 //
 // Distinct from /api/providers (which lists only the models configured in
 // dyson.json).  A managed dyson now boots with a single seeded model, so the
 // in-UI switcher needs somewhere to discover everything else it could run —
-// this route proxies the active provider's OpenAI-compatible `/v1/models`
-// endpoint (for the swarm that's `<proxy>/openrouter/v1/models`, i.e. the
-// real OpenRouter catalogue through the metered proxy) and normalizes it.
+// this route proxies the designated catalogue provider's OpenAI-compatible
+// `/v1/models` endpoint (for the swarm that's
+// `<proxy>/openrouter/v1/models`, i.e. the real OpenRouter catalogue through
+// the metered proxy) and normalizes it. Catalogue discovery intentionally
+// does not follow the active execution backend: Codex has no HTTP model
+// endpoint, but users must still be able to switch back to any Swarm model.
 //
 // `POST /api/model` already accepts an arbitrary model id, so a pick here
 // switches end-to-end with no allowlist to maintain.
 //
-// Degrades to `{ "models": [] }` (never a 5xx) whenever no catalogue is
+// The response names the provider that owns the catalogue so a selected
+// entry routes through Swarm even when Codex is currently active.
+//
+// Degrades to `{ "provider": null, "models": [] }` (never a 5xx) whenever no catalogue is
 // reachable — off-swarm dev, a provider with no base_url, or an upstream
 // blip — so the SPA can quietly fall back to the configured list.
 // ===========================================================================
@@ -72,6 +78,46 @@ fn catalogue_url(base_url: Option<&str>) -> Option<String> {
     Some(format!("{base}/v1/models"))
 }
 
+/// Select the provider whose route owns catalogue models.
+///
+/// Managed Dysons always name the Swarm/OpenRouter route `openrouter`; it is
+/// the stable catalogue source regardless of the current execution backend.
+/// The active HTTP provider and then the first deterministic HTTP provider
+/// are retained as fallbacks for standalone configurations that use another
+/// name. CLI-only providers (Codex / Claude Code) have no `base_url` and are
+/// never selected.
+fn catalogue_provider<'a>(
+    providers: &'a std::collections::HashMap<String, crate::config::ProviderConfig>,
+    active_name: Option<&str>,
+) -> Option<(&'a str, &'a crate::config::ProviderConfig)> {
+    let reachable =
+        |cfg: &&crate::config::ProviderConfig| catalogue_url(cfg.base_url.as_deref()).is_some();
+
+    if let Some((name, cfg)) = providers
+        .iter()
+        .find(|(name, cfg)| name.eq_ignore_ascii_case("openrouter") && reachable(cfg))
+    {
+        return Some((name.as_str(), cfg));
+    }
+
+    if let Some(name) = active_name
+        && let Some((provider_name, cfg)) = providers.get_key_value(name)
+        && catalogue_url(cfg.base_url.as_deref()).is_some()
+    {
+        return Some((provider_name.as_str(), cfg));
+    }
+
+    let mut candidates = providers
+        .iter()
+        .filter(|(_, cfg)| reachable(cfg))
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    candidates
+        .into_iter()
+        .next()
+        .map(|(name, cfg)| (name.as_str(), cfg))
+}
+
 /// Coerce a pricing field to a string.  OpenRouter sends per-token prices
 /// as decimal strings ("0.0000015"); tolerate a bare number too.
 fn price_string(v: Option<&serde_json::Value>) -> Option<String> {
@@ -119,10 +165,9 @@ fn normalize(body: &serde_json::Value) -> Vec<ModelEntry> {
 }
 
 pub(super) async fn list(state: &HttpState) -> Resp {
-    // Resolve the active provider the same way /api/providers does: a
-    // runtime override (from POST /api/model) wins over the startup
-    // active-provider so the catalogue is fetched through whichever
-    // provider the next turn will actually use.
+    // Resolve the active provider only as a fallback for standalone configs.
+    // On managed Dysons the named `openrouter` route remains the catalogue
+    // owner even while a CLI subscription backend is executing turns.
     let snapshot = state.settings_snapshot();
     let runtime = state.runtime_model.lock().ok().and_then(|g| g.clone());
     let active_name = runtime
@@ -130,15 +175,13 @@ pub(super) async fn list(state: &HttpState) -> Resp {
         .map(|selection| selection.provider().to_string())
         .or_else(|| crate::controller::active_provider_name(&snapshot));
 
-    let Some(provider_cfg) = active_name
-        .as_deref()
-        .and_then(|name| snapshot.providers.get(name))
+    let Some((provider_name, provider_cfg)) =
+        catalogue_provider(&snapshot.providers, active_name.as_deref())
     else {
-        return json_ok(&serde_json::json!({ "models": [] }));
+        return json_ok(&serde_json::json!({ "provider": null, "models": [] }));
     };
     let Some(url) = catalogue_url(provider_cfg.base_url.as_deref()) else {
-        // Off-swarm / CLI provider with no HTTP catalogue — degrade.
-        return json_ok(&serde_json::json!({ "models": [] }));
+        return json_ok(&serde_json::json!({ "provider": null, "models": [] }));
     };
 
     // Serve a fresh cache hit without touching the network.
@@ -147,7 +190,10 @@ pub(super) async fn list(state: &HttpState) -> Resp {
         && entry.base_url == url
         && entry.fetched_at.elapsed() < CACHE_TTL
     {
-        return json_ok(&serde_json::json!({ "models": entry.models }));
+        return json_ok(&serde_json::json!({
+            "provider": provider_name,
+            "models": entry.models,
+        }));
     }
 
     let key = provider_cfg.api_key.expose().to_string();
@@ -184,7 +230,10 @@ pub(super) async fn list(state: &HttpState) -> Resp {
                     models: models.clone(),
                 });
             }
-            json_ok(&serde_json::json!({ "models": models }))
+            json_ok(&serde_json::json!({
+                "provider": provider_name,
+                "models": models,
+            }))
         }
         // Upstream failed and there's no fresh cache — fall back to stale
         // cache for the same base_url if we have one, else an empty list.
@@ -194,7 +243,10 @@ pub(super) async fn list(state: &HttpState) -> Resp {
                     .filter(|e| e.base_url == url)
                     .map(|e| e.models.clone())
             });
-            json_ok(&serde_json::json!({ "models": stale.unwrap_or_default() }))
+            json_ok(&serde_json::json!({
+                "provider": provider_name,
+                "models": stale.unwrap_or_default(),
+            }))
         }
     }
 }
@@ -202,6 +254,47 @@ pub(super) async fn list(state: &HttpState) -> Resp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn provider(base_url: Option<&str>) -> crate::config::ProviderConfig {
+        crate::config::ProviderConfig {
+            provider_type: crate::config::LlmProvider::OpenRouter,
+            models: vec!["seed".into()],
+            api_key: crate::auth::Credential::from("test-key"),
+            base_url: base_url.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn swarm_catalogue_stays_selected_while_codex_is_active() {
+        let providers = std::collections::HashMap::from([
+            ("chatgpt-subscription".into(), provider(None)),
+            (
+                "openrouter".into(),
+                provider(Some("https://swarm.example/llm/openrouter")),
+            ),
+        ]);
+
+        let (name, _) = catalogue_provider(&providers, Some("chatgpt-subscription")).unwrap();
+        assert_eq!(name, "openrouter");
+    }
+
+    #[test]
+    fn standalone_catalogue_falls_back_deterministically() {
+        let providers = std::collections::HashMap::from([
+            ("zeta".into(), provider(Some("https://zeta.example"))),
+            ("alpha".into(), provider(Some("https://alpha.example"))),
+            ("codex".into(), provider(None)),
+        ]);
+
+        assert_eq!(
+            catalogue_provider(&providers, Some("zeta")).map(|(name, _)| name),
+            Some("zeta"),
+        );
+        assert_eq!(
+            catalogue_provider(&providers, Some("codex")).map(|(name, _)| name),
+            Some("alpha"),
+        );
+    }
 
     #[test]
     fn catalogue_url_appends_v1_models() {

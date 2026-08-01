@@ -225,11 +225,11 @@
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: 6px;
-  height: 20px;
-  padding: 0 8px 0 6px;
+  gap: 5px;
+  height: 18px;
+  padding: 0 6px 0 5px;
   border: 1px solid var(--accent-ln);
-  border-radius: 999px;
+  border-radius: var(--rad-xs);
   color: var(--accent);
   background: linear-gradient(180deg,
     color-mix(in srgb, var(--accent) 13%, var(--bg-1)),
@@ -242,10 +242,10 @@
   white-space: nowrap;
 }
 .codex-badge-mark {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   flex: 0 0 auto;
-  border-radius: 2px;
+  border-radius: 1px;
   background: var(--grad-accent);
   box-shadow: 0 0 8px -1px var(--accent-glow);
   transform: rotate(45deg);
@@ -789,6 +789,9 @@
 }
 /* Searchable catalogue picker (replaces the provider-tree menu). */
 .modelmenu .mm-search {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex; align-items: center; gap: 8px;
   padding: 8px 10px;
   margin-bottom: 4px;
@@ -796,6 +799,10 @@
   border-radius: 7px;
   color: var(--mute);
   background: var(--bg-1);
+}
+.modelmenu .catalogue-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 34px;
 }
 .modelmenu .mm-search input {
   flex: 1; min-width: 0;

@@ -219,6 +219,13 @@ configured default provider. To use Codex in a managed Dyson:
 4. Wait for the modal to close. The top bar must then read **Codex** beside the
    selected model before sending the next message.
 
+The picker loads its full routed model catalogue lazily on first open. In a
+managed Dyson, catalogue discovery stays anchored to the `openrouter` Swarm
+provider even while Codex is active; each catalogue result carries that owner
+back to the UI, so selecting it explicitly switches execution to Swarm. The
+small `dyson.json` provider lists are only the pinned/current shortcuts at the
+top of the picker, not a limit on the searchable catalogue.
+
 Claude Code uses the same provider-switch mechanism when a `claude-code`
 provider is configured. Authenticate the runtime once with `claude auth login`,
 then choose a model under **Claude Code**. Unlike Codex on managed Dysons, Dyson

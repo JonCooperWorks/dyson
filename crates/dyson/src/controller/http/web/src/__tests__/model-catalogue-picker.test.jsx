@@ -22,6 +22,7 @@ afterEach(() => {
 });
 
 const CATALOGUE = {
+  provider: 'openrouter',
   models: [
     { id: 'anthropic/claude-opus-4', name: 'Claude Opus 4', context_length: 200000 },
     { id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro', context_length: 128000 },
@@ -61,9 +62,40 @@ describe('TopBar — catalogue picker', () => {
     await waitFor(() => expect(screen.queryByText('anthropic/claude-opus-4')).toBeNull());
     expect(screen.getByText('openai/gpt-5')).toBeTruthy();
 
-    // Picking a catalogue model posts the switch for the active provider.
+    // Picking a catalogue model posts the switch for its owning Swarm route,
+    // independent of whichever execution backend is currently active.
     fireEvent.click(screen.getByText('openai/gpt-5'));
-    await waitFor(() => expect(postModel).toHaveBeenCalledWith('p', 'openai/gpt-5'));
+    await waitFor(() => expect(postModel).toHaveBeenCalledWith('openrouter', 'openai/gpt-5'));
+  });
+
+  it('shows every catalogue model instead of truncating the swarm inventory', async () => {
+    setProviders([{ id: 'openrouter', name: 'Swarm', active: true, activeModel: 'seed', models: ['seed'] }], 'seed');
+    const models = Array.from({ length: 75 }, (_, i) => ({ id: `vendor/model-${i}` }));
+    renderTopBar({
+      listModels: vi.fn(async () => ({ provider: 'openrouter', models })),
+      postModel: vi.fn(async () => ({})),
+    });
+
+    fireEvent.click(screen.getByTitle('Switch model'));
+    expect(await screen.findByText('Catalogue · 75')).toBeTruthy();
+    expect(screen.getByText('vendor/model-74')).toBeTruthy();
+    expect(screen.queryByText(/more.*narrow/i)).toBeNull();
+  });
+
+  it('routes a Swarm catalogue pick correctly while Codex is active', async () => {
+    setProviders([{
+      id: 'chatgpt-subscription', name: 'ChatGPT subscription', backend: 'codex', active: true,
+      activeModel: 'gpt-5.6-sol', models: ['gpt-5.6-sol'],
+    }, {
+      id: 'openrouter', name: 'Swarm', backend: 'openai', active: false,
+      activeModel: 'seed', models: ['seed'],
+    }], 'gpt-5.6-sol');
+    const postModel = vi.fn(async () => ({}));
+    renderTopBar({ listModels: vi.fn(async () => CATALOGUE), postModel });
+
+    fireEvent.click(screen.getByTitle('Switch model'));
+    fireEvent.click(await screen.findByText('openai/gpt-5'));
+    await waitFor(() => expect(postModel).toHaveBeenCalledWith('openrouter', 'openai/gpt-5'));
   });
 
   it('keeps configured models searchable (they are excluded from the catalogue list)', async () => {

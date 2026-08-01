@@ -122,8 +122,9 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  // Catalogue is null until the menu is first opened, then the normalized
-  // list from GET /api/models (or [] off-swarm / on error).
+  // Catalogue is null until the menu is first opened, then records both the
+  // normalized entries and the provider that owns them. The latter matters
+  // while Codex is active: catalogue picks must switch back through Swarm.
   const [catalogue, setCatalogue] = useState(null);
   const [cataLoading, setCataLoading] = useState(false);
   const [codexConnect, setCodexConnect] = useState(null);
@@ -141,8 +142,14 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
     let alive = true;
     setCataLoading(true);
     client.listModels()
-      .then(r => { if (alive) setCatalogue(Array.isArray(r?.models) ? r.models : []); })
-      .catch(() => { if (alive) setCatalogue([]); })
+      .then(r => {
+        if (!alive) return;
+        setCatalogue({
+          provider: typeof r?.provider === 'string' ? r.provider : activeProvider?.id || '',
+          models: Array.isArray(r?.models) ? r.models : [],
+        });
+      })
+      .catch(() => { if (alive) setCatalogue({ provider: '', models: [] }); })
       .finally(() => { if (alive) setCataLoading(false); });
     return () => { alive = false; };
   }, [menuOpen, catalogue, client]);
@@ -319,9 +326,8 @@ function fmtCtx(n) {
 // Searchable picker over the full model catalogue (GET /api/models),
 // distinct from the old provider-tree menu that only listed the models
 // named in dyson.json.  A small "current" group keeps the configured /
-// active model one click away; the rest of the list is type-to-filter
-// over the catalogue, bounded so a 300-model list never renders whole.
-const CATALOGUE_LIMIT = 30;
+// active model one click away; every routed catalogue entry remains
+// scrollable. CSS content-visibility keeps the long list cheap to paint.
 function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel, nextRunModel, onPick, onDismiss }) {
   useEscapeKey(onDismiss);
   const [query, setQuery] = useState('');
@@ -332,7 +338,11 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
   // *configured* model finds nothing (it's excluded from the catalogue list
   // below, and hiding this group on any query made it unsearchable).
   const configShown = configured.filter(c => !q || (c.id || '').toLowerCase().includes(q));
-  const cata = Array.isArray(catalogue) ? catalogue : [];
+  // Tolerate the old array shape for embeds during a rolling deploy.
+  const cata = Array.isArray(catalogue?.models)
+    ? catalogue.models
+    : Array.isArray(catalogue) ? catalogue : [];
+  const catalogueProvider = catalogue?.provider || activeProvider?.id || '';
   // Hide configured ids from the catalogue list — they already show in the
   // "current" group, and duplicating them just pads the results.
   const matches = cata.filter(m => {
@@ -341,12 +351,10 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
     return (m.id || '').toLowerCase().includes(q)
       || (m.name || '').toLowerCase().includes(q);
   });
-  const shown = matches.slice(0, CATALOGUE_LIMIT);
-  const overflow = matches.length - shown.length;
   // An unavailable catalogue is not actionable when configured models are
   // already present. Keep that implementation detail quiet; only surface an
   // empty state when the user has actively searched and nothing matches.
-  const showCatalogue = loading || shown.length > 0 || (!!q && configShown.length === 0);
+  const showCatalogue = loading || matches.length > 0 || (!!q && configShown.length === 0);
 
   return (
     <>
@@ -387,18 +395,18 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
             nothing matched anywhere. */}
         {showCatalogue && (
         <div className="mm-section">
-          <div className="mm-label">Catalogue{loading ? ' · loading' : ''}</div>
-          {!loading && shown.length === 0 && (
+          <div className="mm-label">Catalogue · {loading ? 'loading' : matches.length}</div>
+          {!loading && matches.length === 0 && (
             <div className="mm-empty">No matching models.</div>
           )}
-          {shown.map(m => {
-            const next = nextRunModel?.provider === activeProvider?.id && nextRunModel?.model === m.id;
-            const current = !!activeProvider?.id && m.id === activeModel;
+          {matches.map(m => {
+            const next = nextRunModel?.provider === catalogueProvider && nextRunModel?.model === m.id;
+            const current = !!catalogueProvider && activeProvider?.id === catalogueProvider && m.id === activeModel;
             const ctx = fmtCtx(m.context_length);
             return (
               <div key={m.id}
-                   className={`item ${current ? 'on' : ''} ${next ? 'next' : ''}`}
-                   onClick={() => onPick(activeProvider?.id, m.id)}
+                   className={`item catalogue-item ${current ? 'on' : ''} ${next ? 'next' : ''}`}
+                   onClick={() => onPick(catalogueProvider, m.id)}
                    title={m.name || m.id}>
                 <span className="dot"/>
                 <span className="model mono">{m.id}</span>
@@ -406,9 +414,6 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
               </div>
             );
           })}
-          {overflow > 0 && (
-            <div className="mm-hint">+{overflow} more — keep typing to narrow</div>
-          )}
         </div>
         )}
       </div>
