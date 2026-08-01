@@ -50,10 +50,10 @@ ARG NUCLEI_TEMPLATES_SHA256=ab24c96eccf4a9dc531c9054d54a820854c971269a8185deba57
 ARG TESTSSL_VERSION=3.2.4
 ARG TESTSSL_SHA256=98528f8a0ac07f1e226efaa8ead438247df8efcb8fee4e056a937ab82a305490
 ARG PLAYWRIGHT_VERSION=1.61.0
-# Codex 0.146.0 unconditionally defers MCP tools to tool_search, but that
-# discovery surface is absent in non-interactive `codex exec` sessions. Keep
-# managed Dysons on the newest verified build that exposes MCP tools directly.
-ARG CODEX_CLI_VERSION=0.145.0-alpha.27
+# Pin the managed runtime so subscription and MCP behavior cannot change under
+# a previously registered template. Upgrade only after the signed-in live MCP
+# regression has passed against the candidate version.
+ARG CODEX_CLI_VERSION=0.146.0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

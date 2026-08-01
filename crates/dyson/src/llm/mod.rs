@@ -824,6 +824,30 @@ pub(crate) async fn start_mcp_server(
     })
 }
 
+/// Start an MCP server for forwarded Dyson tools when a CLI client has no
+/// workspace handle. This is the normal HTTP/Swarm controller construction
+/// path: external tools must remain available, while the workspace capability
+/// must not be backed by an unrelated agent's state.
+pub(crate) async fn start_mcp_tools_server(
+    extra_tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
+) -> Result<McpServerInfo> {
+    use crate::skill::mcp::serve::McpHttpServer;
+    use std::sync::Arc;
+
+    let server = Arc::new(McpHttpServer::new_tools_only(extra_tools));
+    let (port, handle, token) = server.start().await.map_err(|e| {
+        crate::error::DysonError::Llm(format!("failed to start MCP HTTP server: {e}"))
+    })?;
+    let url = format!("http://127.0.0.1:{port}/mcp");
+
+    Ok(McpServerInfo {
+        port,
+        handle,
+        token,
+        url,
+    })
+}
+
 /// Resolve the absolute path to a CLI binary by name.
 ///
 /// Uses `which <name>` to find it on the current PATH.  This is important

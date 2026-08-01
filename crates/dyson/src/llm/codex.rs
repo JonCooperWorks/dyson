@@ -298,13 +298,19 @@ impl LlmClient for CodexClient {
         let mut mcp_url: Option<String> = None;
         let mut mcp_token: Option<String> = None;
 
-        if let Some(ref workspace) = self.workspace {
-            let extra = self
-                .mcp_tools
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            let info = super::start_mcp_server(workspace, extra).await?;
+        let extra = self
+            .mcp_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let server_info = if let Some(ref workspace) = self.workspace {
+            Some(super::start_mcp_server(workspace, extra).await?)
+        } else if !extra.is_empty() {
+            Some(super::start_mcp_tools_server(extra).await?)
+        } else {
+            None
+        };
+        if let Some(info) = server_info {
             tracing::info!(port = info.port, "MCP server started for Codex");
             mcp_token = Some(info.token);
             mcp_url = Some(info.url);
@@ -943,6 +949,33 @@ mod tests {
         );
     }
 
+    struct LiveAgentsListTool;
+
+    #[async_trait::async_trait]
+    impl Tool for LiveAgentsListTool {
+        fn name(&self) -> &str {
+            "agents.list"
+        }
+
+        fn description(&self) -> &str {
+            "List managed agents"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn run(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &crate::tool::ToolContext,
+        ) -> crate::error::Result<crate::tool::ToolOutput> {
+            Ok(crate::tool::ToolOutput::success(
+                "DYSON_CODEX_FORWARDED_MCP_LIVE_OK",
+            ))
+        }
+    }
+
     /// Live regression for the complete Codex CLI -> loopback MCP -> Dyson
     /// workspace path. Deliberately ignored because it consumes a signed-in
     /// Codex turn; run explicitly while validating managed-image upgrades.
@@ -996,6 +1029,62 @@ mod tests {
         assert!(
             stdout.contains("DYSON_CODEX_MCP_LIVE_OK"),
             "Codex did not return the workspace marker: {stdout}"
+        );
+
+        info.handle.abort();
+    }
+
+    /// Live regression for the HTTP/Swarm construction path, where Codex has
+    /// forwarded tools but no workspace handle in the shared client registry.
+    #[tokio::test]
+    #[ignore = "requires an installed, signed-in Codex CLI"]
+    async fn live_codex_exec_calls_forwarded_mcp_without_workspace() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let mut tools = HashMap::new();
+        tools.insert(
+            "agents_list".to_string(),
+            Arc::new(LiveAgentsListTool) as Arc<dyn Tool>,
+        );
+        let info = crate::llm::start_mcp_tools_server(tools)
+            .await
+            .expect("start forwarded-tools MCP server");
+        let profile = TempCodexProfile::new(
+            "Use the requested MCP tool. Do not answer from memory.",
+            Some((&info.token, &info.url)),
+        )
+        .expect("create transient Codex profile");
+        let client = CodexClient::new(Some("codex"), None, false);
+        let args = client.build_args("gpt-5.6-sol", Some(profile.name()));
+        let mut child = tokio::process::Command::new("codex")
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("launch Codex CLI");
+        let mut stdin = child.stdin.take().expect("open Codex stdin");
+        stdin
+            .write_all(b"Call the dyson-workspace agents_list tool with an empty object, then reply with exactly its result.\n")
+            .await
+            .expect("write Codex prompt");
+        stdin.shutdown().await.expect("close Codex stdin");
+        drop(stdin);
+        let output = child.wait_with_output().await.expect("wait for Codex CLI");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("codex stdout:\n{stdout}");
+        eprintln!("codex stderr:\n{stderr}");
+        assert!(output.status.success(), "Codex CLI failed: {stderr}");
+        assert!(
+            stdout.contains("\"server\":\"dyson-workspace\"")
+                && stdout.contains("\"tool\":\"agents_list\""),
+            "Codex never called the forwarded MCP tool: {stdout}"
+        );
+        assert!(
+            stdout.contains("DYSON_CODEX_FORWARDED_MCP_LIVE_OK"),
+            "Codex did not return the forwarded-tool marker: {stdout}"
         );
 
         info.handle.abort();

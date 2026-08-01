@@ -223,12 +223,37 @@ impl McpHttpServer {
     /// let (port, handle, token) = server.start().await?;
     /// ```
     pub fn new(workspace: WorkspaceHandle, extra_tools: HashMap<String, Arc<dyn Tool>>) -> Self {
+        Self::new_inner(workspace, extra_tools, true)
+    }
+
+    /// Create an MCP server that exposes only forwarded Dyson tools.
+    ///
+    /// Long-running controllers build their shared provider registry before
+    /// constructing a per-chat workspace. CLI providers must still receive
+    /// external MCP tools in that path, but attaching an unrelated or dummy
+    /// `workspace` tool would be misleading and could cross agent boundaries.
+    /// Keep an isolated in-memory context for tools that do not need a
+    /// workspace and omit the workspace capability entirely.
+    pub fn new_tools_only(extra_tools: HashMap<String, Arc<dyn Tool>>) -> Self {
+        let workspace: WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(Box::new(
+            crate::workspace::InMemoryWorkspace::new(),
+        )));
+        Self::new_inner(workspace, extra_tools, false)
+    }
+
+    fn new_inner(
+        workspace: WorkspaceHandle,
+        extra_tools: HashMap<String, Arc<dyn Tool>>,
+        include_workspace: bool,
+    ) -> Self {
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
 
         // Create the unified workspace tool.  This is the same Tool impl
         // used by Dyson's own agent loop — we're just wrapping it in MCP.
-        let workspace_tool = Arc::new(WorkspaceTool) as Arc<dyn Tool>;
-        tools.insert(workspace_tool.name().to_string(), workspace_tool);
+        if include_workspace {
+            let workspace_tool = Arc::new(WorkspaceTool) as Arc<dyn Tool>;
+            tools.insert(workspace_tool.name().to_string(), workspace_tool);
+        }
 
         // Merge in extra (non-agent-only) tools from the agent.
         for (name, tool) in extra_tools {

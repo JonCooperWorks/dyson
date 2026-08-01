@@ -178,6 +178,37 @@ async fn tools_list_and_call_use_provider_safe_registry_key() {
     assert_eq!(call.result.unwrap()["content"][0]["text"], "DOTTED_TOOL_OK");
 }
 
+#[tokio::test]
+async fn tools_only_server_exposes_forwarded_tools_without_workspace_tool() {
+    let mut tools = HashMap::new();
+    tools.insert(
+        "agents_list".to_string(),
+        Arc::new(DottedNameTool) as Arc<dyn Tool>,
+    );
+    let server = McpHttpServer::new_tools_only(tools);
+
+    let list = server.dispatch(Some(2), "tools/list", None).await;
+    let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["agents_list"]);
+    assert!(!names.contains(&"workspace"));
+
+    let call = server
+        .dispatch(
+            Some(3),
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "agents_list",
+                "arguments": {}
+            })),
+        )
+        .await;
+    assert_eq!(call.result.unwrap()["content"][0]["text"], "DOTTED_TOOL_OK");
+}
+
 // -----------------------------------------------------------------------
 // Tool execution tests
 // -----------------------------------------------------------------------
