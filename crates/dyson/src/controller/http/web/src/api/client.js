@@ -108,13 +108,27 @@ export class DysonClient {
   }
 
   listProviders() { return this._json('/api/providers'); }
-  getCodexAuth() { return this._json('/api/provider-auth/codex'); }
-  startCodexAuth() {
-    return this._json('/api/provider-auth/codex', { method: 'POST' });
+  getProviderAuth(provider) {
+    return this._json(`/api/provider-auth/${encodeURIComponent(provider)}`);
   }
-  logoutCodex() {
-    return this._json('/api/provider-auth/codex', { method: 'DELETE' });
+  startProviderAuth(provider) {
+    return this._json(`/api/provider-auth/${encodeURIComponent(provider)}`, { method: 'POST' });
   }
+  completeProviderAuth(provider, code) {
+    return this._json(`/api/provider-auth/${encodeURIComponent(provider)}/complete`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }),
+    });
+  }
+  disconnectProviderAuth(provider) {
+    return this._json(`/api/provider-auth/${encodeURIComponent(provider)}`, { method: 'DELETE' });
+  }
+  getCodexAuth() { return this.getProviderAuth('codex'); }
+  startCodexAuth() { return this.startProviderAuth('codex'); }
+  logoutCodex() { return this.disconnectProviderAuth('codex'); }
+  getClaudeAuth() { return this.getProviderAuth('claude'); }
+  startClaudeAuth() { return this.startProviderAuth('claude'); }
+  completeClaudeAuth(code) { return this.completeProviderAuth('claude', code); }
+  logoutClaude() { return this.disconnectProviderAuth('claude'); }
   listCommands()  { return this._json('/api/commands'); }
 
   // Full model catalogue the designated Swarm route can reach. Distinct

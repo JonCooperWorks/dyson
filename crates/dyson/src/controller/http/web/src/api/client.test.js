@@ -58,6 +58,21 @@ describe('DysonClient — GET endpoints', () => {
     expect(args(fetch, 2)[1].method).toBe('DELETE');
   });
 
+  it('Claude subscription auth maps start, completion, status, and logout', async () => {
+    const fetch = mockFetch(() => ({ body: { connected: false } }));
+    const client = new DysonClient({ fetch });
+    await client.getClaudeAuth();
+    await client.startClaudeAuth();
+    await client.completeClaudeAuth('code#state');
+    await client.logoutClaude();
+    expect(args(fetch, 0)[0]).toBe('/api/provider-auth/claude');
+    expect(args(fetch, 1)[1].method).toBe('POST');
+    expect(args(fetch, 2)[0]).toBe('/api/provider-auth/claude/complete');
+    expect(args(fetch, 2)[1].method).toBe('POST');
+    expect(JSON.parse(args(fetch, 2)[1].body)).toEqual({ code: 'code#state' });
+    expect(args(fetch, 3)[1].method).toBe('DELETE');
+  });
+
   it('listCommands → GET /api/commands', async () => {
     const fetch = mockFetch(() => ({ body: [{ cmd: '/clear' }] }));
     const client = new DysonClient({ fetch });

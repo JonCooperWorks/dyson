@@ -139,7 +139,8 @@ impl TempCodexProfile {
             .suffix(".config.toml")
             .tempfile_in(&home)
             .map_err(DysonError::Io)?;
-        let body = codex_profile_body(system, mcp);
+        let proxy = cli_subprocess::subscription_proxy("codex-subscription");
+        let body = codex_profile_body(system, mcp, proxy.as_ref().map(|(url, _)| url.as_str()));
         file.write_all(body.as_bytes()).map_err(DysonError::Io)?;
         file.flush().map_err(DysonError::Io)?;
         let filename = file
@@ -159,12 +160,31 @@ impl TempCodexProfile {
     }
 }
 
-fn codex_profile_body(system: &str, mcp: Option<(&str, &str)>) -> String {
+fn codex_profile_body(
+    system: &str,
+    mcp: Option<(&str, &str)>,
+    subscription_proxy_url: Option<&str>,
+) -> String {
     // Keep large developer instructions off argv: a mature Dyson workspace can
     // exceed Linux's ARG_MAX before Codex even starts. JSON string escaping is
     // also valid for TOML basic strings and handles control characters.
     let system = serde_json::to_string(system).expect("serializing a string cannot fail");
     let mut body = format!("developer_instructions = {system}\n");
+
+    if let Some(url) = subscription_proxy_url {
+        body.push_str(&format!(
+            concat!(
+                "model_provider = \"dyson_swarm_codex\"\n",
+                "\n[model_providers.dyson_swarm_codex]\n",
+                "name = \"Codex via Dyson Swarm\"\n",
+                "base_url = \"{}\"\n",
+                "wire_api = \"responses\"\n",
+                "env_key = \"CODEX_SWARM_PROXY_TOKEN\"\n",
+                "requires_openai_auth = false\n",
+            ),
+            toml_escape(url),
+        ));
+    }
 
     if let Some((token, url)) = mcp {
         // Codex validates every config layer before merging later CLI
@@ -327,6 +347,7 @@ impl LlmClient for CodexClient {
         for arg in &args {
             cmd.arg(arg);
         }
+        let child_env = cli_subprocess::sanitized_child_env(std::env::vars());
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -335,7 +356,10 @@ impl LlmClient for CodexClient {
             // orphaning it (it would otherwise keep burning tokens).
             .kill_on_drop(true)
             .env_clear()
-            .envs(cli_subprocess::sanitized_child_env(std::env::vars()));
+            .envs(child_env);
+        if let Some((_, token)) = cli_subprocess::subscription_proxy("codex-subscription") {
+            cmd.env("CODEX_SWARM_PROXY_TOKEN", token);
+        }
 
         // -- Spawn the process --
         let mut child = cmd.spawn().map_err(|e| {
@@ -919,6 +943,7 @@ mod tests {
         let body = codex_profile_body(
             &system,
             Some(("secret-token-123", "http://127.0.0.1:9999/mcp")),
+            Some("https://swarm.test/llm/codex-subscription"),
         );
         let parsed: toml::Value = toml::from_str(&body).expect("valid transient Codex profile");
         assert_eq!(
@@ -928,6 +953,15 @@ mod tests {
         assert_eq!(
             parsed["mcp_servers"]["dyson-workspace"]["url"].as_str(),
             Some("http://127.0.0.1:9999/mcp")
+        );
+        assert_eq!(parsed["model_provider"].as_str(), Some("dyson_swarm_codex"));
+        assert_eq!(
+            parsed["model_providers"]["dyson_swarm_codex"]["base_url"].as_str(),
+            Some("https://swarm.test/llm/codex-subscription")
+        );
+        assert_eq!(
+            parsed["model_providers"]["dyson_swarm_codex"]["env_key"].as_str(),
+            Some("CODEX_SWARM_PROXY_TOKEN")
         );
         assert_eq!(
             parsed["mcp_servers"]["dyson-workspace"]["default_tools_approval_mode"].as_str(),

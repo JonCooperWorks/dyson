@@ -54,10 +54,13 @@ const IMAGE_PROVIDER_NAME: &str = "openrouter-image";
 /// image model available through the OpenRouter proxy today.
 const DEFAULT_IMAGE_MODEL: &str = "google/gemini-3-pro-image-preview";
 
-/// Codex CLI provider backed by the user's ChatGPT subscription. The CLI owns
-/// OAuth and refresh; Dyson only selects it like any other `LlmClient`.
+/// Native CLI providers backed by user subscriptions. OAuth and refresh stay
+/// in Swarm; the CLIs receive only the instance-bound proxy token.
 const CHATGPT_SUBSCRIPTION_PROVIDER: &str = "chatgpt-subscription";
 const CHATGPT_SUBSCRIPTION_MODELS: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+const CLAUDE_SUBSCRIPTION_PROVIDER: &str = "claude-subscription";
+const CLAUDE_SUBSCRIPTION_MODELS: &[&str] =
+    &["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"];
 
 pub async fn run() -> Result<()> {
     // SWARM_BEARER_TOKEN is the per-instance auth secret swarm injects on
@@ -358,6 +361,10 @@ fn build_swarm_config(inputs: SwarmConfigInputs<'_>) -> serde_json::Value {
         (CHATGPT_SUBSCRIPTION_PROVIDER): {
             "type": "codex",
             "models": CHATGPT_SUBSCRIPTION_MODELS,
+        },
+        (CLAUDE_SUBSCRIPTION_PROVIDER): {
+            "type": "claude-code",
+            "models": CLAUDE_SUBSCRIPTION_MODELS,
         }
     });
     let mut agent = json!({ "provider": "openrouter" });
@@ -570,17 +577,31 @@ mod tests {
     }
 
     #[test]
-    fn managed_image_installs_codex_and_keeps_its_home_on_tmpfs() {
+    fn swarm_config_offers_claude_subscription_through_native_cli() {
+        let cfg = cfg_with_proxy();
+        let provider = &cfg["providers"][CLAUDE_SUBSCRIPTION_PROVIDER];
+        assert_eq!(provider["type"], "claude-code");
+        assert_eq!(
+            provider["models"],
+            serde_json::json!(["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"])
+        );
+        assert_eq!(cfg["agent"]["provider"], "openrouter");
+    }
+
+    #[test]
+    fn managed_image_installs_subscription_clis_and_keeps_config_on_tmpfs() {
         let dockerfile = include_str!("../../../../Dockerfile");
         let entrypoint = include_str!("../../../../deploy/swarm-entrypoint.sh");
         assert!(dockerfile.contains("ARG CODEX_CLI_VERSION=0.146.0"));
         assert!(dockerfile.contains("@openai/codex@${CODEX_CLI_VERSION}"));
+        assert!(dockerfile.contains("@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"));
         assert!(dockerfile.contains("playwright install --with-deps chromium-headless-shell"));
         assert!(dockerfile.contains("codex mount curl ncat"));
         assert!(dockerfile.contains("swarm-entrypoint.sh"));
         assert!(entrypoint.contains("/dev/shm/dyson-subscriptions"));
         assert!(entrypoint.contains("stat -f -c %T"));
         assert!(entrypoint.contains("export CODEX_HOME="));
+        assert!(entrypoint.contains("export CLAUDE_CONFIG_DIR="));
         assert!(entrypoint.contains("cli_auth_credentials_store = \"file\""));
     }
 

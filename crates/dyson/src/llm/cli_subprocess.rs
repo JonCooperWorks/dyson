@@ -126,6 +126,23 @@ where
         .collect()
 }
 
+/// Return the managed Swarm subscription proxy and the instance-scoped
+/// bearer. The bearer is intentionally the same source-IP-bound `pt_` token
+/// used by ordinary Swarm inference; it is not a provider OAuth credential.
+pub(crate) fn subscription_proxy(route: &str) -> Option<(String, String)> {
+    let base = std::env::var("SWARM_PROXY_URL").ok()?;
+    let token = std::env::var("SWARM_PROXY_TOKEN").ok()?;
+    let base = base.trim().trim_end_matches('/');
+    let token = token.trim();
+    if base.is_empty() || token.is_empty() {
+        return None;
+    }
+    Some((
+        format!("{base}/{}", route.trim_matches('/')),
+        token.to_owned(),
+    ))
+}
+
 fn is_secret_env_name(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     upper.starts_with("SWARM_")
@@ -133,6 +150,8 @@ fn is_secret_env_name(name: &str) -> bool {
         || matches!(
             upper.as_str(),
             "ANTHROPIC_API_KEY"
+                | "ANTHROPIC_AUTH_TOKEN"
+                | "CLAUDE_CODE_OAUTH_TOKEN"
                 | "OPENAI_API_KEY"
                 | "OPENROUTER_API_KEY"
                 | "GEMINI_API_KEY"
@@ -154,6 +173,14 @@ mod tests {
         env.insert("SWARM_PROXY_TOKEN".to_string(), "pt_secret".to_string());
         env.insert("SWARM_INGEST_TOKEN".to_string(), "it_secret".to_string());
         env.insert("ANTHROPIC_API_KEY".to_string(), "sk-ant-secret".to_string());
+        env.insert(
+            "ANTHROPIC_AUTH_TOKEN".to_string(),
+            "oauth-secret".to_string(),
+        );
+        env.insert(
+            "CLAUDE_CODE_OAUTH_TOKEN".to_string(),
+            "oauth-secret".to_string(),
+        );
         env.insert("OPENAI_API_KEY".to_string(), "sk-openai-secret".to_string());
 
         let sanitized = sanitized_child_env(env);
@@ -165,6 +192,8 @@ mod tests {
         assert!(!sanitized.contains_key("SWARM_PROXY_TOKEN"));
         assert!(!sanitized.contains_key("SWARM_INGEST_TOKEN"));
         assert!(!sanitized.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!sanitized.contains_key("ANTHROPIC_AUTH_TOKEN"));
+        assert!(!sanitized.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
         assert!(!sanitized.contains_key("OPENAI_API_KEY"));
     }
 }

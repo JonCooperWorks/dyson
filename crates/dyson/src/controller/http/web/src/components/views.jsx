@@ -30,6 +30,15 @@ const NAVS = [
 ];
 
 const CHATGPT_SUBSCRIPTION_PROVIDER = 'chatgpt-subscription';
+const CLAUDE_SUBSCRIPTION_PROVIDER = 'claude-subscription';
+const SUBSCRIPTION_PROVIDERS = {
+  [CHATGPT_SUBSCRIPTION_PROVIDER]: {
+    authProvider: 'codex', badge: 'Codex', service: 'ChatGPT', tone: 'codex', flow: 'device',
+  },
+  [CLAUDE_SUBSCRIPTION_PROVIDER]: {
+    authProvider: 'claude', badge: 'Claude', service: 'Claude', tone: 'claude', flow: 'code',
+  },
+};
 
 // Provider ids are operator-defined labels; `backend` is the concrete client
 // that executes the turn.  Keep the two visible and separate so a model name
@@ -65,11 +74,11 @@ export function providerPresentation(provider) {
 // Swarm is Dyson's quiet default, so provider chrome only appears when a
 // turn leaves that default path. Codex gets one compact piece of identity;
 // the model name remains the primary content everywhere else.
-function CodexBadge() {
+function BackendBadge({ label, tone }) {
   return (
-    <span className="codex-badge">
-      <span className="codex-badge-mark" aria-hidden="true"/>
-      Codex
+    <span className={`backend-badge backend-badge-${tone}`}>
+      <span className="backend-badge-mark" aria-hidden="true"/>
+      {label}
     </span>
   );
 }
@@ -127,7 +136,7 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
   // while Codex is active: catalogue picks must switch back through Swarm.
   const [catalogue, setCatalogue] = useState(null);
   const [cataLoading, setCataLoading] = useState(false);
-  const [codexConnect, setCodexConnect] = useState(null);
+  const [subscriptionConnect, setSubscriptionConnect] = useState(null);
   const drawerTitle = view === 'mind'
     ? 'Workspace files'
     : view === 'artefacts'
@@ -157,13 +166,13 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
   const switchTo = async (provider, modelName) => {
     setBusy(true);
     try {
-      if (provider === CHATGPT_SUBSCRIPTION_PROVIDER
-          && typeof client.getCodexAuth === 'function'
-          && typeof client.startCodexAuth === 'function') {
-        const current = await client.getCodexAuth();
+      const subscription = SUBSCRIPTION_PROVIDERS[provider];
+      if (subscription && typeof client.getProviderAuth === 'function'
+          && typeof client.startProviderAuth === 'function') {
+        const current = await client.getProviderAuth(subscription.authProvider);
         if (!current?.connected) {
-          const auth = await client.startCodexAuth();
-          setCodexConnect({ auth, provider, modelName });
+          const auth = await client.startProviderAuth(subscription.authProvider);
+          setSubscriptionConnect({ auth, provider, modelName, subscription });
           setBusy(false);
           setMenuOpen(false);
           return;
@@ -180,8 +189,8 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
     setMenuOpen(false);
   };
 
-  const finishCodexConnect = async () => {
-    const pending = codexConnect;
+  const finishSubscriptionConnect = async () => {
+    const pending = subscriptionConnect;
     if (!pending) return;
     if (typeof onPickModel === 'function') {
       await onPickModel(pending.provider, pending.modelName);
@@ -189,7 +198,7 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
       await client.postModel(pending.provider, pending.modelName);
       switchProviderModel(pending.provider, pending.modelName);
     }
-    setCodexConnect(null);
+    setSubscriptionConnect(null);
   };
 
   return (
@@ -224,7 +233,8 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
                   style={{opacity: busy ? 0.5 : 1}}
                   title={canSwitch ? 'Switch model' : 'Active model'}>
             {nextRunModel && <span className="model-state">next</span>}
-            {execution.tone === 'codex' && <CodexBadge/>}
+            {(execution.tone === 'codex' || execution.tone === 'claude')
+              && <BackendBadge label={execution.tone === 'codex' ? 'Codex' : 'Claude'} tone={execution.tone}/>}
             <span className="mono">{nextRunModel ? nextRunModel.model : model}</span>
             {canSwitch && <Icon name="chevd" size={10}/>}
           </button>
@@ -238,28 +248,31 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
         )}
       </div>
     </div>
-    {codexConnect && (
-      <CodexConnectModal
+    {subscriptionConnect && (
+      <SubscriptionConnectModal
         client={client}
-        initial={codexConnect.auth}
-        onConnected={finishCodexConnect}
-        onClose={() => setCodexConnect(null)}
+        initial={subscriptionConnect.auth}
+        subscription={subscriptionConnect.subscription}
+        onConnected={finishSubscriptionConnect}
+        onClose={() => setSubscriptionConnect(null)}
       />
     )}
     </>
   );
 }
 
-function CodexConnectModal({ client, initial, onConnected, onClose }) {
+function SubscriptionConnectModal({ client, initial, subscription, onConnected, onClose }) {
   const [auth, setAuth] = useState(initial || {});
   const [copied, setCopied] = useState(false);
+  const [code, setCode] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     let alive = true;
     let completed = false;
     const poll = async () => {
       try {
-        const next = await client.getCodexAuth();
+        const next = await client.getProviderAuth(subscription.authProvider);
         if (!alive) return;
         setAuth(next || {});
         if (next?.connected && !completed) {
@@ -278,7 +291,7 @@ function CodexConnectModal({ client, initial, onConnected, onClose }) {
     const timer = setInterval(poll, 1000);
     poll();
     return () => { alive = false; clearInterval(timer); };
-  }, [client, onConnected]);
+  }, [client, onConnected, subscription.authProvider]);
 
   const copyCode = async () => {
     if (!auth.user_code || !navigator.clipboard?.writeText) return;
@@ -286,30 +299,95 @@ function CodexConnectModal({ client, initial, onConnected, onClose }) {
     setCopied(true);
   };
 
+  const complete = async (event) => {
+    event.preventDefault();
+    if (!code.trim() || typeof client.completeProviderAuth !== 'function') return;
+    setSubmitting(true);
+    try {
+      const next = await client.completeProviderAuth(subscription.authProvider, code.trim());
+      setAuth(next || {});
+      if (next?.connected) await onConnected();
+    } catch {
+      setAuth(previous => ({...previous, error: 'That authorization code could not be accepted. Check the full code and try again.'}));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const signInUrl = auth.auth_url || auth.verification_uri;
+  const isFailed = auth.state === 'failed' || auth.state === 'unavailable';
+
   return (
-    <Modal className="codex-connect" label="Connect ChatGPT subscription" onClose={onClose}>
-      <div style={{padding:24, maxWidth:460}}>
-        <h2 style={{marginTop:0}}>Connect ChatGPT</h2>
-        <p className="muted">Use OpenAI's device sign-in. Your tokens stay inside this Dyson's memory-only credential store.</p>
-        {auth.verification_uri && auth.user_code ? (
-          <>
-            <a className="btn primary" href={auth.verification_uri} target="_blank" rel="noreferrer">
-              Open ChatGPT sign-in
-            </a>
-            <p className="muted" style={{marginBottom:6}}>Enter this one-time code:</p>
-            <button type="button" className="select" onClick={copyCode} aria-label="Copy device code"
-                    style={{fontSize:20, letterSpacing:2, padding:'10px 14px'}}>
-              <span className="mono">{auth.user_code}</span>
-            </button>
-            {copied && <span className="muted" style={{marginLeft:8}}>copied</span>}
-          </>
-        ) : auth.state === 'failed' || auth.state === 'unavailable' ? (
-          <p className="error-block">{auth.error || 'ChatGPT sign-in could not start.'}</p>
-        ) : auth.error ? (
-          <p className="error-block">{auth.error}</p>
+    <Modal className={`modal subscription-connect subscription-connect-${subscription.tone}`}
+           scrimClassName="modal-scrim subscription-connect-scrim"
+           label={`Connect ${subscription.service} subscription`} onClose={onClose}>
+      <div className="subscription-connect-head">
+        <div className="subscription-connect-brand">
+          <BackendBadge label={subscription.badge} tone={subscription.tone}/>
+          <span>Subscription access</span>
+        </div>
+        <button type="button" className="subscription-connect-close" onClick={onClose} aria-label="Close">×</button>
+      </div>
+      <div className="subscription-connect-body">
+        <div className="subscription-connect-kicker">Native provider</div>
+        <h2>Connect {subscription.service}</h2>
+        <p className="subscription-connect-lede">
+          Sign in once, then use your {subscription.service} plan directly from this Dyson.
+        </p>
+
+        <div className="subscription-privacy">
+          <span className="subscription-privacy-mark" aria-hidden="true">✓</span>
+          <div><strong>Credentials stay in Swarm.</strong><span>This Dyson receives only an instance-bound proxy token.</span></div>
+        </div>
+
+        {signInUrl ? (
+          <div className="subscription-connect-flow">
+            <div className="subscription-step">
+              <span className="subscription-step-number">1</span>
+              <div>
+                <strong>Open {subscription.service}</strong>
+                <span>Approve access in a secure provider window.</span>
+              </div>
+              <a className="btn primary subscription-open" href={signInUrl} target="_blank" rel="noreferrer">
+                Open sign-in <span aria-hidden="true">↗</span>
+              </a>
+            </div>
+
+            {subscription.flow === 'device' && auth.user_code && (
+              <div className="subscription-step">
+                <span className="subscription-step-number">2</span>
+                <div>
+                  <strong>Enter this code</strong>
+                  <span>The window will ask for it.</span>
+                </div>
+                <button type="button" className="subscription-device-code" onClick={copyCode} aria-label="Copy device code">
+                  <span className="mono">{auth.user_code}</span>
+                  <span>{copied ? 'Copied' : 'Copy'}</span>
+                </button>
+              </div>
+            )}
+
+            {subscription.flow === 'code' && (
+              <form className="subscription-step subscription-code-step" onSubmit={complete}>
+                <span className="subscription-step-number">2</span>
+                <label>
+                  <strong>Paste the returned code</strong>
+                  <span>Copy the complete code from Claude after approval.</span>
+                  <input value={code} onChange={event => setCode(event.target.value)}
+                         autoComplete="off" spellCheck="false" placeholder="Authorization code"/>
+                </label>
+                <button type="submit" className="btn primary" disabled={!code.trim() || submitting}>
+                  {submitting ? 'Connecting…' : 'Connect'}
+                </button>
+              </form>
+            )}
+          </div>
+        ) : isFailed ? (
+          <p className="error-block">{auth.error || `${subscription.service} sign-in could not start.`}</p>
         ) : (
-          <p className="muted">Starting device sign-in…</p>
+          <div className="subscription-starting"><span/>Preparing secure sign-in…</div>
         )}
+        {auth.error && !isFailed && <p className="error-block">{auth.error}</p>}
       </div>
     </Modal>
   );
@@ -381,7 +459,8 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
                      onClick={() => onPick(c.provider, c.id)}>
                   <span className="dot"/>
                   <span className="model mono">{c.id}</span>
-                  {providerView.tone === 'codex' && <CodexBadge/>}
+                  {(providerView.tone === 'codex' || providerView.tone === 'claude')
+                    && <BackendBadge label={providerView.tone === 'codex' ? 'Codex' : 'Claude'} tone={providerView.tone}/>}
                   {next && <span className="badge">next run</span>}
                 </div>
               );

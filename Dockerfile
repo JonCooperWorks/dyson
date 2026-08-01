@@ -54,6 +54,7 @@ ARG PLAYWRIGHT_VERSION=1.61.0
 # a previously registered template. Upgrade only after the signed-in live MCP
 # regression has passed against the candidate version.
 ARG CODEX_CLI_VERSION=0.146.0
+ARG CLAUDE_CODE_VERSION=2.1.177
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -124,10 +125,12 @@ RUN apt-get update \
         /usr/share/locale \
     && find /usr -type d -name __pycache__ -prune -exec rm -rf {} +
 
-# Subscription-backed inference uses Dyson's existing Codex subprocess
-# provider. The image contains no account material; the one-time device login
-# happens after hire and writes only to CODEX_HOME on tmpfs (entrypoint below).
-RUN npm install -g "@openai/codex@${CODEX_CLI_VERSION}" \
+# Subscription-backed inference uses native Codex and Claude subprocesses.
+# The image contains no account material: provider OAuth stays in Swarm and
+# these CLIs receive only the source-bound proxy bearer.
+RUN npm install -g \
+        "@openai/codex@${CODEX_CLI_VERSION}" \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
 
 # Pinned, checksum-verified web discovery stack. These release binaries keep

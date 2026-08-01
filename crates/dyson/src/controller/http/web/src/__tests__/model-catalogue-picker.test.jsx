@@ -153,8 +153,8 @@ describe('TopBar — catalogue picker', () => {
     const client = {
       listModels: vi.fn(async () => ({ models: [] })),
       postModel: vi.fn(async () => ({})),
-      getCodexAuth: vi.fn(async () => ({ connected: false, state: 'pending', verification_uri: 'https://auth.openai.com/codex/device', user_code: 'ABCD-12345' })),
-      startCodexAuth: vi.fn(async () => ({ connected: false, state: 'pending', verification_uri: 'https://auth.openai.com/codex/device', user_code: 'ABCD-12345' })),
+      getProviderAuth: vi.fn(async () => ({ connected: false, state: 'pending', verification_uri: 'https://auth.openai.com/codex/device', user_code: 'ABCD-12345' })),
+      startProviderAuth: vi.fn(async () => ({ connected: false, state: 'pending', verification_uri: 'https://auth.openai.com/codex/device', user_code: 'ABCD-12345' })),
     };
     renderTopBar(client);
 
@@ -162,11 +162,40 @@ describe('TopBar — catalogue picker', () => {
     const menu = document.querySelector('.modelmenu');
     fireEvent.click(within(menu).getByText('gpt-5.6-sol'));
 
-    await waitFor(() => expect(client.startCodexAuth).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(client.startProviderAuth).toHaveBeenCalledWith('codex'));
     expect(client.postModel).not.toHaveBeenCalled();
     expect(await screen.findByText('ABCD-12345')).toBeTruthy();
-    expect(screen.getByText('Open ChatGPT sign-in').getAttribute('href'))
+    expect(screen.getByText('Open sign-in').closest('a').getAttribute('href'))
       .toBe('https://auth.openai.com/codex/device');
+  });
+
+  it('starts Claude auth, accepts the returned code, and then selects the model', async () => {
+    setProviders([{
+      id: 'claude-subscription', name: 'Claude subscription', backend: 'claude-code', active: false,
+      activeModel: 'claude-sonnet-4-6', models: ['claude-sonnet-4-6'],
+    }, {
+      id: 'openrouter', name: 'Swarm', backend: 'openai', active: true,
+      activeModel: 'seed', models: ['seed'],
+    }], 'seed');
+    const client = {
+      listModels: vi.fn(async () => ({ models: [] })),
+      postModel: vi.fn(async () => ({})),
+      getProviderAuth: vi.fn(async () => ({ connected: false, state: 'pending', auth_url: 'https://claude.com/cai/oauth/authorize', requires_code: true })),
+      startProviderAuth: vi.fn(async () => ({ connected: false, state: 'pending', auth_url: 'https://claude.com/cai/oauth/authorize', requires_code: true })),
+      completeProviderAuth: vi.fn(async () => ({ connected: true, state: 'connected' })),
+    };
+    renderTopBar(client);
+
+    fireEvent.click(screen.getByTitle('Switch model'));
+    fireEvent.click(within(document.querySelector('.modelmenu')).getByText('claude-sonnet-4-6'));
+    await waitFor(() => expect(client.startProviderAuth).toHaveBeenCalledWith('claude'));
+    expect(await screen.findByText('Connect Claude')).toBeTruthy();
+    expect(screen.getByText('Open sign-in').closest('a').getAttribute('href'))
+      .toBe('https://claude.com/cai/oauth/authorize');
+    fireEvent.change(screen.getByPlaceholderText('Authorization code'), { target: { value: 'auth#state' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await waitFor(() => expect(client.completeProviderAuth).toHaveBeenCalledWith('claude', 'auth#state'));
+    await waitFor(() => expect(client.postModel).toHaveBeenCalledWith('claude-subscription', 'claude-sonnet-4-6'));
   });
 
   it('marks Codex elegantly while keeping the default Swarm route visually quiet', async () => {

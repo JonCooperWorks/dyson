@@ -247,7 +247,7 @@ fn public_api_base(swarm_url: &str) -> Option<String> {
     Some(format!("{trimmed}/v1"))
 }
 
-fn internal_api_base_from_proxy_url(proxy_url: &str) -> Result<String, String> {
+pub(crate) fn internal_api_base_from_proxy_url(proxy_url: &str) -> Result<String, String> {
     let trimmed = proxy_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err("empty URL".into());

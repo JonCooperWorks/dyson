@@ -304,13 +304,25 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
 
         (&Method::GET, ["api", "providers"]) => providers::list(&state),
         (&Method::GET, ["api", "provider-auth", "codex"]) => {
-            provider_auth::codex_status(&state).await
+            provider_auth::status(&state, provider_auth::SubscriptionProvider::Codex).await
         }
         (&Method::POST, ["api", "provider-auth", "codex"]) => {
-            provider_auth::codex_start(&state).await
+            provider_auth::start(&state, provider_auth::SubscriptionProvider::Codex).await
         }
         (&Method::DELETE, ["api", "provider-auth", "codex"]) => {
-            provider_auth::codex_logout(&state).await
+            provider_auth::forget(&state, provider_auth::SubscriptionProvider::Codex).await
+        }
+        (&Method::GET, ["api", "provider-auth", "claude"]) => {
+            provider_auth::status(&state, provider_auth::SubscriptionProvider::Claude).await
+        }
+        (&Method::POST, ["api", "provider-auth", "claude"]) => {
+            provider_auth::start(&state, provider_auth::SubscriptionProvider::Claude).await
+        }
+        (&Method::DELETE, ["api", "provider-auth", "claude"]) => {
+            provider_auth::forget(&state, provider_auth::SubscriptionProvider::Claude).await
+        }
+        (&Method::POST, ["api", "provider-auth", "claude", "complete"]) => {
+            provider_auth::complete(req, &state, provider_auth::SubscriptionProvider::Claude).await
         }
         (&Method::GET, ["api", "models"]) => models::list(&state).await,
         (&Method::GET, ["api", "commands"]) => commands::get(&state).await,

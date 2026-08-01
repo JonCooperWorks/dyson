@@ -391,6 +391,7 @@ impl LlmClient for ClaudeCodeClient {
         for arg in &args {
             cmd.arg(arg);
         }
+        let child_env = cli_subprocess::sanitized_child_env(std::env::vars());
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -399,7 +400,11 @@ impl LlmClient for ClaudeCodeClient {
             // orphaning it (it would otherwise keep burning tokens).
             .kill_on_drop(true)
             .env_clear()
-            .envs(cli_subprocess::sanitized_child_env(std::env::vars()));
+            .envs(child_env);
+        if let Some((url, token)) = cli_subprocess::subscription_proxy("claude-subscription") {
+            cmd.env("ANTHROPIC_BASE_URL", url)
+                .env("ANTHROPIC_AUTH_TOKEN", token);
+        }
 
         // -- Spawn the process --
         let mut child = cmd.spawn().map_err(|e| {

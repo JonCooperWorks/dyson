@@ -111,7 +111,7 @@ fn catalogue_provider<'a>(
         .iter()
         .filter(|(_, cfg)| reachable(cfg))
         .collect::<Vec<_>>();
-    candidates.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    candidates.sort_unstable_by_key(|(name, _)| *name);
     candidates
         .into_iter()
         .next()
