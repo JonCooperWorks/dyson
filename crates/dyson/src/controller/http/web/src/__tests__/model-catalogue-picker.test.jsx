@@ -87,25 +87,25 @@ describe('TopBar — catalogue picker', () => {
     const search = await screen.findByLabelText('Search models');
     fireEvent.change(search, { target: { value: 'deepseek-v4-pro' } });
 
-    // Found via the current group (scope to the menu — the top-bar button
-    // also shows the active model), and no misleading "No matches".
+    // Found via the configured group, with no misleading empty state.
     const menu = document.querySelector('.modelmenu');
-    await waitFor(() => expect(within(menu).getAllByText('deepseek/deepseek-v4-pro').length).toBeGreaterThanOrEqual(2));
-    expect(screen.queryByText('No matches.')).toBeNull();
+    await waitFor(() => expect(within(menu).getByText('deepseek/deepseek-v4-pro')).toBeTruthy());
+    expect(screen.queryByText('No matching models.')).toBeNull();
     fireEvent.click(menu.querySelector('.item .model'));
     await waitFor(() => expect(postModel).toHaveBeenCalledWith('p', 'deepseek/deepseek-v4-pro'));
   });
 
-  it('degrades to a graceful empty state when no catalogue is reachable', async () => {
+  it('keeps an unavailable catalogue quiet when configured models remain usable', async () => {
     setProviders([{ id: 'p', name: 'Provider', active: true, activeModel: 'seed', models: ['seed'] }], 'seed');
     const listModels = vi.fn(async () => ({ models: [] }));
     renderTopBar({ listModels, postModel: vi.fn(async () => ({})) });
 
     fireEvent.click(screen.getByTitle('Switch model'));
     await waitFor(() => expect(listModels).toHaveBeenCalled());
-    // No throw; the empty-catalogue hint shows and the seeded model is still
-    // pickable from the "current" group.
-    expect(await screen.findByText('No catalogue available.')).toBeTruthy();
+    // No throw or implementation-noise empty state; the seeded model remains
+    // pickable from the configured group.
+    await waitFor(() => expect(screen.queryByText('Catalogue · loading')).toBeNull());
+    expect(screen.queryByText('No catalogue available.')).toBeNull();
     // 'seed' shows both in the top-bar button and as a pickable item in the
     // "current" group.
     expect(screen.getAllByText('seed').length).toBeGreaterThanOrEqual(2);
@@ -137,7 +137,7 @@ describe('TopBar — catalogue picker', () => {
       .toBe('https://auth.openai.com/codex/device');
   });
 
-  it('shows the concrete execution backend separately from the model and provider id', async () => {
+  it('marks Codex elegantly while keeping the default Swarm route visually quiet', async () => {
     setProviders([{
       id: 'chatgpt-subscription', name: 'chatgpt-subscription', backend: 'codex', active: true,
       activeModel: 'gpt-5.6-sol', models: ['gpt-5.6-sol', 'gpt-5.6-terra'],
@@ -152,13 +152,24 @@ describe('TopBar — catalogue picker', () => {
     expect(switcher.getAttribute('aria-label')).toContain('Execution backend Codex, ChatGPT subscription');
 
     fireEvent.click(switcher);
-    const proof = await screen.findByLabelText('Active execution backend');
-    expect(within(proof).getByText('RUNNING NEXT TURN')).toBeTruthy();
-    expect(within(proof).getByText('Codex')).toBeTruthy();
-    expect(within(proof).getByText('ChatGPT subscription')).toBeTruthy();
-    expect(within(proof).getByText('gpt-5.6-sol')).toBeTruthy();
-
     const menu = document.querySelector('.modelmenu');
-    expect(within(menu).getByText('Swarm')).toBeTruthy();
+    expect(within(menu).queryByLabelText('Active execution backend')).toBeNull();
+    expect(within(menu).getAllByText('Codex')).toHaveLength(2);
+    expect(within(menu).queryByText('Swarm')).toBeNull();
+    expect(within(menu).queryByText('ChatGPT subscription')).toBeNull();
+    expect(within(menu).queryByText('No catalogue available.')).toBeNull();
+  });
+
+  it('shows no provider badge when Swarm is active', () => {
+    setProviders([{
+      id: 'openrouter', name: 'openrouter', backend: 'openai', active: true,
+      activeModel: 'deepseek/deepseek-v4-pro', models: ['deepseek/deepseek-v4-pro'],
+    }], 'deepseek/deepseek-v4-pro');
+    renderTopBar({ listModels: vi.fn(async () => ({ models: [] })), postModel: vi.fn(async () => ({})) });
+
+    const switcher = screen.getByTitle('Switch model');
+    expect(within(switcher).queryByText('Swarm')).toBeNull();
+    expect(within(switcher).queryByText('Codex')).toBeNull();
+    expect(switcher.getAttribute('aria-label')).toContain('Execution backend Swarm');
   });
 });

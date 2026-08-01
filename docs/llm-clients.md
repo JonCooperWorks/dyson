@@ -208,10 +208,10 @@ exchange and token refresh itself.
 
 ### Using CLI subscription providers
 
-The model switcher deliberately shows both the model and its concrete execution
-backend. A `Codex · ChatGPT subscription` badge means the next turn spawns
-`codex exec`; `Swarm · OpenRouter proxy` means the next turn uses Swarm's LLM
-proxy instead. To use Codex in a managed Dyson:
+The model switcher keeps Swarm visually unlabelled as Dyson's default route and
+adds a compact **Codex** badge only to subscription-backed Codex models. That
+badge means the next turn spawns `codex exec`; a model without it follows the
+configured default provider. To use Codex in a managed Dyson:
 
 1. Open the model switcher in the top bar.
 2. Select a model under **Codex** (for example `gpt-5.6-sol`).

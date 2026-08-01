@@ -221,44 +221,41 @@
   text-transform: uppercase;
   letter-spacing: 0.10em;
 }
-.provider-proof,
-.mm-provider {
+.codex-badge {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  border: 1px solid var(--line-2);
+  gap: 6px;
+  height: 20px;
+  padding: 0 8px 0 6px;
+  border: 1px solid var(--accent-ln);
   border-radius: 999px;
-  color: var(--fg-dim);
-  background: var(--bg-1);
-  font: 650 10px/1 var(--font-ui);
-  letter-spacing: 0.03em;
+  color: var(--accent);
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--accent) 13%, var(--bg-1)),
+    color-mix(in srgb, var(--accent) 6%, var(--bg-1)));
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 8%, transparent) inset,
+              0 0 14px -7px var(--accent-glow);
+  font: 700 9px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   white-space: nowrap;
 }
-.provider-proof { gap: 5px; padding: 4px 7px; }
-.provider-live-dot {
+.codex-badge-mark {
   width: 6px;
   height: 6px;
   flex: 0 0 auto;
-  border-radius: 50%;
-  background: currentColor;
-  box-shadow: 0 0 8px currentColor;
+  border-radius: 2px;
+  background: var(--grad-accent);
+  box-shadow: 0 0 8px -1px var(--accent-glow);
+  transform: rotate(45deg);
 }
-.backend-codex.provider-proof,
-.backend-codex .provider-proof,
-.backend-codex.mm-provider,
-.backend-codex .provider-live-dot { color: var(--accent); }
-.backend-claude.provider-proof,
-.backend-claude .provider-proof,
-.backend-claude.mm-provider,
-.backend-claude .provider-live-dot { color: oklch(0.76 0.15 55); }
-.backend-swarm.provider-proof,
-.backend-swarm .provider-proof,
-.backend-swarm.mm-provider,
-.backend-swarm .provider-live-dot { color: var(--cyan); }
-.backend-api.provider-proof,
-.backend-api .provider-proof,
-.backend-api.mm-provider,
-.backend-api .provider-live-dot { color: oklch(0.73 0.13 270); }
+.model-state {
+  color: var(--accent);
+  font: 650 9px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
 .topbar .meta .budget {
   display: flex; align-items: center; gap: 7px;
   font: 500 10.5px/1 var(--font-mono);
@@ -790,51 +787,6 @@
   padding: 8px;
   z-index: 20;
 }
-.modelmenu .mm-runtime {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px 12px;
-  margin: 2px 2px 8px;
-  padding: 12px;
-  border: 1px solid var(--line-2);
-  border-radius: 8px;
-  background: var(--bg-1);
-  box-shadow: inset 3px 0 0 currentColor;
-  color: var(--fg);
-}
-.modelmenu .mm-runtime.backend-codex { color: var(--accent); }
-.modelmenu .mm-runtime.backend-claude { color: oklch(0.76 0.15 55); }
-.modelmenu .mm-runtime.backend-swarm { color: var(--cyan); }
-.modelmenu .mm-runtime.backend-api { color: oklch(0.73 0.13 270); }
-.modelmenu .mm-runtime-state {
-  grid-column: 1 / -1;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: currentColor;
-  font: 700 9px/1 var(--font-mono);
-  letter-spacing: 0.12em;
-}
-.modelmenu .mm-runtime-backend {
-  color: var(--fg);
-  font: 700 15px/1.25 var(--font-ui);
-}
-.modelmenu .mm-runtime-detail {
-  grid-column: 1;
-  color: var(--mute-2);
-  font: 500 11.5px/1.3 var(--font-ui);
-}
-.modelmenu .mm-runtime-model {
-  grid-column: 2;
-  grid-row: 2 / span 2;
-  align-self: center;
-  max-width: 220px;
-  overflow: hidden;
-  color: var(--fg);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 /* Searchable catalogue picker (replaces the provider-tree menu). */
 .modelmenu .mm-search {
   display: flex; align-items: center; gap: 8px;
@@ -865,16 +817,6 @@
   font: 500 11.5px/1.4 var(--font-ui);
   color: var(--mute);
 }
-.modelmenu .mm-help {
-  margin: 7px 4px 3px;
-  padding: 9px 10px;
-  border-top: 1px solid var(--line);
-  color: var(--mute-2);
-  font: 500 11px/1.45 var(--font-ui);
-}
-.modelmenu .mm-help p { margin: 0 0 5px; }
-.modelmenu .mm-help p:last-child { margin-bottom: 0; }
-.modelmenu .mm-help strong { color: var(--fg); font-weight: 650; }
 .modelmenu .mm-ctx {
   margin-left: auto;
   font: 500 10.5px/1 var(--font-mono);
@@ -934,16 +876,13 @@
   background: var(--line-2);
   flex: 0 0 auto;
 }
-.modelmenu .item .mm-provider {
-  min-width: 74px;
-  justify-content: center;
-  padding: 3px 6px;
-}
 .modelmenu .item.on .dot {
   background: var(--accent);
   box-shadow: 0 0 8px var(--accent-glow), 0 0 0 3px oklch(0.89 0.22 130 / 0.15);
 }
 .modelmenu .item .model {
+  flex: 1 1 auto;
+  min-width: 0;
   font: 500 12.5px/1.3 var(--font-mono);
   color: var(--fg-dim);
   word-break: break-all;

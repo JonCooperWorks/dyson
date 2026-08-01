@@ -570,6 +570,8 @@ textarea {
   box-shadow: none;
 }
 .modelmenu .item .model {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--fg-muted);
   font: 500 12px/1.35 var(--mono);
 }
