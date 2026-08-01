@@ -213,7 +213,7 @@ RUN set -eux; \
     test -d /opt/nuclei-templates/http; \
     test -d /usr/share/dirb/wordlists; \
     "${PENTEST_PYTHON}" -c \
-        'from pathlib import Path; from playwright.sync_api import sync_playwright; p = sync_playwright().start(); assert Path(p.chromium.executable_path).is_file(); p.stop()'
+        'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(headless=True); b.close(); p.stop()'
 
 # `--chmod=0755` folds the COPY + chmod into one layer.  Without it
 # the chmod RUN copies the 48 MB binary again into a fresh layer, so
