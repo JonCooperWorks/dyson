@@ -1,4 +1,5 @@
 use super::*;
+use crate::tool::ToolOutput;
 use crate::workspace::Workspace;
 use tokio::sync::RwLock;
 
@@ -85,6 +86,31 @@ fn make_server() -> Arc<McpHttpServer> {
     Arc::new(McpHttpServer::new(ws, HashMap::new()))
 }
 
+struct DottedNameTool;
+
+#[async_trait::async_trait]
+impl Tool for DottedNameTool {
+    fn name(&self) -> &str {
+        "agents.list"
+    }
+
+    fn description(&self) -> &str {
+        "List agents"
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    async fn run(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> crate::error::Result<ToolOutput> {
+        Ok(ToolOutput::success("DOTTED_TOOL_OK"))
+    }
+}
+
 // -----------------------------------------------------------------------
 // MCP handshake tests
 // -----------------------------------------------------------------------
@@ -117,6 +143,39 @@ async fn tools_list_returns_workspace_tools() {
 
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(names.contains(&"workspace"));
+}
+
+#[tokio::test]
+async fn tools_list_and_call_use_provider_safe_registry_key() {
+    let ws: crate::workspace::WorkspaceHandle =
+        Arc::new(RwLock::new(Box::new(MockWorkspace::new())));
+    let mut tools = HashMap::new();
+    tools.insert(
+        "agents_list".to_string(),
+        Arc::new(DottedNameTool) as Arc<dyn Tool>,
+    );
+    let server = McpHttpServer::new(ws, tools);
+
+    let list = server.dispatch(Some(2), "tools/list", None).await;
+    let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(names.contains(&"agents_list"));
+    assert!(!names.contains(&"agents.list"));
+
+    let call = server
+        .dispatch(
+            Some(3),
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "agents_list",
+                "arguments": {}
+            })),
+        )
+        .await;
+    assert_eq!(call.result.unwrap()["content"][0]["text"], "DOTTED_TOOL_OK");
 }
 
 // -----------------------------------------------------------------------

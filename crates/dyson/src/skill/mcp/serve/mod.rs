@@ -600,9 +600,13 @@ impl McpHttpServer {
     fn handle_tools_list(&self, id: Option<u64>) -> JsonRpcResponse {
         let tool_defs: Vec<McpToolDef> = self
             .tools
-            .values()
-            .map(|tool| McpToolDef {
-                name: tool.name().to_string(),
+            .iter()
+            .map(|(advertised_name, tool)| McpToolDef {
+                // The registry key is the provider-safe advertised name.
+                // A remote MCP tool's own name may contain dots (for example
+                // `agents.list`), while Codex expects `agents_list` and sends
+                // that exact advertised name back to tools/call.
+                name: advertised_name.clone(),
                 description: Some(tool.description().to_string()),
                 input_schema: Some(tool.input_schema()),
                 // Dyson's exposed tools run inline, not as MCP tasks.
