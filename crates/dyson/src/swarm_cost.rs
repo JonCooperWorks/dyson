@@ -17,6 +17,12 @@ const ENV_PROXY_TOKEN: &str = "SWARM_PROXY_TOKEN";
 pub struct CostLookupConfig {
     api_base: String,
     bearer: Option<String>,
+    // Retain the instance-facing /llm base when this config came from the
+    // managed runtime envelope. Cube templates freeze the warmup process
+    // environment, so post-create credentials arrive through
+    // /api/admin/configure and must remain available to native subscription
+    // subprocesses and the OAuth relay without consulting /proc/environ.
+    proxy_url: Option<String>,
 }
 
 impl CostLookupConfig {
@@ -28,18 +34,28 @@ impl CostLookupConfig {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
+            proxy_url: None,
         })
     }
 
     pub fn internal_from_proxy(proxy_url: &str, proxy_token: &str) -> Option<Self> {
+        let proxy_url = proxy_url.trim().trim_end_matches('/');
         let proxy_token = proxy_token.trim();
-        if proxy_token.is_empty() {
+        if proxy_url.is_empty() || proxy_token.is_empty() {
             return None;
         }
         Some(Self {
             api_base: internal_api_base_from_proxy_url(proxy_url).ok()?,
             bearer: Some(proxy_token.to_string()),
+            proxy_url: Some(proxy_url.to_string()),
         })
+    }
+
+    fn proxy_parts(&self) -> Option<(String, String)> {
+        Some((
+            self.proxy_url.as_ref()?.clone(),
+            self.bearer.as_ref()?.clone(),
+        ))
     }
 
     fn from_env() -> Option<Self> {
@@ -91,6 +107,13 @@ pub fn config_snapshot() -> Option<CostLookupConfig> {
 
 pub fn config_snapshot_or_env() -> Option<CostLookupConfig> {
     config_snapshot().or_else(CostLookupConfig::from_env)
+}
+
+/// Return the source-IP-bound Swarm runtime route currently injected into
+/// this Dyson. The provider credential itself remains sealed in Swarm; the
+/// bearer returned here is only the ordinary instance-scoped `pt_` token.
+pub(crate) fn runtime_proxy_parts() -> Option<(String, String)> {
+    config_snapshot_or_env()?.proxy_parts()
 }
 
 /// Budget for the per-message display-cost lookup.  This runs inline in the
@@ -301,6 +324,20 @@ mod tests {
         assert_eq!(
             public_api_base("https://swarm.test/v1").unwrap(),
             "https://swarm.test/v1"
+        );
+
+        let internal =
+            CostLookupConfig::internal_from_proxy("https://swarm.test/llm/", "pt_scoped").unwrap();
+        assert_eq!(
+            internal.proxy_parts(),
+            Some(("https://swarm.test/llm".into(), "pt_scoped".into()))
+        );
+        assert_eq!(
+            CostLookupConfig::public_api("https://swarm.test", Some("user-key"))
+                .unwrap()
+                .proxy_parts(),
+            None,
+            "public user API keys must never become native subscription credentials"
         );
     }
 

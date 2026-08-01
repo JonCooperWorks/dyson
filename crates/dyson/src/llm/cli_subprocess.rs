@@ -130,8 +130,7 @@ where
 /// bearer. The bearer is intentionally the same source-IP-bound `pt_` token
 /// used by ordinary Swarm inference; it is not a provider OAuth credential.
 pub(crate) fn subscription_proxy(route: &str) -> Option<(String, String)> {
-    let base = std::env::var("SWARM_PROXY_URL").ok()?;
-    let token = std::env::var("SWARM_PROXY_TOKEN").ok()?;
+    let (base, token) = crate::swarm_cost::runtime_proxy_parts()?;
     let base = base.trim().trim_end_matches('/');
     let token = token.trim();
     if base.is_empty() || token.is_empty() {
@@ -195,5 +194,29 @@ mod tests {
         assert!(!sanitized.contains_key("ANTHROPIC_AUTH_TOKEN"));
         assert!(!sanitized.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
         assert!(!sanitized.contains_key("OPENAI_API_KEY"));
+    }
+
+    #[tokio::test]
+    async fn native_subscription_uses_post_warmup_runtime_patch() {
+        let _guard = crate::swarm_cost::test_config_guard().await;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::swarm_cost::set_runtime_config(None);
+            }
+        }
+        let _reset = Reset;
+        crate::swarm_cost::set_runtime_config_from_parts(
+            "http://169.254.68.5:8080/llm/",
+            "pt_runtime_only",
+        );
+
+        assert_eq!(
+            subscription_proxy("codex-subscription"),
+            Some((
+                "http://169.254.68.5:8080/llm/codex-subscription".into(),
+                "pt_runtime_only".into(),
+            ))
+        );
     }
 }

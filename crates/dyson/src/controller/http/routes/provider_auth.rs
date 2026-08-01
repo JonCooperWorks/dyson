@@ -50,10 +50,8 @@ fn provider_enabled(state: &HttpState, provider: SubscriptionProvider) -> bool {
 }
 
 fn endpoint(provider: SubscriptionProvider, suffix: &str) -> Result<(String, String), String> {
-    let proxy_url = std::env::var("SWARM_PROXY_URL")
-        .map_err(|_| "managed subscription sign-in is unavailable".to_owned())?;
-    let token = std::env::var("SWARM_PROXY_TOKEN")
-        .map_err(|_| "managed subscription sign-in is unavailable".to_owned())?;
+    let (proxy_url, token) = crate::swarm_cost::runtime_proxy_parts()
+        .ok_or_else(|| "managed subscription sign-in is unavailable".to_owned())?;
     endpoint_from_parts(&proxy_url, &token, provider, suffix)
 }
 
@@ -169,6 +167,14 @@ pub(super) async fn complete(
 mod tests {
     use super::*;
 
+    struct ResetRuntimeConfig;
+
+    impl Drop for ResetRuntimeConfig {
+        fn drop(&mut self) {
+            crate::swarm_cost::set_runtime_config(None);
+        }
+    }
+
     #[test]
     fn provider_endpoint_never_contains_provider_credentials() {
         let (url, token) = endpoint_from_parts(
@@ -183,5 +189,22 @@ mod tests {
             "https://swarm.test/v1/internal/subscription-auth/claude/complete"
         );
         assert_eq!(token, "pt_instance_only");
+    }
+
+    #[tokio::test]
+    async fn provider_endpoint_uses_post_warmup_runtime_patch() {
+        let _guard = crate::swarm_cost::test_config_guard().await;
+        let _reset = ResetRuntimeConfig;
+        crate::swarm_cost::set_runtime_config_from_parts(
+            "http://169.254.68.5:8080/llm",
+            "pt_runtime_only",
+        );
+
+        let (url, token) = endpoint(SubscriptionProvider::Codex, "").unwrap();
+        assert_eq!(
+            url,
+            "http://169.254.68.5:8080/v1/internal/subscription-auth/codex"
+        );
+        assert_eq!(token, "pt_runtime_only");
     }
 }
