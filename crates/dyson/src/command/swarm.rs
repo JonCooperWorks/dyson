@@ -57,10 +57,29 @@ const DEFAULT_IMAGE_MODEL: &str = "google/gemini-3-pro-image-preview";
 /// Native CLI providers backed by user subscriptions. OAuth and refresh stay
 /// in Swarm; the CLIs receive only the instance-bound proxy token.
 const CHATGPT_SUBSCRIPTION_PROVIDER: &str = "chatgpt-subscription";
-const CHATGPT_SUBSCRIPTION_MODELS: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+// Refreshed from Codex's authenticated `model/list` response. Keep the order
+// returned by the provider: current/default models first, retained models
+// after them. This is deliberately the account-visible list rather than a
+// guessed family expansion.
+const CHATGPT_SUBSCRIPTION_MODELS: &[&str] = &[
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
+];
 const CLAUDE_SUBSCRIPTION_PROVIDER: &str = "claude-subscription";
-const CLAUDE_SUBSCRIPTION_MODELS: &[&str] =
-    &["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"];
+// Refreshed from Claude Code's authenticated session initialization. Use
+// canonical IDs instead of the duplicate `default`, `opus`, and `sonnet`
+// aliases returned alongside them so the picker stays compact.
+const CLAUDE_SUBSCRIPTION_MODELS: &[&str] = &[
+    "claude-fable-5",
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+];
 
 pub async fn run() -> Result<()> {
     // SWARM_BEARER_TOKEN is the per-instance auth secret swarm injects on
@@ -571,7 +590,15 @@ mod tests {
         assert_eq!(provider["type"], "codex");
         assert_eq!(
             provider["models"],
-            serde_json::json!(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
+            serde_json::json!([
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.3-codex-spark"
+            ])
         );
         assert_eq!(cfg["agent"]["provider"], "openrouter");
     }
@@ -583,7 +610,12 @@ mod tests {
         assert_eq!(provider["type"], "claude-code");
         assert_eq!(
             provider["models"],
-            serde_json::json!(["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"])
+            serde_json::json!([
+                "claude-fable-5",
+                "claude-opus-4-8",
+                "claude-sonnet-4-6",
+                "claude-haiku-4-5"
+            ])
         );
         assert_eq!(cfg["agent"]["provider"], "openrouter");
     }
