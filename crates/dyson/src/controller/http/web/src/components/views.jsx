@@ -35,7 +35,14 @@ const CHATGPT_SUBSCRIPTION_PROVIDER = 'chatgpt-subscription';
 // that executes the turn.  Keep the two visible and separate so a model name
 // cannot be mistaken for proof that Codex/Claude is actually in the path.
 export function providerPresentation(provider) {
+  const id = (provider?.id || '').trim().toLowerCase();
   const backend = (provider?.backend || '').trim().toLowerCase();
+  // Managed Swarm deliberately uses the OpenAI-compatible client against its
+  // own /llm proxy.  The raw backend is therefore `openai`, but presenting it
+  // as "OpenAI API" would hide the materially different Swarm route.
+  if (id === 'openrouter') {
+    return { backend, label: 'Swarm', detail: 'OpenRouter proxy', tone: 'swarm' };
+  }
   if (backend === 'codex') {
     return { backend, label: 'Codex', detail: 'ChatGPT subscription', tone: 'codex' };
   }

@@ -116,7 +116,7 @@ describe('TopBar — catalogue picker', () => {
       id: 'chatgpt-subscription', name: 'ChatGPT subscription', backend: 'codex', active: false,
       activeModel: 'gpt-5.6-sol', models: ['gpt-5.6-sol'],
     }, {
-      id: 'openrouter', name: 'Swarm', backend: 'openrouter', active: true, activeModel: 'seed', models: ['seed'],
+      id: 'openrouter', name: 'Swarm', backend: 'openai', active: true, activeModel: 'seed', models: ['seed'],
     }], 'seed');
     const client = {
       listModels: vi.fn(async () => ({ models: [] })),
@@ -142,7 +142,7 @@ describe('TopBar — catalogue picker', () => {
       id: 'chatgpt-subscription', name: 'chatgpt-subscription', backend: 'codex', active: true,
       activeModel: 'gpt-5.6-sol', models: ['gpt-5.6-sol', 'gpt-5.6-terra'],
     }, {
-      id: 'openrouter', name: 'openrouter', backend: 'openrouter', active: false,
+      id: 'openrouter', name: 'openrouter', backend: 'openai', active: false,
       activeModel: 'deepseek/deepseek-v4-pro', models: ['deepseek/deepseek-v4-pro'],
     }], 'gpt-5.6-sol');
     renderTopBar({ listModels: vi.fn(async () => ({ models: [] })), postModel: vi.fn(async () => ({})) });
