@@ -25,9 +25,7 @@
 //       --ephemeral \
 //       --skip-git-repo-check \
 //       --model <model> \
-//       -c developer_instructions="<system>" \
-//       -c mcp_servers.dyson-workspace.url=<url> \
-//       "<prompt>"
+//       --profile <transient-profile>
 //
 //   The key flags:
 //     exec                                Non-interactive mode
@@ -38,8 +36,8 @@
 //     --ephemeral                         Don't persist session files
 //     --skip-git-repo-check               Don't require a git repo
 //     --model                             Model selection
-//     -c developer_instructions="..."     Inject system prompt
-//     -c mcp_servers.dyson-workspace.url  Register workspace MCP server
+//     --profile                          Load system prompt + MCP config from disk
+//     stdin                              Carry the user prompt out-of-band
 //
 //   Codex writes JSONL events to stdout.  Each line is a JSON object with
 //   a "type" field that determines the event kind.
@@ -80,6 +78,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::io::AsyncWriteExt as _;
 
 use crate::error::{DysonError, Result};
 use crate::llm::cli_subprocess::{self, CliLineParser, cli_event_stream};
@@ -132,7 +131,7 @@ struct TempCodexProfile {
 }
 
 impl TempCodexProfile {
-    fn new(token: &str, url: &str) -> Result<Self> {
+    fn new(system: &str, mcp: Option<(&str, &str)>) -> Result<Self> {
         let home = codex_home_dir()?;
         std::fs::create_dir_all(&home).map_err(DysonError::Io)?;
         let mut file = tempfile::Builder::new()
@@ -140,21 +139,7 @@ impl TempCodexProfile {
             .suffix(".config.toml")
             .tempfile_in(&home)
             .map_err(DysonError::Io)?;
-        // Codex validates every config layer before merging later CLI
-        // overrides. The profile must therefore contain a complete transport,
-        // not just the secret header with the URL supplied separately via -c.
-        let body = format!(
-            concat!(
-                "[mcp_servers.dyson-workspace]\n",
-                "url = \"{}\"\n",
-                "required = true\n",
-                "default_tools_approval_mode = \"approve\"\n",
-                "\n[mcp_servers.dyson-workspace.http_headers]\n",
-                "Authorization = \"Bearer {}\"\n",
-            ),
-            toml_escape(url),
-            toml_escape(token),
-        );
+        let body = codex_profile_body(system, mcp);
         file.write_all(body.as_bytes()).map_err(DysonError::Io)?;
         file.flush().map_err(DysonError::Io)?;
         let filename = file
@@ -172,6 +157,33 @@ impl TempCodexProfile {
     fn name(&self) -> &str {
         &self.name
     }
+}
+
+fn codex_profile_body(system: &str, mcp: Option<(&str, &str)>) -> String {
+    // Keep large developer instructions off argv: a mature Dyson workspace can
+    // exceed Linux's ARG_MAX before Codex even starts. JSON string escaping is
+    // also valid for TOML basic strings and handles control characters.
+    let system = serde_json::to_string(system).expect("serializing a string cannot fail");
+    let mut body = format!("developer_instructions = {system}\n");
+
+    if let Some((token, url)) = mcp {
+        // Codex validates every config layer before merging later CLI
+        // overrides. The profile must therefore contain a complete transport.
+        body.push_str(&format!(
+            concat!(
+                "\n[mcp_servers.dyson-workspace]\n",
+                "url = \"{}\"\n",
+                "required = true\n",
+                "default_tools_approval_mode = \"approve\"\n",
+                "\n[mcp_servers.dyson-workspace.http_headers]\n",
+                "Authorization = \"Bearer {}\"\n",
+            ),
+            toml_escape(url),
+            toml_escape(token),
+        ));
+    }
+
+    body
 }
 
 fn codex_home_dir() -> Result<PathBuf> {
@@ -223,14 +235,7 @@ impl CodexClient {
     ///
     /// Extracted as a method so the sandbox-gating logic is unit-testable
     /// without spawning a subprocess.
-    fn build_args(
-        &self,
-        model: &str,
-        system: &str,
-        prompt: &str,
-        mcp_url: Option<&str>,
-        mcp_profile: Option<&str>,
-    ) -> Vec<String> {
+    fn build_args(&self, model: &str, mcp_profile: Option<&str>) -> Vec<String> {
         let mut args = vec![
             "exec".to_string(),
             "--json".to_string(),
@@ -257,19 +262,6 @@ impl CodexClient {
             args.push("--profile".to_string());
             args.push(profile.to_string());
         }
-
-        if !system.is_empty() {
-            args.push("-c".to_string());
-            args.push(format!("developer_instructions={system}"));
-        }
-
-        if let Some(url) = mcp_url {
-            args.push("-c".to_string());
-            args.push(format!("mcp_servers.dyson-workspace.url={url}"));
-        }
-
-        args.push("--".to_string());
-        args.push(prompt.to_string());
 
         args
     }
@@ -304,7 +296,7 @@ impl LlmClient for CodexClient {
         // -- Start MCP server if workspace is available --
         let mut _mcp_server_handle: Option<tokio::task::JoinHandle<()>> = None;
         let mut mcp_url: Option<String> = None;
-        let mut mcp_profile: Option<TempCodexProfile> = None;
+        let mut mcp_token: Option<String> = None;
 
         if let Some(ref workspace) = self.workspace {
             let extra = self
@@ -314,26 +306,22 @@ impl LlmClient for CodexClient {
                 .clone();
             let info = super::start_mcp_server(workspace, extra).await?;
             tracing::info!(port = info.port, "MCP server started for Codex");
-            mcp_profile = Some(TempCodexProfile::new(&info.token, &info.url)?);
+            mcp_token = Some(info.token);
             mcp_url = Some(info.url);
             _mcp_server_handle = Some(info.handle);
         }
 
         // -- Build the command --
         let full_system = super::concat_system_prompt(system, system_suffix);
-        let args = self.build_args(
-            &config.model,
-            &full_system,
-            &prompt,
-            mcp_url.as_deref(),
-            mcp_profile.as_ref().map(TempCodexProfile::name),
-        );
+        let mcp = mcp_token.as_deref().zip(mcp_url.as_deref());
+        let mcp_profile = TempCodexProfile::new(&full_system, mcp)?;
+        let args = self.build_args(&config.model, Some(mcp_profile.name()));
 
         let mut cmd = tokio::process::Command::new(&self.codex_path);
         for arg in &args {
             cmd.arg(arg);
         }
-        cmd.stdin(Stdio::null())
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             // The child lives inside the stream's keep_alive bag; when a
@@ -352,6 +340,18 @@ impl LlmClient for CodexClient {
             ))
         })?;
 
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| DysonError::Llm("failed to open stdin for codex process".into()))?;
+        stdin
+            .write_all(prompt.as_bytes())
+            .await
+            .map_err(DysonError::Io)?;
+        stdin.write_all(b"\n").await.map_err(DysonError::Io)?;
+        stdin.shutdown().await.map_err(DysonError::Io)?;
+        drop(stdin);
+
         // -- Read stdout line by line and parse JSONL events --
         let stdout = child
             .stdout
@@ -363,9 +363,7 @@ impl LlmClient for CodexClient {
         if let Some(handle) = _mcp_server_handle {
             keep_alive.push(Box::new(handle));
         }
-        if let Some(profile) = mcp_profile {
-            keep_alive.push(Box::new(profile));
-        }
+        keep_alive.push(Box::new(mcp_profile));
 
         let event_stream = cli_event_stream(stdout, StreamParserState::new(), keep_alive);
 
@@ -851,7 +849,7 @@ mod tests {
     #[test]
     fn build_args_uses_workspace_write_sandbox_by_default() {
         let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args("o3", "", "hello", None, None);
+        let args = client.build_args("o3", None);
         // `--sandbox workspace-write` is the non-deprecated replacement for
         // the old `--full-auto`; the value follows the flag as a separate arg.
         let i = args
@@ -872,7 +870,7 @@ mod tests {
     #[test]
     fn build_args_bypasses_sandbox_when_flag_set() {
         let client = CodexClient::new(Some("codex"), None, true);
-        let args = client.build_args("o3", "", "hello", None, None);
+        let args = client.build_args("o3", None);
         assert!(
             args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
             "should bypass sandbox when --dangerous-no-sandbox is set"
@@ -886,91 +884,62 @@ mod tests {
     #[test]
     fn build_args_includes_model() {
         let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args("o4-mini", "", "test", None, None);
+        let args = client.build_args("o4-mini", None);
         assert!(args.contains(&"o4-mini".to_string()));
     }
 
     #[test]
-    fn build_args_includes_system_prompt() {
+    fn build_args_keeps_system_prompt_user_prompt_and_mcp_config_off_argv() {
         let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args("o3", "You are Dyson", "test", None, None);
-        assert!(args.contains(&"developer_instructions=You are Dyson".to_string()));
-    }
-
-    #[test]
-    fn build_args_skips_empty_system_prompt() {
-        let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args("o3", "", "test", None, None);
+        let args = client.build_args("o3", Some("dyson-mcp-random-profile"));
         assert!(
-            !args
-                .iter()
-                .any(|a| a.starts_with("developer_instructions=")),
-            "should not include developer_instructions for empty system prompt"
+            !args.iter().any(|a| a.contains("developer_instructions")
+                || a.contains("Authorization")
+                || a.contains("http://127.0.0.1")),
+            "large or secret request material must not be placed on argv: {args:?}"
         );
-    }
-
-    #[test]
-    fn build_args_includes_mcp_url() {
-        let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args("o3", "", "test", Some("http://127.0.0.1:9999/mcp"), None);
-        assert!(
-            args.contains(&"mcp_servers.dyson-workspace.url=http://127.0.0.1:9999/mcp".to_string())
-        );
-    }
-
-    #[test]
-    fn build_args_does_not_expose_mcp_bearer_token_in_argv() {
-        let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args(
-            "o3",
-            "",
-            "test",
-            Some("http://127.0.0.1:9999/mcp"),
-            Some("dyson-mcp-random-profile"),
-        );
-        assert!(
-            !args
-                .iter()
-                .any(|a| a.contains("Bearer") || a.contains("Authorization")),
-            "MCP bearer material must be loaded from a transient profile, not argv: {args:?}"
-        );
-    }
-
-    #[test]
-    fn build_args_skips_bearer_token_without_mcp_url() {
-        let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args("o3", "", "test", None, Some("secret-token-123"));
-        assert!(
-            !args.iter().any(|a| a.contains("Authorization")),
-            "should not include Authorization header when no MCP URL"
-        );
-    }
-
-    #[test]
-    fn build_args_prompt_is_last() {
-        let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args("o3", "sys", "my prompt", None, None);
-        assert_eq!(args.last().unwrap(), "my prompt");
-    }
-
-    #[test]
-    fn build_args_terminates_flags_before_prompt() {
-        let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args(
-            "o3",
-            "sys",
-            "--dangerously-bypass-approvals-and-sandbox",
-            None,
-            None,
-        );
-        let prompt_idx = args
-            .iter()
-            .position(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
-            .expect("prompt should be present verbatim");
         assert_eq!(
-            args.get(prompt_idx - 1).map(String::as_str),
-            Some("--"),
-            "prompt-like flags must be separated from Codex CLI options"
+            args.iter()
+                .position(|arg| arg == "--profile")
+                .and_then(|index| args.get(index + 1))
+                .map(String::as_str),
+            Some("dyson-mcp-random-profile")
+        );
+    }
+
+    #[test]
+    fn profile_round_trips_large_developer_instructions_and_complete_mcp_transport() {
+        let system = "Dyson line one\nDyson line two\twith controls".repeat(16_384);
+        let body = codex_profile_body(
+            &system,
+            Some(("secret-token-123", "http://127.0.0.1:9999/mcp")),
+        );
+        let parsed: toml::Value = toml::from_str(&body).expect("valid transient Codex profile");
+        assert_eq!(
+            parsed["developer_instructions"].as_str(),
+            Some(system.as_str())
+        );
+        assert_eq!(
+            parsed["mcp_servers"]["dyson-workspace"]["url"].as_str(),
+            Some("http://127.0.0.1:9999/mcp")
+        );
+        assert_eq!(
+            parsed["mcp_servers"]["dyson-workspace"]["default_tools_approval_mode"].as_str(),
+            Some("approve")
+        );
+        assert_eq!(
+            parsed["mcp_servers"]["dyson-workspace"]["http_headers"]["Authorization"].as_str(),
+            Some("Bearer secret-token-123")
+        );
+    }
+
+    #[test]
+    fn build_args_has_no_positional_prompt() {
+        let client = CodexClient::new(Some("codex"), None, false);
+        let args = client.build_args("o3", None);
+        assert!(
+            !args.iter().any(|arg| arg == "-" || arg == "--"),
+            "with piped stdin Codex reads the prompt when no positional prompt is present: {args:?}"
         );
     }
 
@@ -992,22 +961,28 @@ mod tests {
         let info = crate::llm::start_mcp_server(&workspace, HashMap::new())
             .await
             .expect("start live MCP server");
-        let profile =
-            TempCodexProfile::new(&info.token, &info.url).expect("create transient MCP profile");
-        let client = CodexClient::new(Some("codex"), Some(workspace), false);
-        let args = client.build_args(
-            "gpt-5.6-sol",
+        let profile = TempCodexProfile::new(
             "Use the requested MCP tool. Do not answer from memory.",
-            "Call the dyson-workspace workspace tool with op=view and file=USER.md, then reply with exactly its contents.",
-            Some(&info.url),
-            Some(profile.name()),
-        );
-
-        let output = tokio::process::Command::new("codex")
+            Some((&info.token, &info.url)),
+        )
+        .expect("create transient MCP profile");
+        let client = CodexClient::new(Some("codex"), Some(workspace), false);
+        let args = client.build_args("gpt-5.6-sol", Some(profile.name()));
+        let mut child = tokio::process::Command::new("codex")
             .args(&args)
-            .output()
-            .await
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .expect("launch Codex CLI");
+        let mut stdin = child.stdin.take().expect("open Codex stdin");
+        stdin
+            .write_all(b"Call the dyson-workspace workspace tool with op=view and file=USER.md, then reply with exactly its contents.\n")
+            .await
+            .expect("write Codex prompt");
+        stdin.shutdown().await.expect("close Codex stdin");
+        drop(stdin);
+        let output = child.wait_with_output().await.expect("wait for Codex CLI");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprintln!("codex stdout:\n{stdout}");
