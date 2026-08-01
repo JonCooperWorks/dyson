@@ -575,6 +575,7 @@ mod tests {
         let entrypoint = include_str!("../../../../deploy/swarm-entrypoint.sh");
         assert!(dockerfile.contains("ARG CODEX_CLI_VERSION=0.146.0"));
         assert!(dockerfile.contains("@openai/codex@${CODEX_CLI_VERSION}"));
+        assert!(dockerfile.contains("playwright install --with-deps chromium-headless-shell"));
         assert!(dockerfile.contains("codex mount curl ncat"));
         assert!(dockerfile.contains("swarm-entrypoint.sh"));
         assert!(entrypoint.contains("/dev/shm/dyson-subscriptions"));

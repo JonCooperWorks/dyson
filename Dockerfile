@@ -186,15 +186,16 @@ RUN set -eux; \
     ln -s /opt/testssl/testssl.sh /usr/local/bin/testssl; \
     find "${work}" -delete
 
-# Browser automation is isolated in a venv so Ubuntu's system Python remains
-# untouched. PENTEST_PYTHON is the stable entry point for scripts importing
-# playwright; the browser payload is shared under /opt instead of root's cache.
+# Headless browser automation is isolated in a venv so Ubuntu's system Python
+# remains untouched. PENTEST_PYTHON is the stable entry point for scripts
+# importing playwright; installing only Chromium's headless shell avoids
+# carrying a second, unused headed browser in Cube's 4 GiB template rootfs.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 ENV PENTEST_PYTHON=/opt/pentest-venv/bin/python
 RUN python3 -m venv /opt/pentest-venv \
     && /opt/pentest-venv/bin/pip install --no-cache-dir \
         "playwright==${PLAYWRIGHT_VERSION}" \
-    && /opt/pentest-venv/bin/playwright install --with-deps chromium \
+    && /opt/pentest-venv/bin/playwright install --with-deps chromium-headless-shell \
     && ln -s /opt/pentest-venv/bin/playwright /usr/local/bin/playwright \
     && rm -rf /var/lib/apt/lists/*
 
