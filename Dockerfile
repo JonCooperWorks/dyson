@@ -127,10 +127,13 @@ RUN apt-get update \
 
 # Subscription-backed inference uses native Codex and Claude subprocesses.
 # The image contains no account material: provider OAuth stays in Swarm and
-# these CLIs receive only the source-bound proxy bearer.
+# these CLIs receive only the source-bound proxy bearer. Claude publishes both
+# glibc and musl native binaries as optional packages; Ubuntu only needs glibc,
+# and dropping the extra ~245 MB keeps Cube's fixed 4 GiB immutable rootfs safe.
 RUN npm install -g \
         "@openai/codex@${CODEX_CLI_VERSION}" \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && rm -rf /usr/local/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64-musl \
     && npm cache clean --force
 
 # Pinned, checksum-verified web discovery stack. These release binaries keep
