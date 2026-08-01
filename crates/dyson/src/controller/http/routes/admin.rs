@@ -631,6 +631,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
                 reset_skills: body.reset_skills,
                 mcp_servers: body.mcp_servers.as_ref(),
                 telegram_proxy: body.telegram_proxy.as_ref(),
+                refresh_subscription_models: want_api_key || want_base_url,
             },
         )
         .await
@@ -1449,6 +1450,7 @@ struct ConfigureConfigPatch<'a> {
     reset_skills: bool,
     mcp_servers: Option<&'a serde_json::Map<String, Value>>,
     telegram_proxy: Option<&'a TelegramProxyConfigure>,
+    refresh_subscription_models: bool,
 }
 
 #[derive(Default)]
@@ -1523,6 +1525,10 @@ async fn patch_config_once(
         })?;
     let mut applied = AppliedConfigPatch::default();
 
+    if patch.refresh_subscription_models {
+        applied.provider_changed = patch_subscription_models_doc(&mut doc)?;
+    }
+
     if patch.models.is_some() || patch.api_key.is_some() || patch.base_url.is_some() {
         patch_provider_doc(
             &mut doc,
@@ -1561,6 +1567,84 @@ async fn patch_config_once(
         write_config_doc(path, &doc).await?;
     }
     Ok(applied)
+}
+
+/// Upsert native subscription providers from the shared catalogue. Runtime
+/// configure must own this migration because a stateful Cube rotation carries
+/// the source instance's old `dyson.json` onto the new image.
+fn patch_subscription_models_doc(
+    doc: &mut Value,
+) -> std::result::Result<bool, ConfigureConfigPatchError> {
+    let active_provider = doc
+        .get("agent")
+        .and_then(|agent| agent.get("provider"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let active_model = doc
+        .get("agent")
+        .and_then(|agent| agent.get("model"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let desired = [
+        (
+            "chatgpt-subscription",
+            "codex",
+            crate::subscription_models::CHATGPT,
+        ),
+        (
+            "claude-subscription",
+            "claude-code",
+            crate::subscription_models::CLAUDE,
+        ),
+    ];
+    let replacement_model = desired.iter().find_map(|(name, _, models)| {
+        (active_provider.as_deref() == Some(*name)
+            && active_model
+                .as_deref()
+                .is_none_or(|model| !models.contains(&model)))
+        .then(|| models.first().copied())
+        .flatten()
+    });
+    let mut changed = false;
+    {
+        let providers = doc
+            .as_object_mut()
+            .ok_or(ConfigureConfigPatchError::RootNotObject)?
+            .entry("providers".to_owned())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .ok_or(ConfigureConfigPatchError::ProvidersNotObject)?;
+        for (name, provider_type, models) in desired {
+            let desired_models = Value::Array(
+                models
+                    .iter()
+                    .map(|model| Value::String((*model).to_owned()))
+                    .collect(),
+            );
+            let entry = providers
+                .entry(name.to_owned())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()))
+                .as_object_mut()
+                .ok_or(ConfigureConfigPatchError::ProvidersNotObject)?;
+            if entry.get("type") != Some(&Value::String(provider_type.to_owned())) {
+                entry.insert("type".to_owned(), Value::String(provider_type.to_owned()));
+                changed = true;
+            }
+            if entry.get("models") != Some(&desired_models) {
+                entry.insert("models".to_owned(), desired_models);
+                changed = true;
+            }
+        }
+    }
+    if let Some(default_model) = replacement_model {
+        let agent = doc
+            .get_mut("agent")
+            .and_then(Value::as_object_mut)
+            .ok_or(ConfigureConfigPatchError::AgentNotObject)?;
+        agent.insert("model".to_owned(), Value::String(default_model.to_owned()));
+        changed = true;
+    }
+    Ok(changed)
 }
 
 fn patch_provider_doc(
@@ -2368,6 +2452,49 @@ mod tests {
             serde_json::json!(["anthropic/claude-sonnet-4-5"])
         );
         assert!(doc["providers"]["chatgpt-subscription"]["base_url"].is_null());
+    }
+
+    #[test]
+    fn runtime_configure_refreshes_subscription_catalogues_after_rotation() {
+        let mut doc = serde_json::json!({
+            "agent": {
+                "provider": "chatgpt-subscription",
+                "model": "gpt-5.6-sol"
+            },
+            "providers": {
+                "openrouter": {
+                    "type": "openai",
+                    "models": ["swarm/model"]
+                },
+                "chatgpt-subscription": {
+                    "type": "codex",
+                    "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+                },
+                "claude-subscription": {
+                    "type": "claude-code",
+                    "models": ["claude-opus-4-6", "claude-sonnet-4-6"]
+                }
+            }
+        });
+
+        assert!(patch_subscription_models_doc(&mut doc).unwrap());
+        assert_eq!(
+            doc["providers"]["chatgpt-subscription"]["models"],
+            serde_json::json!(crate::subscription_models::CHATGPT)
+        );
+        assert_eq!(
+            doc["providers"]["claude-subscription"]["models"],
+            serde_json::json!(crate::subscription_models::CLAUDE)
+        );
+        assert_eq!(doc["agent"]["provider"], "chatgpt-subscription");
+        assert_eq!(doc["agent"]["model"], "gpt-5.6-sol");
+        assert!(!patch_subscription_models_doc(&mut doc).unwrap());
+
+        doc["agent"]["provider"] = Value::String("claude-subscription".to_owned());
+        doc["agent"]["model"] = Value::String("claude-opus-4-6".to_owned());
+        assert!(patch_subscription_models_doc(&mut doc).unwrap());
+        assert_eq!(doc["agent"]["model"], "claude-fable-5");
+        assert!(!patch_subscription_models_doc(&mut doc).unwrap());
     }
 
     #[test]

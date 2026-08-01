@@ -63,6 +63,7 @@ pub mod message_cost_backfill;
 pub mod sandbox;
 pub mod secret;
 pub mod skill;
+pub mod subscription_models;
 pub mod swarm_cost;
 pub mod swarm_state_sync;
 pub mod tokens;
