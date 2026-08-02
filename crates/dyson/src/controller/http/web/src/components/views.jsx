@@ -6,7 +6,12 @@
 
 import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
-import { DysonMark, Modal, createThemeController } from 'dyson-common-ui';
+import {
+  DysonMark,
+  SUBSCRIPTION_CONNECT_PROVIDERS,
+  SubscriptionConnectModal,
+  createThemeController,
+} from 'dyson-common-ui';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useEscapeKey } from 'dyson-common-ui';
@@ -33,10 +38,10 @@ const CHATGPT_SUBSCRIPTION_PROVIDER = 'chatgpt-subscription';
 const CLAUDE_SUBSCRIPTION_PROVIDER = 'claude-subscription';
 const SUBSCRIPTION_PROVIDERS = {
   [CHATGPT_SUBSCRIPTION_PROVIDER]: {
-    authProvider: 'codex', badge: 'Codex', service: 'ChatGPT', tone: 'codex', flow: 'device',
+    ...SUBSCRIPTION_CONNECT_PROVIDERS.codex, authProvider: 'codex',
   },
   [CLAUDE_SUBSCRIPTION_PROVIDER]: {
-    authProvider: 'claude', badge: 'Claude', service: 'Claude', tone: 'claude', flow: 'code',
+    ...SUBSCRIPTION_CONNECT_PROVIDERS.claude, authProvider: 'claude',
   },
 };
 
@@ -250,146 +255,16 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
     </div>
     {subscriptionConnect && (
       <SubscriptionConnectModal
-        client={client}
         initial={subscriptionConnect.auth}
         subscription={subscriptionConnect.subscription}
+        getStatus={() => client.getProviderAuth(subscriptionConnect.subscription.authProvider)}
+        completeAuth={code => client.completeProviderAuth(subscriptionConnect.subscription.authProvider, code)}
         onConnected={finishSubscriptionConnect}
         onClose={() => setSubscriptionConnect(null)}
+        subjectLabel="this Dyson"
       />
     )}
     </>
-  );
-}
-
-function SubscriptionConnectModal({ client, initial, subscription, onConnected, onClose }) {
-  const [auth, setAuth] = useState(initial || {});
-  const [copied, setCopied] = useState(false);
-  const [code, setCode] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    let completed = false;
-    const poll = async () => {
-      try {
-        const next = await client.getProviderAuth(subscription.authProvider);
-        if (!alive) return;
-        setAuth(next || {});
-        if (next?.connected && !completed) {
-          completed = true;
-          try {
-            await onConnected();
-          } catch {
-            completed = false;
-            if (alive) setAuth({...next, error: 'Connected, but the model switch failed. Retrying…'});
-          }
-        }
-      } catch {
-        // A transient proxy failure should not discard a still-valid code.
-      }
-    };
-    const timer = setInterval(poll, 1000);
-    poll();
-    return () => { alive = false; clearInterval(timer); };
-  }, [client, onConnected, subscription.authProvider]);
-
-  const copyCode = async () => {
-    if (!auth.user_code || !navigator.clipboard?.writeText) return;
-    await navigator.clipboard.writeText(auth.user_code);
-    setCopied(true);
-  };
-
-  const complete = async (event) => {
-    event.preventDefault();
-    if (!code.trim() || typeof client.completeProviderAuth !== 'function') return;
-    setSubmitting(true);
-    try {
-      const next = await client.completeProviderAuth(subscription.authProvider, code.trim());
-      setAuth(next || {});
-      if (next?.connected) await onConnected();
-    } catch {
-      setAuth(previous => ({...previous, error: 'That authorization code could not be accepted. Check the full code and try again.'}));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const signInUrl = auth.auth_url || auth.verification_uri;
-  const isFailed = auth.state === 'failed' || auth.state === 'unavailable';
-
-  return (
-    <Modal className={`modal subscription-connect subscription-connect-${subscription.tone}`}
-           scrimClassName="modal-scrim subscription-connect-scrim"
-           label={`Connect ${subscription.service} subscription`} onClose={onClose}>
-      <div className="subscription-connect-head">
-        <div className="subscription-connect-brand">
-          <BackendBadge label={subscription.badge} tone={subscription.tone}/>
-          <span>Subscription access</span>
-        </div>
-        <button type="button" className="subscription-connect-close" onClick={onClose} aria-label="Close">×</button>
-      </div>
-      <div className="subscription-connect-body">
-        <div className="subscription-connect-kicker">Native provider</div>
-        <h2>Connect {subscription.service}</h2>
-        <p className="subscription-connect-lede">
-          Sign in once, then use your {subscription.service} plan directly from this Dyson.
-        </p>
-
-        <div className="subscription-privacy">
-          <span className="subscription-privacy-mark" aria-hidden="true">✓</span>
-          <div><strong>Credentials stay in Swarm.</strong><span>This Dyson receives only an instance-bound proxy token.</span></div>
-        </div>
-
-        {signInUrl ? (
-          <div className="subscription-connect-flow">
-            <div className="subscription-step">
-              <span className="subscription-step-number">1</span>
-              <div>
-                <strong>Open {subscription.service}</strong>
-                <span>Approve access in a secure provider window.</span>
-              </div>
-              <a className="btn primary subscription-open" href={signInUrl} target="_blank" rel="noreferrer">
-                Open sign-in <span aria-hidden="true">↗</span>
-              </a>
-            </div>
-
-            {subscription.flow === 'device' && auth.user_code && (
-              <div className="subscription-step">
-                <span className="subscription-step-number">2</span>
-                <div>
-                  <strong>Enter this code</strong>
-                  <span>The window will ask for it.</span>
-                </div>
-                <button type="button" className="subscription-device-code" onClick={copyCode} aria-label="Copy device code">
-                  <span className="mono">{auth.user_code}</span>
-                  <span>{copied ? 'Copied' : 'Copy'}</span>
-                </button>
-              </div>
-            )}
-
-            {subscription.flow === 'code' && (
-              <form className="subscription-step subscription-code-step" onSubmit={complete}>
-                <span className="subscription-step-number">2</span>
-                <label>
-                  <strong>Paste the returned code</strong>
-                  <span>Copy the complete code from Claude after approval.</span>
-                  <input value={code} onChange={event => setCode(event.target.value)}
-                         autoComplete="off" spellCheck="false" placeholder="Authorization code"/>
-                </label>
-                <button type="submit" className="btn primary" disabled={!code.trim() || submitting}>
-                  {submitting ? 'Connecting…' : 'Connect'}
-                </button>
-              </form>
-            )}
-          </div>
-        ) : isFailed ? (
-          <p className="error-block">{auth.error || `${subscription.service} sign-in could not start.`}</p>
-        ) : (
-          <div className="subscription-starting"><span/>Preparing secure sign-in…</div>
-        )}
-        {auth.error && !isFailed && <p className="error-block">{auth.error}</p>}
-      </div>
-    </Modal>
   );
 }
 
