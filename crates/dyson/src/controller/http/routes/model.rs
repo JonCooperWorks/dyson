@@ -51,6 +51,24 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: Arc<HttpSta
         }
     };
 
+    // Swarm is the durable authority for managed instances. Persist before
+    // mutating loaded chats so a failed control-plane write cannot leave the
+    // UI claiming a switch that the next restart will discard.
+    if let Err(error) =
+        crate::swarm_state_sync::persist_model_selection(selection.provider(), selection.model())
+            .await
+    {
+        tracing::warn!(
+            error = %error,
+            provider = selection.provider(),
+            model = selection.model(),
+            "model switch was not persisted by swarm"
+        );
+        return service_unavailable(
+            "Swarm could not save the model selection; the active model was not changed",
+        );
+    }
+
     let chats = state.chats.lock().await;
     let targets: Vec<Arc<ChatHandle>> = match body.chat_id {
         Some(id) => match chats.get(&id) {

@@ -121,6 +121,14 @@ pub(super) struct ConfigureBody {
     /// `agent.provider`.
     #[serde(default)]
     provider_name: Option<String>,
+    /// Swarm-owned active chat provider restored after a managed instance is
+    /// recreated. Distinct from `provider_name`, which names the stable Swarm
+    /// proxy entry being patched.
+    #[serde(default)]
+    active_provider: Option<String>,
+    /// Model paired with `active_provider`. Partial pairs are rejected.
+    #[serde(default)]
+    active_model: Option<String>,
     /// Swarm-side instance id.  Surfaced in IDENTITY.md as
     /// `Swarm instance id: <value>` so the agent can reference it
     /// in tool calls back to swarm.
@@ -555,6 +563,17 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     let provider_requested = want_models || want_api_key || want_base_url;
     let provider_applied = provider_requested && has_config;
     let models_applied = want_models && provider_applied;
+    let active_selection = match (
+        body.active_provider.as_deref().map(str::trim),
+        body.active_model.as_deref().map(str::trim),
+    ) {
+        (None, None) => None,
+        (Some(provider), Some(model)) if !provider.is_empty() && !model.is_empty() => {
+            Some((provider, model))
+        }
+        _ => return bad_request("active_provider and active_model must be supplied together"),
+    };
+    let model_selection_applied = active_selection.is_some() && has_config;
 
     // 3. Image generation: register / replace the dedicated image
     //    provider block and point `agent.image_generation_*` at it.
@@ -610,6 +629,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
                 } else {
                     None
                 },
+                active_selection,
                 image_provider_block: if want_image_block {
                     body.image_provider_name
                         .as_deref()
@@ -643,14 +663,19 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         AppliedConfigPatch::default()
     };
     let provider_changed = config_patch.provider_changed;
+    let model_selection_changed = config_patch.model_selection_changed;
     let models_changed = provider_changed && want_models;
     let image_changed = config_patch.image_changed;
     let skills_changed = config_patch.skills_changed;
     let mcp_changed = config_patch.mcp_changed;
     let telegram_changed = config_patch.telegram_changed;
 
-    let any_config_changed =
-        provider_changed || image_changed || skills_changed || mcp_changed || telegram_changed;
+    let any_config_changed = provider_changed
+        || model_selection_changed
+        || image_changed
+        || skills_changed
+        || mcp_changed
+        || telegram_changed;
 
     let swarm_patch = swarm_runtime_patch(
         body.proxy_base.as_deref(),
@@ -720,6 +745,24 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         }
     }
 
+    // Keep the runtime override aligned with the durable config. Without
+    // this assignment an earlier UI switch can remain in memory and mask the
+    // freshly restored selection in `/api/providers` until process restart.
+    if let Some((provider, model)) = active_selection {
+        let selection = match super::super::state::RuntimeModelSelection::new(
+            provider.to_owned(),
+            model.to_owned(),
+        ) {
+            Ok(selection) => selection,
+            Err(error) => return bad_request(&error),
+        };
+        let mut slot = match state.runtime_model.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = Some(selection);
+    }
+
     // Patch the runtime artefact-ingest target.  Both fields must be
     // non-empty in the same body to take effect — a partial body
     // (just `ingest_url` without a token) leaves the existing config
@@ -782,6 +825,8 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         "models_applied": models_applied,
         "provider_updated": provider_changed,
         "provider_applied": provider_applied,
+        "model_selection_updated": model_selection_changed,
+        "model_selection_applied": model_selection_applied,
         "image_generation_updated": image_changed,
         "image_generation_applied": image_applied,
         "skills_reset": skills_changed,
@@ -1443,6 +1488,7 @@ struct ConfigureConfigPatch<'a> {
     models: Option<&'a [String]>,
     api_key: Option<&'a str>,
     base_url: Option<&'a str>,
+    active_selection: Option<(&'a str, &'a str)>,
     image_provider_block: Option<(&'a str, &'a Value)>,
     image_provider: Option<&'a str>,
     image_model: Option<&'a str>,
@@ -1456,6 +1502,7 @@ struct ConfigureConfigPatch<'a> {
 #[derive(Default)]
 struct AppliedConfigPatch {
     provider_changed: bool,
+    model_selection_changed: bool,
     image_changed: bool,
     skills_changed: bool,
     mcp_changed: bool,
@@ -1465,6 +1512,7 @@ struct AppliedConfigPatch {
 impl AppliedConfigPatch {
     fn any(&self) -> bool {
         self.provider_changed
+            || self.model_selection_changed
             || self.image_changed
             || self.skills_changed
             || self.mcp_changed
@@ -1538,6 +1586,9 @@ async fn patch_config_once(
             patch.base_url,
         )?;
         applied.provider_changed = true;
+    }
+    if let Some((provider, model)) = patch.active_selection {
+        applied.model_selection_changed = patch_active_selection_doc(&mut doc, provider, model)?;
     }
     if patch.image_provider_block.is_some()
         || patch.image_provider.is_some()
@@ -1709,6 +1760,60 @@ fn patch_provider_doc(
         prov_entry.insert("base_url".into(), Value::String(u.to_owned()));
     }
     Ok(())
+}
+
+/// Restore Swarm's durable provider/model choice without coupling it to the
+/// stable OpenRouter proxy provider patch. The selected model is moved to the
+/// front (or inserted) so the ordinary loader and every future agent rebuild
+/// agree with `agent.model`.
+fn patch_active_selection_doc(
+    doc: &mut Value,
+    provider: &str,
+    model: &str,
+) -> std::result::Result<bool, ConfigureConfigPatchError> {
+    let providers = doc
+        .get_mut("providers")
+        .and_then(Value::as_object_mut)
+        .ok_or(ConfigureConfigPatchError::MissingProvidersObject)?;
+    let provider_doc = providers
+        .get_mut(provider)
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| ConfigureConfigPatchError::MissingProvider(provider.to_owned()))?;
+    let models = provider_doc
+        .entry("models".to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| ConfigureConfigPatchError::MissingProvider(provider.to_owned()))?;
+    let mut changed = false;
+    if let Some(position) = models
+        .iter()
+        .position(|value| value.as_str() == Some(model))
+    {
+        if position > 0 {
+            let selected = models.remove(position);
+            models.insert(0, selected);
+            changed = true;
+        }
+    } else {
+        models.insert(0, Value::String(model.to_owned()));
+        changed = true;
+    }
+
+    let agent = doc
+        .as_object_mut()
+        .ok_or(ConfigureConfigPatchError::RootNotObject)?
+        .entry("agent".to_owned())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or(ConfigureConfigPatchError::AgentNotObject)?;
+    for (key, value) in [("provider", provider), ("model", model)] {
+        let desired = Value::String(value.to_owned());
+        if agent.get(key) != Some(&desired) {
+            agent.insert(key.to_owned(), desired);
+            changed = true;
+        }
+    }
+    Ok(changed)
 }
 
 fn patch_image_generation_doc(
@@ -2452,6 +2557,45 @@ mod tests {
             serde_json::json!(["anthropic/claude-sonnet-4-5"])
         );
         assert!(doc["providers"]["chatgpt-subscription"]["base_url"].is_null());
+    }
+
+    #[test]
+    fn durable_selection_replaces_openrouter_startup_default() {
+        let mut doc = serde_json::json!({
+            "agent": {
+                "provider": "openrouter",
+                "model": "~moonshotai/kimi-latest"
+            },
+            "providers": {
+                "openrouter": {
+                    "type": "openai",
+                    "models": ["~moonshotai/kimi-latest"]
+                },
+                "chatgpt-subscription": {
+                    "type": "codex",
+                    "models": ["gpt-5.6-terra", "gpt-5.6-sol"]
+                }
+            }
+        });
+
+        let changed = patch_active_selection_doc(
+            &mut doc,
+            "chatgpt-subscription",
+            "gpt-5.6-sol",
+        )
+        .unwrap();
+
+        assert!(changed);
+        assert_eq!(doc["agent"]["provider"], "chatgpt-subscription");
+        assert_eq!(doc["agent"]["model"], "gpt-5.6-sol");
+        assert_eq!(
+            doc["providers"]["chatgpt-subscription"]["models"][0],
+            "gpt-5.6-sol"
+        );
+        assert_eq!(
+            doc["providers"]["openrouter"]["models"][0],
+            "~moonshotai/kimi-latest"
+        );
     }
 
     #[test]

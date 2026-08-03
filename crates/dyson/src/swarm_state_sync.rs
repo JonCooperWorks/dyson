@@ -21,6 +21,8 @@ use serde::Serialize;
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_SYNC_FILE_BYTES: u64 = 5 * 1024 * 1024;
+const STATE_FILE_PATH: &str = "/v1/internal/state/file";
+const MODEL_SELECTION_PATH: &str = "/v1/internal/model-selection";
 
 /// Ceiling for the per-file transient-failure backoff so a file that hit a
 /// long outage still gets retried a couple of times per hour.
@@ -94,6 +96,42 @@ pub fn status_snapshot() -> StateSyncStatus {
 
 pub fn config_snapshot() -> Option<StateSyncConfig> {
     config_handle().lock().ok().and_then(|guard| guard.clone())
+}
+
+/// Persist the active provider/model in Swarm before a managed Dyson reports
+/// a model switch as successful. Local/non-Swarm Dysons have no state-sync
+/// config and keep their existing file-only behavior.
+pub async fn persist_model_selection(provider: &str, model: &str) -> Result<bool, String> {
+    let Some(config) = config_snapshot() else {
+        return Ok(false);
+    };
+    let url = model_selection_url(&config.url)
+        .ok_or_else(|| "state-sync URL does not match the managed Dyson contract".to_owned())?;
+    let response = crate::http::client()
+        .post(url)
+        .bearer_auth(&config.token)
+        .json(&serde_json::json!({
+            "provider": provider,
+            "model": model,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("model selection request failed: {e}"))?;
+    if response.status().is_success() {
+        Ok(true)
+    } else {
+        Err(format!(
+            "swarm rejected model selection: {}",
+            response.status()
+        ))
+    }
+}
+
+fn model_selection_url(state_file_url: &str) -> Option<String> {
+    state_file_url
+        .trim_end_matches('/')
+        .strip_suffix(STATE_FILE_PATH)
+        .map(|base| format!("{base}{MODEL_SELECTION_PATH}"))
 }
 
 fn config_handle() -> Arc<Mutex<Option<StateSyncConfig>>> {
@@ -673,6 +711,15 @@ mod tests {
 
         assert_eq!(current, Some(cfg));
         assert!(status_snapshot().configured);
+    }
+
+    #[test]
+    fn model_selection_uses_sibling_internal_endpoint() {
+        assert_eq!(
+            model_selection_url("https://swarm.test/v1/internal/state/file").as_deref(),
+            Some("https://swarm.test/v1/internal/model-selection")
+        );
+        assert!(model_selection_url("https://swarm.test/not-state").is_none());
     }
 
     #[test]

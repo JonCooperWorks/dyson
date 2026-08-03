@@ -1059,6 +1059,22 @@ async fn handle_callback_query(
         }
     };
 
+    if let Err(error) = crate::swarm_state_sync::persist_model_selection(provider, model).await {
+        tracing::warn!(
+            error = %error,
+            provider,
+            model,
+            "telegram model switch was not persisted by swarm"
+        );
+        let _ = bot
+            .send_message(
+                chat_id,
+                "Swarm could not save that model selection; the active model was not changed.",
+            )
+            .await;
+        return;
+    }
+
     // Hot-swap the client on the existing agent — no rebuild needed.
     let agents_map = agents.read().await;
     if let Some(entry) = agents_map.get(&chat_id.0) {
