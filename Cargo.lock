@@ -836,6 +836,7 @@ dependencies = [
  "dyson-dependency-analysis",
  "dyson-harness",
  "dyson-persistence",
+ "dyson-telegram",
  "flate2",
  "futures-util",
  "glob",
@@ -910,10 +911,11 @@ dependencies = [
 
 [[package]]
 name = "dyson-common"
-version = "0.1.7"
-source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.8#be5d6c3a31d5b8d439c6d325d80ed75d9c8f5bc3"
+version = "0.1.10"
+source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.10#ee676aab55b04fefa98713a673303c5c43cef25a"
 dependencies = [
  "base64",
+ "dyson-telegram",
  "jsonwebtoken",
  "rand 0.10.2",
  "reqwest",
@@ -969,6 +971,18 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "dyson-telegram"
+version = "0.1.0"
+source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.10#ee676aab55b04fefa98713a673303c5c43cef25a"
+dependencies = [
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

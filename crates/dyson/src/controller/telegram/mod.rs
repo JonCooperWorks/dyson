@@ -61,6 +61,11 @@ use self::api::BotApi;
 use self::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, Update};
 use tokio::sync::{Mutex, mpsc};
 
+use dyson_telegram::media::{
+    DocumentKind, DownloadLimits, classify_document, effective_mime,
+};
+#[cfg(test)]
+use dyson_telegram::media::extension_of;
 use serde::Deserialize;
 
 use crate::config::{ControllerConfig, Settings};
@@ -207,31 +212,6 @@ fn epoch_secs() -> i64 {
 /// Prevents OOM from oversized files.  Limits are checked both against the
 /// Telegram `file_size` metadata (early reject) and incrementally during
 /// the streaming download.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-struct DownloadLimits {
-    /// Maximum bytes for image files (photos and image documents).
-    image_max_bytes: u64,
-    /// Maximum bytes for audio/voice files.
-    audio_max_bytes: u64,
-    /// Maximum bytes for other document types.
-    document_max_bytes: u64,
-    /// Maximum bytes for text-like document types inlined into the prompt.
-    /// Kept small because these go straight into the model context.
-    text_max_bytes: u64,
-}
-
-impl Default for DownloadLimits {
-    fn default() -> Self {
-        Self {
-            image_max_bytes: 50 * 1024 * 1024,     // 50 MB
-            audio_max_bytes: 50 * 1024 * 1024,     // 50 MB
-            document_max_bytes: 200 * 1024 * 1024, // 200 MB
-            text_max_bytes: 1024 * 1024,           // 1 MiB
-        }
-    }
-}
-
 #[derive(Debug, Deserialize)]
 struct TelegramControllerConfig {
     /// Bot API token (already resolved from secret reference by the config loader).
@@ -2067,11 +2047,7 @@ async fn extract_attachments(
                 "Skipped `{display_name}` — I can only read text files, Office docs, PDFs, and images."
             ));
         } else {
-            let limit = match kind {
-                DocumentKind::Image => limits.image_max_bytes,
-                DocumentKind::Text => limits.text_max_bytes,
-                _ => limits.document_max_bytes,
-            };
+            let limit = limits.for_document(kind);
             tracing::info!(
                 file_id = doc.file_id.as_str(),
                 file_name = display_name.as_str(),
@@ -2091,8 +2067,7 @@ async fn extract_attachments(
                             "Skipped `{display_name}` — looked like text but isn't valid UTF-8."
                         ));
                     } else {
-                        let effective_mime =
-                            resolve_effective_mime(&mime, kind, file_name.as_deref());
+                        let effective_mime = effective_mime(&mime, kind, file_name.as_deref());
                         attachments.push(media::Attachment {
                             data,
                             mime_type: effective_mime,
@@ -2109,88 +2084,6 @@ async fn extract_attachments(
     }
 
     (attachments, skip_reasons)
-}
-
-/// What kind of Telegram document we're looking at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DocumentKind {
-    Image,
-    Pdf,
-    Office,
-    Text,
-    Binary,
-}
-
-/// Classify a document by its MIME type, falling back to the filename
-/// extension when the MIME is missing or generic (`application/octet-stream`).
-fn classify_document(mime: &str, file_name: Option<&str>) -> DocumentKind {
-    use crate::media::{is_office_extension, is_office_mime, is_text_extension, is_text_like_mime};
-
-    if mime.starts_with("image/") {
-        return DocumentKind::Image;
-    }
-    if mime == "application/pdf" {
-        return DocumentKind::Pdf;
-    }
-    if is_office_mime(mime) {
-        return DocumentKind::Office;
-    }
-    if is_text_like_mime(mime) {
-        return DocumentKind::Text;
-    }
-    // Fall back to extension when MIME is empty / octet-stream / unknown.
-    // Telegram often labels source files as application/octet-stream.
-    if matches!(mime, "" | "application/octet-stream")
-        && let Some(ext) = file_name.and_then(extension_of)
-    {
-        if is_office_extension(&ext) {
-            return DocumentKind::Office;
-        }
-        if is_text_extension(&ext) {
-            return DocumentKind::Text;
-        }
-    }
-    DocumentKind::Binary
-}
-
-/// Lowercase extension (without the dot) of a filename, if any.
-fn extension_of(name: &str) -> Option<String> {
-    let dot = name.rfind('.')?;
-    let ext = &name[dot + 1..];
-    if ext.is_empty() {
-        None
-    } else {
-        Some(ext.to_ascii_lowercase())
-    }
-}
-
-/// When Telegram's MIME type is empty / `application/octet-stream` but we
-/// classified the document by extension, resolve to the correct MIME so the
-/// media resolver can route it properly.
-fn resolve_effective_mime(original: &str, kind: DocumentKind, file_name: Option<&str>) -> String {
-    match kind {
-        DocumentKind::Office if !crate::media::is_office_mime(original) => file_name
-            .and_then(extension_of)
-            .and_then(|ext| match ext.as_str() {
-                "docx" => {
-                    Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-                }
-                "xlsx" => Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-                "pptx" => Some(
-                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                ),
-                "doc" => Some("application/msword"),
-                "xls" => Some("application/vnd.ms-excel"),
-                "ppt" => Some("application/vnd.ms-powerpoint"),
-                _ => None,
-            })
-            .unwrap_or(original)
-            .to_string(),
-        DocumentKind::Text if !crate::media::is_text_like_mime(original) => {
-            "text/plain".to_string()
-        }
-        _ => original.to_string(),
-    }
 }
 
 // TelegramOutput and formatting helpers are in submodules:

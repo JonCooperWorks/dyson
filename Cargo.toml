@@ -15,7 +15,8 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-dyson-common = { git = "ssh://git@github.com/JonCooperWorks/dyson-common.git", tag = "v0.1.8" }
+dyson-common = { git = "ssh://git@github.com/JonCooperWorks/dyson-common.git", tag = "v0.1.10" }
+dyson-telegram = { git = "ssh://git@github.com/JonCooperWorks/dyson-common.git", tag = "v0.1.10", features = ["file-api"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"

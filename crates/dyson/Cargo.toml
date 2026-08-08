@@ -18,6 +18,7 @@ dyson-persistence = { path = "../dyson-persistence" }
 # `&reqwest::Client`, so dyson + swarm + dyson-common must share one reqwest
 # major — all three ride reqwest 0.13 (see the reqwest dep below).
 dyson-common = { workspace = true, features = ["oidc", "oauth-client"] }
+dyson-telegram.workspace = true
 
 # Shared across workspace crates — inherit from [workspace.dependencies]
 # so version bumps live in one place and cargo always dedupes.

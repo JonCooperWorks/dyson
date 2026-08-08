@@ -200,12 +200,6 @@ impl BotApi {
         Ok(())
     }
 
-    /// Get file metadata (including download path).
-    pub async fn get_file(&self, file_id: &str) -> Result<File, DysonError> {
-        let body = json!({ "file_id": file_id });
-        self.post_result("getFile", &body).await
-    }
-
     /// Send a chat action (e.g. "typing").
     pub async fn send_typing(&self, chat_id: ChatId) -> Result<(), DysonError> {
         let body = json!({
@@ -227,40 +221,16 @@ impl BotApi {
         file_id: &str,
         max_bytes: u64,
     ) -> Result<Vec<u8>, DysonError> {
-        let file = self.get_file(file_id).await?;
-
-        // Early reject based on Telegram's reported file size.
-        if let Some(size) = file.file_size
-            && size > max_bytes
-        {
-            return Err(DysonError::Llm(format!(
-                "Telegram file too large ({size} bytes, limit {max_bytes})"
-            )));
-        }
-
-        let file_path = file
-            .file_path
-            .ok_or_else(|| DysonError::Llm("Telegram getFile returned no file_path".to_string()))?;
-
-        let url = format!("{}/{}", self.file_base_url, file_path);
-
-        let mut response = self
-            .authed(crate::http::client().get(&url))
-            .send()
-            .await
-            .map_err(DysonError::Http)?;
-
-        // Stream the body in chunks, enforcing the limit incrementally.
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(DysonError::Http)? {
-            bytes.extend_from_slice(&chunk);
-            if bytes.len() as u64 > max_bytes {
-                return Err(DysonError::Llm(format!(
-                    "Telegram file download exceeded limit ({max_bytes} bytes)"
-                )));
-            }
-        }
-        Ok(bytes)
+        dyson_telegram::download_file(
+            crate::http::client(),
+            &self.base_url,
+            &self.file_base_url,
+            self.bearer.as_deref().filter(|token| !token.is_empty()),
+            file_id,
+            max_bytes,
+        )
+        .await
+        .map_err(|error| DysonError::Llm(error.to_string()))
     }
 
     // -----------------------------------------------------------------------

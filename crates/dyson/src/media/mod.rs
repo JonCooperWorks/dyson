@@ -28,6 +28,10 @@ use std::sync::Arc;
 
 use crate::message::ContentBlock;
 
+pub use dyson_telegram::media::{
+    is_office_extension, is_office_mime, is_text_extension, is_text_like_mime,
+};
+
 // ---------------------------------------------------------------------------
 // Attachment — controller-agnostic raw media.
 // ---------------------------------------------------------------------------
@@ -106,139 +110,4 @@ pub async fn resolve_attachment(
             "unsupported media type: {mime}"
         )))
     }
-}
-
-/// True if a MIME type is one we treat as inline UTF-8 text.
-///
-/// Accepts anything under `text/*` and a curated list of text-shaped
-/// `application/*` types.  Callers should normalize empty/unknown MIME
-/// strings to a sensible default (e.g. `text/plain`) before calling.
-pub fn is_text_like_mime(mime: &str) -> bool {
-    if mime.starts_with("text/") {
-        return true;
-    }
-    matches!(
-        mime,
-        "application/json"
-            | "application/xml"
-            | "application/javascript"
-            | "application/x-yaml"
-            | "application/yaml"
-            | "application/toml"
-            | "application/x-sh"
-            | "application/x-shellscript"
-    )
-}
-
-/// True if a MIME type corresponds to a Microsoft Office format we can extract
-/// text from (docx, xlsx, pptx).
-pub fn is_office_mime(mime: &str) -> bool {
-    matches!(
-        mime,
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-            | "application/msword"
-            | "application/vnd.ms-excel"
-            | "application/vnd.ms-powerpoint"
-    )
-}
-
-/// True if `ext` (lowercase, no leading dot) names a Microsoft Office
-/// document we can extract text from.  Pair with [`is_office_mime`] when
-/// classifying a file that may arrive with a missing or `application/
-/// octet-stream` MIME type.
-pub fn is_office_extension(ext: &str) -> bool {
-    matches!(ext, "docx" | "xlsx" | "pptx" | "doc" | "xls" | "ppt")
-}
-
-/// True if `ext` (lowercase, no leading dot) names a file type we can
-/// safely ingest as inline UTF-8 text.  Co-located with [`is_text_like_mime`]
-/// so the MIME and extension whitelists evolve together.
-pub fn is_text_extension(ext: &str) -> bool {
-    matches!(
-        ext,
-        "md" | "markdown"
-            | "txt"
-            | "rst"
-            | "log"
-            | "csv"
-            | "tsv"
-            | "json"
-            | "jsonl"
-            | "ndjson"
-            | "yaml"
-            | "yml"
-            | "toml"
-            | "ini"
-            | "cfg"
-            | "conf"
-            | "env"
-            | "rs"
-            | "go"
-            | "py"
-            | "pyi"
-            | "js"
-            | "mjs"
-            | "cjs"
-            | "ts"
-            | "tsx"
-            | "jsx"
-            | "rb"
-            | "sh"
-            | "bash"
-            | "zsh"
-            | "fish"
-            | "c"
-            | "h"
-            | "cpp"
-            | "hpp"
-            | "cc"
-            | "hh"
-            | "cxx"
-            | "hxx"
-            | "java"
-            | "kt"
-            | "kts"
-            | "swift"
-            | "m"
-            | "mm"
-            | "php"
-            | "pl"
-            | "lua"
-            | "sql"
-            | "html"
-            | "htm"
-            | "css"
-            | "scss"
-            | "sass"
-            | "less"
-            | "xml"
-            | "svg"
-            | "dockerfile"
-            | "makefile"
-            | "mk"
-            | "lock"
-            | "sum"
-            | "mod"
-            | "gitignore"
-            | "gitattributes"
-            | "editorconfig"
-            | "r"
-            | "scala"
-            | "clj"
-            | "ex"
-            | "exs"
-            | "erl"
-            | "hs"
-            | "elm"
-            | "dart"
-            | "vue"
-            | "svelte"
-            | "tf"
-            | "hcl"
-            | "proto"
-            | "graphql"
-            | "gql"
-    )
 }
