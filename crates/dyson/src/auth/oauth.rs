@@ -660,7 +660,15 @@ mod tests {
 
     #[test]
     fn build_auth_url_rejects_invalid_url() {
-        let result = build_auth_url("not a url", "cid", &[], "http://localhost/cb", "ch", "st", None);
+        let result = build_auth_url(
+            "not a url",
+            "cid",
+            &[],
+            "http://localhost/cb",
+            "ch",
+            "st",
+            None,
+        );
         assert!(result.is_err());
     }
 

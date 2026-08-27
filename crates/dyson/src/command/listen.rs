@@ -26,6 +26,51 @@ use std::path::PathBuf;
 
 use dyson::controller::Controller;
 
+fn build_controllers(
+    settings: &dyson::config::Settings,
+) -> dyson::error::Result<Vec<Box<dyn Controller>>> {
+    if settings.controllers.is_empty() {
+        return Err(dyson::error::DysonError::Config(
+            "no controllers configured.  Add a controller to the \"controllers\" array in dyson.json.\n\
+             Use 'dyson run \"prompt\"' for single-shot mode."
+                .into(),
+        ));
+    }
+
+    let mut controllers: Vec<Box<dyn Controller>> = Vec::new();
+    for config in &settings.controllers {
+        let controller: Option<Box<dyn Controller>> = match config.controller_type.as_str() {
+            "terminal" => Some(Box::new(dyson::controller::terminal::TerminalController)),
+            "telegram" => dyson::controller::telegram::TelegramController::from_config(config)
+                .map(|controller| Box::new(controller) as Box<dyn Controller>),
+            "http" => dyson::controller::http::HttpController::from_config(config)
+                .map(|controller| Box::new(controller) as Box<dyn Controller>),
+            other => {
+                tracing::warn!(
+                    controller_type = other,
+                    "unknown controller type — skipping"
+                );
+                None
+            }
+        };
+        if let Some(controller) = controller {
+            controllers.push(controller);
+        } else if matches!(config.controller_type.as_str(), "telegram" | "http") {
+            tracing::warn!(
+                controller_type = config.controller_type,
+                "controller config invalid — skipping"
+            );
+        }
+    }
+
+    if controllers.is_empty() {
+        return Err(dyson::error::DysonError::Config(
+            "no valid controllers could be created from the configuration".into(),
+        ));
+    }
+    Ok(controllers)
+}
+
 /// Run `dyson listen`.
 pub async fn run(
     config: Option<PathBuf>,
@@ -50,54 +95,9 @@ pub async fn run(
     // shared across all controllers and surviving provider switches.
     let registry = std::sync::Arc::new(dyson::controller::ClientRegistry::new(&settings, None));
 
-    // Build controllers.
-    let mut controllers: Vec<Box<dyn Controller>> = Vec::new();
-
-    if settings.controllers.is_empty() {
-        return Err(dyson::error::DysonError::Config(
-            "no controllers configured.  Add a controller to the \"controllers\" array in dyson.json.\n\
-             Use 'dyson run \"prompt\"' for single-shot mode.".into()
-        ));
-    } else {
-        for config in &settings.controllers {
-            match config.controller_type.as_str() {
-                "terminal" => {
-                    controllers.push(Box::new(dyson::controller::terminal::TerminalController));
-                }
-                "telegram" => {
-                    if let Some(ctrl) =
-                        dyson::controller::telegram::TelegramController::from_config(config)
-                    {
-                        controllers.push(Box::new(ctrl));
-                    } else {
-                        tracing::warn!("telegram controller missing bot_token — skipping");
-                    }
-                }
-                "http" => {
-                    if let Some(ctrl) = dyson::controller::http::HttpController::from_config(config)
-                    {
-                        controllers.push(Box::new(ctrl));
-                    } else {
-                        tracing::warn!("http controller config invalid — skipping");
-                    }
-                }
-                other => {
-                    tracing::warn!(
-                        controller_type = other,
-                        "unknown controller type — skipping"
-                    );
-                }
-            }
-        }
-    }
+    let controllers = build_controllers(&settings)?;
 
     // Run controllers, racing against shutdown signals (SIGINT / SIGTERM).
-    if controllers.is_empty() {
-        return Err(dyson::error::DysonError::Config(
-            "no valid controllers could be created from the configuration".into(),
-        ));
-    }
-
     // Install the program-level hot-reload broadcast so controllers
     // can subscribe for live settings updates instead of each spinning
     // up its own file watcher.  The companion task below does the

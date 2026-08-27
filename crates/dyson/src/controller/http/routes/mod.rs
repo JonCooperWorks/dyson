@@ -62,6 +62,90 @@ pub(super) async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<Htt
     resp
 }
 
+async fn mint_sse_ticket(headers: &hyper::HeaderMap, state: &HttpState) -> Resp {
+    let info = match state.auth.validate_request(headers).await {
+        Ok(info) => info,
+        Err(_) => return unauthorized(state),
+    };
+    let identity = info.metadata.get("sub").cloned().unwrap_or(info.identity);
+    let ticket = state.mint_sse_ticket(&identity);
+    let mut response = super::responses::json_ok(&serde_json::json!({ "expires_in": 30 }));
+    let cookie = build_sse_ticket_cookie(&ticket, state.tls_enabled, 30);
+    if let Ok(value) = hyper::header::HeaderValue::from_str(&cookie) {
+        response
+            .headers_mut()
+            .append(hyper::header::SET_COOKIE, value);
+    }
+    response
+}
+
+fn loopback_host_allowed(headers: &hyper::HeaderMap) -> bool {
+    let host = headers
+        .get(hyper::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let host = host
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(host)
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    matches!(host, "127.0.0.1" | "::1" | "localhost")
+}
+
+fn consume_sse_ticket(
+    req: &Request<hyper::body::Incoming>,
+    state: &HttpState,
+    method: &Method,
+    segs: &[&str],
+) -> bool {
+    if method != Method::GET
+        || segs.last() != Some(&"events")
+        || req.headers().contains_key("authorization")
+    {
+        return false;
+    }
+    let Some(ticket) = extract_sse_ticket_cookie(req.headers()) else {
+        return false;
+    };
+    let Some(identity) = state.consume_sse_ticket(&ticket) else {
+        return false;
+    };
+    tracing::debug!(identity, "SSE ticket consumed (cookie)");
+    true
+}
+
+async fn authorize_route(
+    req: &Request<hyper::body::Incoming>,
+    state: &HttpState,
+    method: &Method,
+    segs: &[&str],
+) -> Option<Resp> {
+    if segs.first() != Some(&"api") {
+        return None;
+    }
+    if state.loopback_only_host_check && !loopback_host_allowed(req.headers()) {
+        return Some(misdirected_request());
+    }
+    let ticket_authorized = consume_sse_ticket(req, state, method, segs);
+    if !ticket_authorized && state.auth.validate_request(req.headers()).await.is_err() {
+        return Some(unauthorized(state));
+    }
+    let state_changing = matches!(
+        method,
+        &Method::POST | &Method::DELETE | &Method::PUT | &Method::PATCH
+    );
+    if state_changing
+        && !matches!(segs, ["api", "auth", "sse-ticket"])
+        && !req
+            .headers()
+            .contains_key(dyson_common::contracts::DYSON_CSRF_HEADER)
+    {
+        return Some(super::responses::bad_request("missing X-Dyson-CSRF header"));
+    }
+    None
+}
+
 async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) -> Resp {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -115,27 +199,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         (&method, segs.as_slice()),
         (&Method::POST, ["api", "auth", "sse-ticket"])
     ) {
-        match state.auth.validate_request(req.headers()).await {
-            Ok(info) => {
-                // Bind the ticket to the most specific identity the
-                // auth chain produced.  For OIDC that's the `sub`
-                // claim (in metadata); other schemes only carry the
-                // scheme tag in `identity` (e.g. `bearer`).  The
-                // ticket consumer reuses this when the controller
-                // is locked to a single user via `allowed_identity`.
-                let identity = info.metadata.get("sub").cloned().unwrap_or(info.identity);
-                let ticket = state.mint_sse_ticket(&identity);
-                let mut resp = super::responses::json_ok(&serde_json::json!({
-                    "expires_in": 30,
-                }));
-                let cookie = build_sse_ticket_cookie(&ticket, state.tls_enabled, 30);
-                if let Ok(value) = hyper::header::HeaderValue::from_str(&cookie) {
-                    resp.headers_mut().append(hyper::header::SET_COOKIE, value);
-                }
-                return resp;
-            }
-            Err(_) => return unauthorized(&state),
-        }
+        return mint_sse_ticket(req.headers(), &state).await;
     }
 
     if matches!(
@@ -156,138 +220,25 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     // request.  Falls through to the header path otherwise so k6 /
     // curl-wrapper clients can still authenticate with a real
     // Authorization header on the SSE open.
-    let is_events = segs.last() == Some(&"events") && segs.first() == Some(&"api");
-    let mut ticket_authorized = false;
-    if is_events
-        && method == Method::GET
-        && !req.headers().contains_key("authorization")
-        && let Some(ticket) = extract_sse_ticket_cookie(req.headers())
-        && let Some(identity) = state.consume_sse_ticket(&ticket)
-    {
-        tracing::debug!(identity, "SSE ticket consumed (cookie)");
-        ticket_authorized = true;
+    if let Some(response) = authorize_route(&req, &state, &method, &segs).await {
+        return response;
     }
 
-    // DNS-rebinding gate.  Enabled only when the controller bound to
-    // a loopback address with `DangerousNoAuth` — that pairing is the
-    // attacker's leverage (a webpage on `evil.example` that resolves
-    // to 127.0.0.1 can otherwise hit the API with no credential).
-    // Reverse-proxy and bearer/OIDC deployments stay off the gate so
-    // the public Host the proxy presents doesn't trip a 421.
-    if state.loopback_only_host_check && is_api_path {
-        let host_value = req
-            .headers()
-            .get(hyper::header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        // Strip port and bracket — `127.0.0.1:7878` and `[::1]:7878`
-        // both reduce to a bare host; we then match against the
-        // loopback allowlist.
-        let host_part = host_value
-            .rsplit_once(':')
-            .map(|(h, _)| h)
-            .unwrap_or(host_value)
-            .trim_start_matches('[')
-            .trim_end_matches(']');
-        // Empty Host is HTTP/1.0 / raw-socket only (browsers always set
-        // it).  Allowing it punched a hole in the gate for any client
-        // willing to drop down to a raw socket, with no legitimate use
-        // case in a loopback-only deployment.  Reject explicitly.
-        let host_ok = matches!(host_part, "127.0.0.1" | "::1" | "localhost");
-        if !host_ok {
-            return misdirected_request();
-        }
-    }
+    dispatch_route(req, state, &method, &path, &segs, is_api_path).await
+}
 
-    // Inbound auth on every `/api/*`.  Static-shell paths (`/`,
-    // `/assets/*`) are exempt so the UI can load before presenting a
-    // credential.  SSE endpoints can't send headers from the browser,
-    // so the SPA exchanges its bearer for a one-shot ticket above and
-    // we skip the regular gate when it consumed.
-    if is_api_path
-        && !ticket_authorized
-        && state.auth.validate_request(req.headers()).await.is_err()
-    {
-        return unauthorized(&state);
-    }
-
-    // CSRF gate: every state-changing `/api/*` request must carry the
-    // `X-Dyson-CSRF` custom header.  Browsers can't set custom headers
-    // cross-origin without firing a CORS preflight, and the controller
-    // never returns permissive `Access-Control-Allow-*` headers — so a
-    // forged POST/DELETE/PUT/PATCH from `evil.example` is blocked at
-    // the preflight, and a same-origin call from the SPA passes
-    // because `client.js` stamps the header on `_authedFetch`.  This
-    // closes the gap where a stored bearer / OIDC cookie would
-    // otherwise be auto-attached to a cross-site form submit.
-    //
-    // Two carve-outs:
-    //   * `/api/auth/sse-ticket` is already gated by a bearer above
-    //     and is the bootstrap that the SPA's CSRF wrapper depends
-    //     on; a CSRF check here would chicken-and-egg the first call.
-    //   * SSE ticket consumption (handled above as `ticket_authorized`)
-    //     never lands here for state-changing methods.
-    let is_state_changing = matches!(
-        &method,
-        &Method::POST | &Method::DELETE | &Method::PUT | &Method::PATCH,
-    );
-    let is_csrf_exempt = matches!(segs.as_slice(), ["api", "auth", "sse-ticket"]);
-    if is_api_path
-        && is_state_changing
-        && !is_csrf_exempt
-        && !req
-            .headers()
-            .contains_key(dyson_common::contracts::DYSON_CSRF_HEADER)
-    {
-        return super::responses::bad_request("missing X-Dyson-CSRF header");
-    }
-
-    match (&method, segs.as_slice()) {
+async fn dispatch_route(
+    req: Request<hyper::body::Incoming>,
+    state: Arc<HttpState>,
+    method: &Method,
+    path: &str,
+    segs: &[&str],
+    is_api_path: bool,
+) -> Resp {
+    match (method, segs) {
         // ─── conversations ─────────────────────────────────────────────
-        (&Method::GET, ["api", "conversations"]) => conversations::list(&state).await,
-        (&Method::POST, ["api", "conversations"]) => conversations::create(req, &state).await,
-        (&Method::GET, ["api", "conversations", id]) => conversations::get(&state, id).await,
-        (&Method::DELETE, ["api", "conversations", id]) => conversations::delete(&state, id).await,
-        (&Method::POST, ["api", "conversations", id, "turn"]) => {
-            turns::post(req, Arc::clone(&state), id).await
-        }
-        (&Method::POST, ["api", "conversations", id, "cancel"]) => {
-            conversations::cancel(&state, id).await
-        }
-        (&Method::GET, ["api", "conversations", id, "events"]) => {
-            sse::events(&state, id, &req).await
-        }
-        (&Method::GET, ["api", "conversations", id, "files", file_id]) => {
-            let id = match url_decode_strict(id) {
-                Some(id) => id,
-                None => return not_found(),
-            };
-            let file_id = match url_decode_strict(file_id) {
-                Some(id) => id,
-                None => return not_found(),
-            };
-            files::get_for_chat(&state, &id, &file_id).await
-        }
-        (&Method::GET, ["api", "conversations", id, "feedback"]) => feedback::get(&state, id).await,
-        (&Method::POST, ["api", "conversations", id, "feedback"]) => {
-            feedback::post(req, &state, id).await
-        }
-        (&Method::GET, ["api", "conversations", id, "artefacts"]) => {
-            artefacts::list(&state, id).await
-        }
-        (&Method::GET, ["api", "conversations", id, "artefacts", artefact_id]) => {
-            let id = match url_decode_strict(id) {
-                Some(id) => id,
-                None => return not_found(),
-            };
-            let artefact_id = match url_decode_strict(artefact_id) {
-                Some(id) => id,
-                None => return not_found(),
-            };
-            artefacts::get_for_chat(&state, &id, &artefact_id).await
-        }
-        (&Method::GET, ["api", "conversations", id, "export"]) => {
-            artefacts::export(&state, id).await
+        (_, ["api", "conversations", rest @ ..]) => {
+            dispatch_conversations(req, state, method, rest).await
         }
 
         // ─── providers / model / mind / activity ───────────────────────
@@ -303,26 +254,8 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         (&Method::GET, ["api", "mcp", "servers"]) => mcp::list_servers(&state).await,
 
         (&Method::GET, ["api", "providers"]) => providers::list(&state),
-        (&Method::GET, ["api", "provider-auth", "codex"]) => {
-            provider_auth::status(&state, provider_auth::SubscriptionProvider::Codex).await
-        }
-        (&Method::POST, ["api", "provider-auth", "codex"]) => {
-            provider_auth::start(&state, provider_auth::SubscriptionProvider::Codex).await
-        }
-        (&Method::DELETE, ["api", "provider-auth", "codex"]) => {
-            provider_auth::forget(&state, provider_auth::SubscriptionProvider::Codex).await
-        }
-        (&Method::GET, ["api", "provider-auth", "claude"]) => {
-            provider_auth::status(&state, provider_auth::SubscriptionProvider::Claude).await
-        }
-        (&Method::POST, ["api", "provider-auth", "claude"]) => {
-            provider_auth::start(&state, provider_auth::SubscriptionProvider::Claude).await
-        }
-        (&Method::DELETE, ["api", "provider-auth", "claude"]) => {
-            provider_auth::forget(&state, provider_auth::SubscriptionProvider::Claude).await
-        }
-        (&Method::POST, ["api", "provider-auth", "claude", "complete"]) => {
-            provider_auth::complete(req, &state, provider_auth::SubscriptionProvider::Claude).await
+        (_, ["api", "provider-auth", rest @ ..]) => {
+            dispatch_provider_auth(req, &state, method, rest).await
         }
         (&Method::GET, ["api", "models"]) => models::list(&state).await,
         (&Method::GET, ["api", "commands"]) => commands::get(&state).await,
@@ -344,27 +277,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         // freezes the dyson process's env at warmup time, so without
         // this every instance shows "warmup-placeholder" forever.
         // See routes/admin.rs.
-        (&Method::POST, ["api", "admin", "configure"]) => admin::post(req, &state).await,
-        (&Method::POST, ["api", "admin", "state", "file"]) => {
-            admin::post_state_file(req, &state).await
-        }
-        (&Method::POST, ["api", "admin", "skills", "install"]) => {
-            admin::post_skill_install(req, &state).await
-        }
-        (&Method::DELETE, ["api", "admin", "skills", skill]) => match url_decode_strict(skill) {
-            Some(skill) => admin::delete_skill(req, &state, &skill).await,
-            None => not_found(),
-        },
-        (&Method::GET, ["api", "admin", "idle"]) => admin::get_idle(req, &state).await,
-        (&Method::POST, ["api", "admin", "quiesce"]) => admin::post_quiesce(req, &state).await,
-        (&Method::POST, ["api", "admin", "unquiesce"]) => admin::post_unquiesce(req, &state).await,
-        // Diagnostic — returns the live skill / tool inventory so an
-        // operator can verify which MCP servers actually loaded.
-        // Same configure-secret auth as the POST sibling.
-        (&Method::GET, ["api", "admin", "skills"]) => admin::get_skills(req, &state).await,
-        (&Method::POST, ["api", "admin", "cost-backfill"]) => {
-            admin::post_cost_backfill(req, &state).await
-        }
+        (_, ["api", "admin", rest @ ..]) => dispatch_admin(req, &state, method, rest).await,
 
         // ─── files & artefacts ─────────────────────────────────────────
         // Strict decode here — these ids feed `safe_store_id` which
@@ -400,8 +313,90 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         }
 
         // ─── static shell + fallback ───────────────────────────────────
-        (&Method::GET, _) => static_assets::serve(&path).await,
+        (&Method::GET, _) => static_assets::serve(path).await,
         _ if is_api_path => method_not_allowed(),
+        _ => method_not_allowed(),
+    }
+}
+
+async fn dispatch_conversations(
+    req: Request<hyper::body::Incoming>,
+    state: Arc<HttpState>,
+    method: &Method,
+    rest: &[&str],
+) -> Resp {
+    match (method, rest) {
+        (&Method::GET, []) => conversations::list(&state).await,
+        (&Method::POST, []) => conversations::create(req, &state).await,
+        (&Method::GET, [id]) => conversations::get(&state, id).await,
+        (&Method::DELETE, [id]) => conversations::delete(&state, id).await,
+        (&Method::POST, [id, "turn"]) => turns::post(req, state, id).await,
+        (&Method::POST, [id, "cancel"]) => conversations::cancel(&state, id).await,
+        (&Method::GET, [id, "events"]) => sse::events(&state, id, &req).await,
+        (&Method::GET, [id, "files", file_id]) => {
+            let (Some(id), Some(file_id)) = (url_decode_strict(id), url_decode_strict(file_id))
+            else {
+                return not_found();
+            };
+            files::get_for_chat(&state, &id, &file_id).await
+        }
+        (&Method::GET, [id, "feedback"]) => feedback::get(&state, id).await,
+        (&Method::POST, [id, "feedback"]) => feedback::post(req, &state, id).await,
+        (&Method::GET, [id, "artefacts"]) => artefacts::list(&state, id).await,
+        (&Method::GET, [id, "artefacts", artefact_id]) => {
+            let (Some(id), Some(artefact_id)) =
+                (url_decode_strict(id), url_decode_strict(artefact_id))
+            else {
+                return not_found();
+            };
+            artefacts::get_for_chat(&state, &id, &artefact_id).await
+        }
+        (&Method::GET, [id, "export"]) => artefacts::export(&state, id).await,
+        _ => method_not_allowed(),
+    }
+}
+
+async fn dispatch_provider_auth(
+    req: Request<hyper::body::Incoming>,
+    state: &HttpState,
+    method: &Method,
+    rest: &[&str],
+) -> Resp {
+    let provider = match rest.first() {
+        Some(&"codex") => provider_auth::SubscriptionProvider::Codex,
+        Some(&"claude") => provider_auth::SubscriptionProvider::Claude,
+        _ => return method_not_allowed(),
+    };
+    match (method, rest) {
+        (&Method::GET, [_]) => provider_auth::status(state, provider).await,
+        (&Method::POST, [_]) => provider_auth::start(state, provider).await,
+        (&Method::DELETE, [_]) => provider_auth::forget(state, provider).await,
+        (&Method::POST, ["claude", "complete"]) => {
+            provider_auth::complete(req, state, provider).await
+        }
+        _ => method_not_allowed(),
+    }
+}
+
+async fn dispatch_admin(
+    req: Request<hyper::body::Incoming>,
+    state: &HttpState,
+    method: &Method,
+    rest: &[&str],
+) -> Resp {
+    match (method, rest) {
+        (&Method::POST, ["configure"]) => admin::post(req, state).await,
+        (&Method::POST, ["state", "file"]) => admin::post_state_file(req, state).await,
+        (&Method::POST, ["skills", "install"]) => admin::post_skill_install(req, state).await,
+        (&Method::DELETE, ["skills", skill]) => match url_decode_strict(skill) {
+            Some(skill) => admin::delete_skill(req, state, &skill).await,
+            None => not_found(),
+        },
+        (&Method::GET, ["idle"]) => admin::get_idle(req, state).await,
+        (&Method::POST, ["quiesce"]) => admin::post_quiesce(req, state).await,
+        (&Method::POST, ["unquiesce"]) => admin::post_unquiesce(req, state).await,
+        (&Method::GET, ["skills"]) => admin::get_skills(req, state).await,
+        (&Method::POST, ["cost-backfill"]) => admin::post_cost_backfill(req, state).await,
         _ => method_not_allowed(),
     }
 }

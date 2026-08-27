@@ -12,3 +12,6 @@ dyson-harness = { path = "../dyson-harness" }
 serde_json.workspace = true
 tokio.workspace = true
 tracing = "0.1"
+
+[lints]
+workspace = true

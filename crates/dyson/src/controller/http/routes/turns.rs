@@ -158,6 +158,100 @@ fn apply_model_selection_to_agent(
     Ok(())
 }
 
+fn reject_oversized_turn(req: &Request<hyper::body::Incoming>) -> Option<Resp> {
+    let len = req
+        .headers()
+        .get("content-length")?
+        .to_str()
+        .ok()?
+        .parse::<usize>()
+        .ok()?;
+    (len > MAX_TURN_BODY).then(|| {
+        bad_request(&format!(
+            "request body too large ({len} bytes; max {MAX_TURN_BODY})"
+        ))
+    })
+}
+
+fn decode_attachments(body: &TurnBody) -> Result<Vec<crate::media::Attachment>, String> {
+    body.attachments
+        .iter()
+        .map(|attachment| {
+            base64::engine::general_purpose::STANDARD
+                .decode(attachment.data_base64.as_bytes())
+                .map(|data| crate::media::Attachment {
+                    data,
+                    mime_type: attachment.mime_type.clone(),
+                    file_name: attachment.name.clone(),
+                })
+                .map_err(|error| {
+                    format!(
+                        "attachment '{}' base64 decode failed: {error}",
+                        attachment.name.as_deref().unwrap_or("<unnamed>")
+                    )
+                })
+        })
+        .collect()
+}
+
+async fn clear_chat(state: &HttpState, handle: &ChatHandle, id: &str) -> Resp {
+    if let Some(agent) = handle.agent.lock().await.as_mut() {
+        agent.clear();
+    }
+    if let Ok(mut titles) = state.titles.lock() {
+        titles.remove(id);
+    }
+    handle.set_title(PLACEHOLDER_TITLE.to_string());
+    if let Some(history) = state.history.as_ref() {
+        if let Err(error) = history.rotate(id) {
+            tracing::warn!(error = %error, chat_id = %id, "failed to rotate chat history");
+        }
+        if let Err(error) = history.remove_title(id) {
+            tracing::warn!(error = %error, chat_id = %id, "failed to remove chat title");
+        }
+        if let Err(error) = history.save(id, &[]) {
+            tracing::warn!(error = %error, chat_id = %id, "failed to seed empty chat after rotate");
+        }
+    }
+    handle.clear_queued().await;
+    handle.emit(SseEvent::Title {
+        title: PLACEHOLDER_TITLE.to_string(),
+    });
+    handle.emit(SseEvent::Done);
+    handle.reset_replay();
+    json_ok(&serde_json::json!({ "ok": true, "cleared": true }))
+}
+
+async fn enqueue_turn(handle: &ChatHandle, body: TurnBody) -> Resp {
+    let queued = super::super::state::QueuedTurn {
+        prompt: body.prompt,
+        provider: body.provider,
+        model: body.model,
+        queue_mode: body.queue_mode,
+        attachments: body
+            .attachments
+            .into_iter()
+            .map(|attachment| super::super::state::QueuedAttachment {
+                mime_type: attachment.mime_type,
+                name: attachment.name,
+                data_base64: attachment.data_base64,
+            })
+            .collect(),
+    };
+    match handle.enqueue_turn(queued).await {
+        super::super::state::EnqueueResult::Queued { position } => {
+            json_ok(&serde_json::json!({"ok": true, "queued": true, "position": position}))
+        }
+        super::super::state::EnqueueResult::Full => Response::builder()
+            .status(StatusCode::CONFLICT)
+            .header("Content-Type", "application/json")
+            .body(boxed(Bytes::from_static(
+                br#"{"error":"chat queue is full"}"#,
+            )))
+            .unwrap(),
+    }
+}
+
 pub(super) async fn post(
     req: Request<hyper::body::Incoming>,
     state: Arc<HttpState>,
@@ -165,13 +259,8 @@ pub(super) async fn post(
 ) -> Resp {
     // Reject oversized bodies before buffering — a 100MB upload would
     // pin a request worker and waste memory.
-    if let Some(cl) = req.headers().get("content-length")
-        && let Some(len) = cl.to_str().ok().and_then(|s| s.parse::<usize>().ok())
-        && len > MAX_TURN_BODY
-    {
-        return bad_request(&format!(
-            "request body too large ({len} bytes; max {MAX_TURN_BODY})"
-        ));
+    if let Some(response) = reject_oversized_turn(&req) {
+        return response;
     }
     let body: TurnBody = match read_json_capped(req, MAX_TURN_BODY).await {
         Ok(b) => b,
@@ -186,22 +275,10 @@ pub(super) async fn post(
     // Decode attachments up front so a malformed base64 fails the
     // request before we kick off the agent (clean rejection > orphan
     // SSE done event).
-    let mut decoded: Vec<crate::media::Attachment> = Vec::with_capacity(body.attachments.len());
-    for a in &body.attachments {
-        match base64::engine::general_purpose::STANDARD.decode(a.data_base64.as_bytes()) {
-            Ok(bytes) => decoded.push(crate::media::Attachment {
-                data: bytes,
-                mime_type: a.mime_type.clone(),
-                file_name: a.name.clone(),
-            }),
-            Err(e) => {
-                return bad_request(&format!(
-                    "attachment '{}' base64 decode failed: {e}",
-                    a.name.as_deref().unwrap_or("<unnamed>")
-                ));
-            }
-        }
-    }
+    let decoded = match decode_attachments(&body) {
+        Ok(attachments) => attachments,
+        Err(error) => return bad_request(&error),
+    };
 
     let handle = match state.chats.lock().await.get(id).cloned() {
         Some(h) => h,
@@ -222,45 +299,7 @@ pub(super) async fn post(
     // commands (`/compact`, `/model`) require an LLM call or have
     // dedicated endpoints, so they continue to fall through.
     if body.prompt.trim() == "/clear" && decoded.is_empty() {
-        if let Some(agent) = handle.agent.lock().await.as_mut() {
-            agent.clear();
-        }
-        // Title cache is keyed by first-user-text — a /clear wipes that,
-        // so drop the cached entry to force the next list call to
-        // rehydrate from the (now empty) transcript.
-        if let Ok(mut t) = state.titles.lock() {
-            t.remove(id);
-        }
-        handle.set_title(PLACEHOLDER_TITLE.to_string());
-        if let Some(h) = state.history.as_ref() {
-            if let Err(e) = h.rotate(id) {
-                tracing::warn!(error = %e, chat_id = %id, "failed to rotate chat history");
-            }
-            if let Err(e) = h.remove_title(id) {
-                tracing::warn!(error = %e, chat_id = %id, "failed to remove chat title");
-            }
-            // Re-create the current file as an empty transcript so the
-            // chat stays visible across restarts.  Without this,
-            // DiskChatHistory::list() skips it (no current file, only
-            // archives) and the sidebar loses the chat — along with the
-            // artefacts filtered by its id.
-            if let Err(e) = h.save(id, &[]) {
-                tracing::warn!(error = %e, chat_id = %id, "failed to seed empty chat after rotate");
-            }
-        }
-        // /clear also drops anything queued — the user reset the chat
-        // and would not expect prompts they typed during a previous run
-        // to resurrect.  Cancel does NOT drain (queued messages there
-        // are independent intentions); only /clear wipes them.
-        handle.clear_queued().await;
-        handle.emit(SseEvent::Title {
-            title: PLACEHOLDER_TITLE.to_string(),
-        });
-        handle.emit(SseEvent::Done);
-        // /clear ends any in-flight stream — wipe the replay ring so a
-        // subsequent send doesn't see this turn's events.
-        handle.reset_replay();
-        return json_ok(&serde_json::json!({ "ok": true, "cleared": true }));
+        return clear_chat(&state, &handle, id).await;
     }
 
     if handle.busy.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -270,33 +309,7 @@ pub(super) async fn post(
         // coalesced agent.run(); if more arrive during that run, they
         // queue again and the loop repeats.  Persisted to disk so a
         // restart mid-turn doesn't drop messages the user typed.
-        let queued = super::super::state::QueuedTurn {
-            prompt: body.prompt,
-            provider: body.provider,
-            model: body.model,
-            queue_mode: body.queue_mode,
-            attachments: body
-                .attachments
-                .into_iter()
-                .map(|a| super::super::state::QueuedAttachment {
-                    mime_type: a.mime_type,
-                    name: a.name,
-                    data_base64: a.data_base64,
-                })
-                .collect(),
-        };
-        return match handle.enqueue_turn(queued).await {
-            super::super::state::EnqueueResult::Queued { position } => {
-                json_ok(&serde_json::json!({"ok": true, "queued": true, "position": position}))
-            }
-            super::super::state::EnqueueResult::Full => Response::builder()
-                .status(StatusCode::CONFLICT)
-                .header("Content-Type", "application/json")
-                .body(boxed(Bytes::from_static(
-                    br#"{"error":"chat queue is full"}"#,
-                )))
-                .unwrap(),
-        };
+        return enqueue_turn(&handle, body).await;
     }
     if state.is_quiesced() {
         handle

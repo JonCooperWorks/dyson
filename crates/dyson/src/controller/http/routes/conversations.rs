@@ -178,6 +178,130 @@ fn validate_existing_chat_id(id: &str) -> Result<(), &'static str> {
     }
 }
 
+async fn existing_requested_chat(
+    state: &HttpState,
+    id: &str,
+    requested_title: Option<&str>,
+) -> Option<Resp> {
+    if let Some(title) = state
+        .chats
+        .lock()
+        .await
+        .get(id)
+        .map(|handle| handle.title())
+    {
+        return Some(json_ok(&serde_json::json!({ "id": id, "title": title })));
+    }
+
+    let persisted = state.history.as_ref().is_some_and(|history| {
+        history
+            .list()
+            .map(|ids| ids.iter().any(|existing| existing == id))
+            .unwrap_or_else(|error| {
+                tracing::warn!(error = %error, chat_id = %id, "failed to list chat history for requested id");
+                false
+            })
+    });
+    if !persisted {
+        return None;
+    }
+
+    let title = requested_title.map(str::to_owned).unwrap_or_else(|| {
+        state
+            .history
+            .as_ref()
+            .and_then(|history| history.load_title(id).ok().flatten())
+            .or_else(|| {
+                state
+                    .history
+                    .as_ref()
+                    .and_then(|history| history.load(id).ok())
+                    .and_then(|messages| first_user_text(&messages))
+            })
+            .unwrap_or_else(|| id.to_string())
+    });
+    let handle = Arc::new(ChatHandle::new(
+        id.to_string(),
+        title.clone(),
+        state.data_dir.as_deref(),
+    ));
+    handle.hydrate_queue_from_disk().await;
+    {
+        let mut chats = state.chats.lock().await;
+        if let Some(existing) = chats.get(id) {
+            return Some(json_ok(
+                &serde_json::json!({ "id": id, "title": existing.title() }),
+            ));
+        }
+        chats.insert(id.to_string(), handle);
+    }
+    let mut order = state.order.lock().await;
+    if !order.iter().any(|existing| existing == id) {
+        order.insert(0, id.to_string());
+    }
+    Some(json_ok(&serde_json::json!({ "id": id, "title": title })))
+}
+
+async fn rotate_previous_chat(state: &HttpState, id: &str) -> Result<(), Resp> {
+    if let Err(error) = validate_existing_chat_id(id) {
+        return Err(bad_request(error));
+    }
+    if let Some(handle) = state.chats.lock().await.get(id).cloned() {
+        if let Some(agent) = handle.agent.lock().await.as_mut() {
+            agent.clear();
+        }
+        handle.set_title("New conversation".to_string());
+        handle.emit(SseEvent::Title {
+            title: "New conversation".to_string(),
+        });
+    }
+    if let Ok(mut titles) = state.titles.lock() {
+        titles.remove(id);
+    }
+    if let Some(history) = state.history.as_ref() {
+        if let Err(error) = history.rotate(id) {
+            tracing::warn!(error = %error, chat_id = %id, "failed to rotate previous chat");
+        }
+        if let Err(error) = history.remove_title(id) {
+            tracing::warn!(error = %error, chat_id = %id, "failed to remove previous chat title");
+        }
+        if let Err(error) = history.save(id, &[]) {
+            tracing::warn!(error = %error, chat_id = %id, "failed to seed empty chat after rotate");
+        }
+    }
+    Ok(())
+}
+
+async fn insert_new_chat(state: &HttpState, id: String, title: String) -> Resp {
+    let handle = Arc::new(ChatHandle::new(
+        id.clone(),
+        title.clone(),
+        state.data_dir.as_deref(),
+    ));
+    {
+        let mut chats = state.chats.lock().await;
+        if let Some(existing) = chats.get(&id) {
+            return json_ok(&serde_json::json!({ "id": id, "title": existing.title() }));
+        }
+        chats.insert(id.clone(), handle);
+    }
+    let mut order = state.order.lock().await;
+    if !order.iter().any(|existing| existing == &id) {
+        order.insert(0, id.clone());
+    }
+    drop(order);
+
+    if let Some(history) = state.history.as_ref() {
+        if let Err(error) = history.save(&id, &[]) {
+            tracing::warn!(error = %error, chat_id = %id, "failed to persist new chat");
+        }
+        if let Err(error) = history.save_title(&id, &title) {
+            tracing::warn!(error = %error, chat_id = %id, "failed to persist chat title");
+        }
+    }
+    json_ok(&serde_json::json!({ "id": id, "title": title }))
+}
+
 pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
     let body: CreateChatBody = match read_json_capped(req, MAX_SMALL_BODY).await {
         Ok(b) => b,
@@ -197,60 +321,10 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
     // that idempotent: if the chat is already in memory, or already has
     // a current transcript on disk after a controller restart, return it
     // instead of minting a one-shot chat or overwriting its transcript.
-    if let Some(id) = requested_id.as_deref() {
-        if let Some(title) = {
-            let chats = state.chats.lock().await;
-            chats.get(id).map(|h| h.title())
-        } {
-            return json_ok(&serde_json::json!({ "id": id, "title": title }));
-        }
-
-        let persisted = match state.history.as_ref() {
-            Some(h) => match h.list() {
-                Ok(ids) => ids.iter().any(|existing| existing == id),
-                Err(e) => {
-                    tracing::warn!(error = %e, chat_id = %id, "failed to list chat history for requested id");
-                    false
-                }
-            },
-            None => false,
-        };
-        if persisted {
-            let title = body.title.clone().unwrap_or_else(|| {
-                state
-                    .history
-                    .as_ref()
-                    .and_then(|h| h.load_title(id).ok().flatten())
-                    .or_else(|| {
-                        state
-                            .history
-                            .as_ref()
-                            .and_then(|h| h.load(id).ok())
-                            .and_then(|msgs| first_user_text(&msgs))
-                    })
-                    .unwrap_or_else(|| id.to_string())
-            });
-            let handle = Arc::new(ChatHandle::new(
-                id.to_string(),
-                title.clone(),
-                state.data_dir.as_deref(),
-            ));
-            handle.hydrate_queue_from_disk().await;
-            {
-                let mut chats = state.chats.lock().await;
-                if let Some(existing) = chats.get(id) {
-                    return json_ok(&serde_json::json!({ "id": id, "title": existing.title() }));
-                }
-                chats.insert(id.to_string(), handle);
-            }
-            {
-                let mut order = state.order.lock().await;
-                if !order.iter().any(|existing| existing == id) {
-                    order.insert(0, id.to_string());
-                }
-            }
-            return json_ok(&serde_json::json!({ "id": id, "title": title }));
-        }
+    if let Some(id) = requested_id.as_deref()
+        && let Some(response) = existing_requested_chat(state, id, body.title.as_deref()).await
+    {
+        return response;
     }
 
     // Rotate the caller-supplied previous chat first so "+ New
@@ -259,80 +333,17 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
     // block creation.  The in-memory agent (if any) gets its messages
     // cleared so a future turn on that id doesn't resurrect stale
     // context from the agent cache.
-    if let Some(prev) = body.rotate_previous.as_deref() {
-        if let Err(e) = validate_existing_chat_id(prev) {
-            return bad_request(e);
-        }
-        if let Some(prev_handle) = state.chats.lock().await.get(prev).cloned() {
-            if let Some(agent) = prev_handle.agent.lock().await.as_mut() {
-                agent.clear();
-            }
-            prev_handle.set_title("New conversation".to_string());
-            prev_handle.emit(SseEvent::Title {
-                title: "New conversation".to_string(),
-            });
-        }
-        // The previous chat's first-user-text is gone after rotate —
-        // drop any cached title so the next list call rehydrates.
-        if let Ok(mut t) = state.titles.lock() {
-            t.remove(prev);
-        }
-        if let Some(h) = state.history.as_ref() {
-            if let Err(e) = h.rotate(prev) {
-                tracing::warn!(error = %e, chat_id = %prev, "failed to rotate previous chat");
-            }
-            if let Err(e) = h.remove_title(prev) {
-                tracing::warn!(error = %e, chat_id = %prev, "failed to remove previous chat title");
-            }
-            // Keep the rotated chat visible across restarts by seeding
-            // an empty current file — otherwise `list()` skips it and
-            // the sidebar loses both the chat and its artefacts.
-            if let Err(e) = h.save(prev, &[]) {
-                tracing::warn!(error = %e, chat_id = %prev, "failed to seed empty chat after rotate");
-            }
-        }
+    if let Some(prev) = body.rotate_previous.as_deref()
+        && let Err(response) = rotate_previous_chat(state, prev).await
+    {
+        return response;
     }
     let id = match requested_id {
         Some(id) => id,
         None => state.mint_id().await,
     };
     let title = body.title.unwrap_or_else(|| "New conversation".to_string());
-    let handle = Arc::new(ChatHandle::new(
-        id.clone(),
-        title.clone(),
-        state.data_dir.as_deref(),
-    ));
-    {
-        let mut chats = state.chats.lock().await;
-        if let Some(existing) = chats.get(&id) {
-            return json_ok(&serde_json::json!({ "id": id, "title": existing.title() }));
-        }
-        chats.insert(id.clone(), handle);
-    }
-    // Newest first — push to front so the sidebar shows new chats on top.
-    {
-        let mut order = state.order.lock().await;
-        if !order.iter().any(|existing| existing == &id) {
-            order.insert(0, id.clone());
-        }
-    }
-    // Persist immediately so every conversation lives on disk 1:1 with
-    // the in-memory list.  Without this an empty chat vanishes on
-    // restart — the user would see "1 chat" in the sidebar, restart,
-    // and the chat would be gone because nothing was ever saved.  The
-    // save is best-effort: an IO failure is logged but doesn't fail
-    // creation (the in-memory chat still works for this session).
-    if let Some(h) = state.history.as_ref()
-        && let Err(e) = h.save(&id, &[])
-    {
-        tracing::warn!(error = %e, chat_id = %id, "failed to persist new chat");
-    }
-    if let Some(h) = state.history.as_ref()
-        && let Err(e) = h.save_title(&id, &title)
-    {
-        tracing::warn!(error = %e, chat_id = %id, "failed to persist chat title");
-    }
-    json_ok(&serde_json::json!({ "id": id, "title": title }))
+    insert_new_chat(state, id, title).await
 }
 
 /// Move `id` to the front of the order list.  Called after every turn

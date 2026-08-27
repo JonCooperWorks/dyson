@@ -61,11 +61,9 @@ use self::api::BotApi;
 use self::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, Update};
 use tokio::sync::{Mutex, mpsc};
 
-use dyson_telegram::media::{
-    DocumentKind, DownloadLimits, classify_document, effective_mime,
-};
 #[cfg(test)]
 use dyson_telegram::media::extension_of;
+use dyson_telegram::media::{DocumentKind, DownloadLimits, classify_document, effective_mime};
 use serde::Deserialize;
 
 use crate::config::{ControllerConfig, Settings};
@@ -1283,6 +1281,64 @@ async fn handle_per_chat_command(
 }
 
 /// Run the agent for a message in a background task, with quick-response fallback.
+async fn report_attachment_skips(
+    bot: &BotApi,
+    chat_id: ChatId,
+    text: &str,
+    attachments: &[crate::media::Attachment],
+    skip_reasons: &[String],
+) -> bool {
+    if skip_reasons.is_empty() {
+        return false;
+    }
+    let body = skip_reasons.join("\n");
+    let _ = bot.send_message(chat_id, &body).await;
+    attachments.is_empty() && text.trim().is_empty()
+}
+
+async fn run_telegram_turn(
+    agent: &mut crate::agent::Agent,
+    output: &mut TelegramOutput,
+    settings: &Settings,
+    text: &str,
+    attachments: Vec<crate::media::Attachment>,
+) -> crate::Result<String> {
+    match super::slash::dispatch_executable(agent, output, settings, text, !attachments.is_empty())
+        .await?
+    {
+        super::slash::SlashDispatch::Handled(_) => Ok(String::new()),
+        super::slash::SlashDispatch::NotSlash | super::slash::SlashDispatch::BuiltinOrUnhandled => {
+            if attachments.is_empty() {
+                agent.run(text, output).await
+            } else {
+                agent.run_with_attachments(text, attachments, output).await
+            }
+        }
+    }
+}
+
+async fn record_telegram_turn(
+    entry: &ChatEntry,
+    chat_store: &dyn crate::chat_history::ChatHistory,
+    chat_key: &str,
+    messages: Vec<crate::message::Message>,
+    sent_ids: &[types::MessageId],
+) {
+    if let Some(turn_index) = messages
+        .iter()
+        .rposition(|message| message.role == crate::message::Role::Assistant)
+    {
+        let mut id_map = entry.message_id_map.write().await;
+        for message_id in sent_ids {
+            id_map.insert(message_id.0, turn_index);
+        }
+    }
+    if let Err(error) = chat_store.save(chat_key, &messages) {
+        tracing::error!(error = %error, "failed to save chat history");
+    }
+    *entry.messages_snapshot.write().await = messages;
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_agent_for_message(
     bot: BotApi,
@@ -1315,18 +1371,8 @@ async fn run_agent_for_message(
     // If the user only sent unsupported content (e.g. a binary document with
     // no caption) and nothing else to work with, reply with the skip reasons
     // and bail out before invoking the agent.
-    if attachments.is_empty() && text.trim().is_empty() && !skip_reasons.is_empty() {
-        let body = skip_reasons.join("\n");
-        let _ = bot.send_message(chat_id, &body).await;
+    if report_attachment_skips(&bot, chat_id, &text, &attachments, &skip_reasons).await {
         return;
-    }
-
-    // If we did successfully attach something (or have text to respond to),
-    // still surface any skip reasons up-front so the user knows their binary
-    // was ignored.  One short message, then the agent runs as normal.
-    if !skip_reasons.is_empty() {
-        let body = skip_reasons.join("\n");
-        let _ = bot.send_message(chat_id, &body).await;
     }
 
     let agent = ca.agent.as_mut().expect("checked above");
@@ -1344,29 +1390,7 @@ async fn run_agent_for_message(
 
     let mut output = TelegramOutput::new(bot.clone(), chat_id, !text.is_empty());
 
-    let result = match super::slash::dispatch_executable(
-        agent,
-        &mut output,
-        &settings,
-        &text,
-        !attachments.is_empty(),
-    )
-    .await
-    {
-        Ok(super::slash::SlashDispatch::Handled(_)) => Ok(String::new()),
-        Ok(
-            super::slash::SlashDispatch::NotSlash | super::slash::SlashDispatch::BuiltinOrUnhandled,
-        ) => {
-            if attachments.is_empty() {
-                agent.run(&text, &mut output).await
-            } else {
-                agent
-                    .run_with_attachments(&text, attachments, &mut output)
-                    .await
-            }
-        }
-        Err(e) => Err(e),
-    };
+    let result = run_telegram_turn(agent, &mut output, &settings, &text, attachments).await;
 
     if let Err(e) = result {
         tracing::error!(error = %e, "agent run failed");
@@ -1383,24 +1407,14 @@ async fn run_agent_for_message(
 
     // Record which Telegram message IDs correspond to this assistant turn.
     // This lets us map emoji reactions back to the conversation turn index.
-    let sent_ids = output.sent_message_ids();
-    if !sent_ids.is_empty() {
-        // Find the last assistant message index in the conversation.
-        if let Some(turn_index) = msgs
-            .iter()
-            .rposition(|m| m.role == crate::message::Role::Assistant)
-        {
-            let mut id_map = entry.message_id_map.write().await;
-            for msg_id in sent_ids {
-                id_map.insert(msg_id.0, turn_index);
-            }
-        }
-    }
-
-    if let Err(e) = chat_store.save(&chat_key, &msgs) {
-        tracing::error!(error = %e, "failed to save chat history");
-    }
-    *entry.messages_snapshot.write().await = msgs;
+    record_telegram_turn(
+        &entry,
+        chat_store.as_ref(),
+        &chat_key,
+        msgs,
+        output.sent_message_ids(),
+    )
+    .await;
 }
 
 /// Send a quick response (no tools, fast) when the agent is busy.

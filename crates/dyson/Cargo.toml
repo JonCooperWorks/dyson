@@ -127,3 +127,6 @@ tokio = { version = "1", features = ["test-util"] }
 # `cfg(test)` from inside this crate is not visible).  NEVER enable
 # for production builds — it bypasses the sandbox security boundary.
 sandbox-bypass-test = []
+
+[lints]
+workspace = true

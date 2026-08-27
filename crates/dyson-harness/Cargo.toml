@@ -9,3 +9,6 @@ description = "Deterministic execution, scheduling, replay, and evaluation contr
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

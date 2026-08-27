@@ -122,7 +122,377 @@ impl Output for StreamRetryOutput<'_> {
     }
 }
 
+struct IterationResponse {
+    tool_mode: crate::llm::ToolMode,
+    input_tokens: Option<usize>,
+    assistant_msg: Message,
+    tool_calls: Vec<ToolCall>,
+    output_tokens: usize,
+    stop_reason: crate::llm::stream::StopReason,
+    cost_metadata: Option<MessageCostMetadata>,
+}
+
+enum IterationFlow {
+    Ready(Box<IterationResponse>),
+    RetryOuter,
+    Cancelled,
+}
+
+struct StreamCompletion {
+    assistant_msg: Message,
+    tool_calls: Vec<ToolCall>,
+    output_tokens: usize,
+    stop_reason: crate::llm::stream::StopReason,
+}
+
+enum StreamAttempt {
+    Complete(Box<StreamCompletion>),
+    Retry,
+    Cancelled,
+}
+
+#[derive(Default)]
+struct TurnProgress {
+    final_text: String,
+    hit_max_iterations: bool,
+    any_text_streamed: bool,
+    last_streamed_text: String,
+    continuation_prefix: String,
+}
+
+enum LoopControl {
+    Continue,
+    Break,
+}
+
 impl Agent {
+    async fn start_stream_attempt(
+        &mut self,
+        iteration: usize,
+        attempt: usize,
+        skill_fragments: &str,
+        recovered_this_turn: &mut bool,
+        output: &mut dyn Output,
+    ) -> Result<Option<crate::llm::StreamResponse>> {
+        self.emit_run_event(super::protocol::RunEventKind::LlmAttemptStarted {
+            iteration,
+            attempt,
+        });
+        match self
+            .stream_with_retry(skill_fragments, recovered_this_turn, output)
+            .await
+        {
+            StreamResult::Response(response) => Ok(Some(response)),
+            StreamResult::Recovered(error) => {
+                self.emit_failed_attempt(iteration, &error, false);
+                Ok(None)
+            }
+            StreamResult::Error(error) => {
+                self.emit_failed_attempt(iteration, &error, false);
+                Err(error)
+            }
+        }
+    }
+
+    fn emit_failed_attempt(
+        &self,
+        iteration: usize,
+        error: &crate::error::DysonError,
+        after_tool_use: bool,
+    ) {
+        self.emit_run_event(super::protocol::RunEventKind::LlmAttemptFailed {
+            iteration,
+            error_kind: llm_error_kind(error).to_string(),
+            retryable: crate::llm::is_retryable(error),
+            after_tool_use,
+        });
+    }
+
+    async fn wait_for_retry(&self, delay_ms: u64) -> bool {
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => false,
+            _ = self.tool_context.cancellation.cancelled() => {
+                tracing::info!("retry backoff interrupted — agent cancelled");
+                true
+            }
+        }
+    }
+
+    async fn process_stream_attempt(
+        &self,
+        response: crate::llm::StreamResponse,
+        iteration: usize,
+        stream_error_attempts: usize,
+        output: &mut dyn Output,
+    ) -> Result<StreamAttempt> {
+        let (stream_result, emitted_visible_output, emitted_tool_use) = {
+            let mut retry_output = StreamRetryOutput::new(output);
+            let stream_result =
+                stream_handler::process_stream(response.stream, &mut retry_output).await;
+            (
+                stream_result,
+                retry_output.emitted_visible_output(),
+                retry_output.emitted_tool_use(),
+            )
+        };
+        let transport_retryable_mid_stream =
+            matches!(&stream_result, Err(crate::error::DysonError::Http(_)));
+        match stream_result {
+            Ok((assistant_msg, tool_calls, output_tokens, stop_reason)) => {
+                Ok(StreamAttempt::Complete(Box::new(StreamCompletion {
+                    assistant_msg,
+                    tool_calls,
+                    output_tokens,
+                    stop_reason,
+                })))
+            }
+            Err(error)
+                if crate::llm::is_retryable(&error)
+                    && stream_error_attempts < self.max_retries
+                    && !emitted_tool_use
+                    && (!emitted_visible_output || transport_retryable_mid_stream) =>
+            {
+                let delay_ms = compute_backoff_ms(stream_error_attempts);
+                tracing::warn!(
+                    attempt = stream_error_attempts + 1,
+                    max = self.max_retries,
+                    delay_ms,
+                    error = %error,
+                    mid_stream = emitted_visible_output,
+                    "LLM stream failed — retrying"
+                );
+                if self.wait_for_retry(delay_ms).await {
+                    Ok(StreamAttempt::Cancelled)
+                } else {
+                    Ok(StreamAttempt::Retry)
+                }
+            }
+            Err(error) => {
+                self.emit_failed_attempt(iteration, &error, emitted_tool_use);
+                Err(error)
+            }
+        }
+    }
+
+    async fn stream_iteration(
+        &mut self,
+        iteration: usize,
+        skill_fragments: &str,
+        recovered_this_turn: &mut bool,
+        output: &mut dyn Output,
+    ) -> Result<IterationFlow> {
+        let mut empty_attempts = 0;
+        let mut stream_error_attempts = 0;
+        loop {
+            let Some(response) = self
+                .start_stream_attempt(
+                    iteration,
+                    empty_attempts + stream_error_attempts,
+                    skill_fragments,
+                    recovered_this_turn,
+                    output,
+                )
+                .await?
+            else {
+                return Ok(IterationFlow::RetryOuter);
+            };
+            let tool_mode = response.tool_mode;
+            let input_tokens = response.input_tokens;
+            let audit_id = response.swarm_llm_audit_id;
+            let provider = response.provider.clone();
+            let model = response.model.clone();
+            tracing::info!(tool_mode = ?tool_mode, input_tokens = ?input_tokens, "streaming response");
+
+            let attempt = self
+                .process_stream_attempt(response, iteration, stream_error_attempts, output)
+                .await?;
+            let StreamAttempt::Complete(completion) = attempt else {
+                match attempt {
+                    StreamAttempt::Retry => {
+                        stream_error_attempts += 1;
+                        continue;
+                    }
+                    StreamAttempt::Cancelled => return Ok(IterationFlow::Cancelled),
+                    StreamAttempt::Complete(_) => unreachable!(),
+                }
+            };
+            let StreamCompletion {
+                assistant_msg,
+                tool_calls,
+                output_tokens,
+                stop_reason,
+            } = *completion;
+            self.emit_run_event(super::protocol::RunEventKind::LlmAttemptCompleted {
+                iteration,
+                output_tokens,
+                tool_calls: tool_calls.len(),
+            });
+
+            let empty = assistant_msg.last_text().is_none()
+                && tool_calls.is_empty()
+                && tool_mode != crate::llm::ToolMode::Observe;
+            if empty && empty_attempts < self.max_retries {
+                let delay_ms = compute_backoff_ms(empty_attempts);
+                tracing::warn!(
+                    attempt = empty_attempts + 1,
+                    max = self.max_retries,
+                    delay_ms,
+                    "LLM returned no text and no tool calls — retrying"
+                );
+                if self.wait_for_retry(delay_ms).await {
+                    return Ok(IterationFlow::Cancelled);
+                }
+                empty_attempts += 1;
+                continue;
+            }
+
+            let cost_metadata = audit_id.map(|swarm_llm_audit_id| MessageCostMetadata {
+                swarm_llm_audit_id: Some(swarm_llm_audit_id),
+                display_cost_usd: None,
+                cost_source: None,
+                cost_finalized_at: None,
+                provider,
+                model,
+                input_tokens: input_tokens.and_then(|value| i64::try_from(value).ok()),
+                output_tokens: i64::try_from(output_tokens).ok(),
+                key_source: None,
+            });
+            return Ok(IterationFlow::Ready(Box::new(IterationResponse {
+                tool_mode,
+                input_tokens,
+                assistant_msg,
+                tool_calls,
+                output_tokens,
+                stop_reason,
+                cost_metadata,
+            })));
+        }
+    }
+
+    fn finish_text_response(
+        &mut self,
+        assistant_msg: Message,
+        progress: &mut TurnProgress,
+        output: &mut dyn Output,
+    ) -> Result<()> {
+        progress.final_text = if let Some(text) = assistant_msg.last_text() {
+            text.to_string()
+        } else if progress.any_text_streamed {
+            tracing::warn!("LLM returned no text on final iteration — reusing last streamed text");
+            progress.last_streamed_text.clone()
+        } else {
+            tracing::warn!("LLM returned no text and no tool calls — sending fallback");
+            let fallback = "I wasn't able to generate a response. Please try again.";
+            output.text_delta(fallback)?;
+            fallback.to_string()
+        };
+        if !progress.continuation_prefix.is_empty() {
+            progress.final_text =
+                format!("{}{}", progress.continuation_prefix, progress.final_text);
+        }
+        self.conversation.messages.push(assistant_msg);
+        output.flush()
+    }
+
+    async fn handle_iteration_response(
+        &mut self,
+        response: IterationResponse,
+        iteration: usize,
+        progress: &mut TurnProgress,
+        output: &mut dyn Output,
+    ) -> Result<LoopControl> {
+        let IterationResponse {
+            tool_mode,
+            input_tokens,
+            mut assistant_msg,
+            tool_calls,
+            output_tokens,
+            stop_reason,
+            cost_metadata,
+        } = response;
+        if let Some(cost_metadata) = cost_metadata {
+            assistant_msg.cost = Some(finalize_cost_metadata(cost_metadata).await);
+        }
+        if let Some(input_tokens) = input_tokens {
+            self.conversation.token_budget.record_input(input_tokens);
+        }
+        if let Err(error) = self.conversation.token_budget.record(output_tokens) {
+            self.conversation.messages.push(assistant_msg);
+            self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+            tracing::warn!(
+                used = self.conversation.token_budget.output_tokens_used,
+                "token budget exceeded — stopping agent loop"
+            );
+            output.error(&error)?;
+            return Ok(LoopControl::Break);
+        }
+        if let Some(text) = assistant_msg.last_text() {
+            progress.any_text_streamed = true;
+            progress.last_streamed_text = text.to_string();
+        }
+        self.log_response(&assistant_msg, &tool_calls);
+
+        if stop_reason == crate::llm::stream::StopReason::MaxTokens
+            && tool_calls.is_empty()
+            && tool_mode != crate::llm::ToolMode::Observe
+        {
+            tracing::warn!("response truncated by max_tokens — injecting continuation prompt");
+            if let Some(text) = assistant_msg.last_text() {
+                progress.continuation_prefix.push_str(text);
+            }
+            self.conversation.messages.push(assistant_msg);
+            self.conversation.messages.push(Message::user(
+                "[Your previous response was cut off because it exceeded the \
+                 output token limit. Please continue exactly where you left off.]",
+            ));
+            return Ok(LoopControl::Continue);
+        }
+
+        let truncated_tool_call = stop_reason == crate::llm::stream::StopReason::MaxTokens
+            && tool_mode != crate::llm::ToolMode::Observe
+            && tool_calls
+                .iter()
+                .any(|call| call.input.get("_parse_error").is_some());
+        if truncated_tool_call {
+            let names: Vec<&str> = tool_calls
+                .iter()
+                .filter_map(|call| {
+                    call.input
+                        .get("_parse_error")
+                        .is_some()
+                        .then_some(call.name.as_str())
+                })
+                .collect();
+            tracing::warn!(
+                tools = ?names,
+                "tool call JSON truncated by max_tokens — redirecting LLM to split work"
+            );
+            self.conversation.messages.push(assistant_msg);
+            self.conversation
+                .messages
+                .push(Message::user(MAXTOKENS_TOOL_CALL_TRUNCATED));
+            return Ok(LoopControl::Continue);
+        }
+
+        if tool_calls.is_empty() || tool_mode == crate::llm::ToolMode::Observe {
+            self.finish_text_response(assistant_msg, progress, output)?;
+            return Ok(LoopControl::Break);
+        }
+        self.conversation.messages.push(assistant_msg);
+        self.execute_tool_calls(&tool_calls, output).await?;
+        self.admit_pending_user_messages(output).await?;
+        self.limiter.reset_turn();
+        self.maybe_inject_budget_warning(iteration, output);
+        if iteration == self.max_iterations - 1 {
+            tracing::warn!(
+                max = self.max_iterations,
+                "agent hit maximum iterations — requesting summary"
+            );
+            progress.hit_max_iterations = true;
+        }
+        Ok(LoopControl::Continue)
+    }
+
     /// Inner agent loop shared by [`run()`], [`run_with_blocks()`], and
     /// [`run_with_attachments()`].
     ///
@@ -132,17 +502,7 @@ impl Agent {
         self.conversation.turn_count += 1;
         self.conversation.budget_warning_fired = false;
 
-        let mut final_text = String::new();
-        let mut hit_max_iterations = false;
-        let mut any_text_streamed = false;
-        // Remember the most recent text the LLM streamed this turn so we can
-        // surface it if the final iteration comes back empty after retries.
-        let mut last_streamed_text = String::new();
-        // Accumulate partial assistant text across MaxTokens-forced
-        // continuations.  `final_text` only holds the *last* turn's text,
-        // so without this buffer every chunk before the final one is lost
-        // from the return value (the conversation history still has them).
-        let mut continuation_prefix = String::new();
+        let mut progress = TurnProgress::default();
 
         let skill_fragments = self.collect_skill_context().await;
 
@@ -172,325 +532,36 @@ impl Agent {
 
             output.typing_indicator(true)?;
 
-            // Stream LLM response with retry/backoff.  If the LLM returns no
-            // text and no tool calls, retry the request per our retry policy
-            // without advancing the iteration counter.
-            let mut empty_attempts: usize = 0;
-            let mut stream_error_attempts: usize = 0;
-            let (
-                tool_mode,
-                input_tokens,
-                mut assistant_msg,
-                tool_calls,
-                output_tokens,
-                stop_reason,
-                cost_metadata,
-            ) = loop {
-                self.emit_run_event(super::protocol::RunEventKind::LlmAttemptStarted {
+            let response = match self
+                .stream_iteration(
                     iteration,
-                    attempt: empty_attempts + stream_error_attempts,
-                });
-                let response = match self
-                    .stream_with_retry(&skill_fragments, &mut recovered_this_turn, output)
-                    .await
-                {
-                    StreamResult::Response(r) => r,
-                    StreamResult::Recovered(e) => {
-                        self.emit_run_event(super::protocol::RunEventKind::LlmAttemptFailed {
-                            iteration,
-                            error_kind: llm_error_kind(&e).to_string(),
-                            retryable: crate::llm::is_retryable(&e),
-                            after_tool_use: false,
-                        });
-                        continue 'iter;
-                    }
-                    StreamResult::Error(e) => {
-                        self.emit_run_event(super::protocol::RunEventKind::LlmAttemptFailed {
-                            iteration,
-                            error_kind: llm_error_kind(&e).to_string(),
-                            retryable: crate::llm::is_retryable(&e),
-                            after_tool_use: false,
-                        });
-                        return Err(e);
-                    }
-                };
-
-                let tool_mode = response.tool_mode;
-                let input_tokens = response.input_tokens;
-                let audit_id = response.swarm_llm_audit_id;
-                let provider = response.provider.clone();
-                let model = response.model.clone();
-
-                tracing::info!(
-                    tool_mode = ?tool_mode,
-                    input_tokens = ?input_tokens,
-                    "streaming response"
-                );
-
-                let (stream_result, emitted_visible_output, emitted_tool_use) = {
-                    let mut retry_output = StreamRetryOutput::new(output);
-                    let stream_result =
-                        stream_handler::process_stream(response.stream, &mut retry_output).await;
-                    (
-                        stream_result,
-                        retry_output.emitted_visible_output(),
-                        retry_output.emitted_tool_use(),
-                    )
-                };
-
-                // Two-tier retry gate after a stream error:
-                //
-                //   1. Pre-output failures (no text, no tool calls yet): always
-                //      retry on a retryable error.  Cheap, no duplication risk.
-                //
-                //   2. Mid-stream transport errors (Http: connection reset,
-                //      "error decoding response body", h2 frame errors) AFTER
-                //      some text has streamed but BEFORE any tool_use was
-                //      emitted: retry.  The duplicate text on the next attempt
-                //      reads as the model restating itself — annoying but
-                //      cheap.  The trade-off here was load-bearing for the
-                //      security_engineer harness: a flaky OpenRouter byte
-                //      decode in mid-recon used to abort a 60-minute, $5+
-                //      stage outright.
-                //
-                //   3. Once a tool_use START/COMPLETE has been emitted, we
-                //      MUST NOT retry — retrying could double-execute side
-                //      effects (bash, write_file, message sends).
-                //
-                // Rate-limit / overload errors still respect the pre-output
-                // gate (they normally land before the stream produces text);
-                // only Http transport errors get the relaxed treatment.
-                let transport_retryable_mid_stream = matches!(&stream_result, Err(e) if matches!(e, crate::error::DysonError::Http(_)));
-
-                let (assistant_msg, tool_calls, output_tokens, stop_reason) = match stream_result {
-                    Ok(result) => result,
-                    Err(e)
-                        if crate::llm::is_retryable(&e)
-                            && stream_error_attempts < self.max_retries
-                            && !emitted_tool_use
-                            && (!emitted_visible_output || transport_retryable_mid_stream) =>
-                    {
-                        let delay_ms = compute_backoff_ms(stream_error_attempts);
-                        tracing::warn!(
-                            attempt = stream_error_attempts + 1,
-                            max = self.max_retries,
-                            delay_ms,
-                            error = %e,
-                            mid_stream = emitted_visible_output,
-                            "LLM stream failed — retrying"
-                        );
-                        tokio::select! {
-                            _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
-                            _ = self.tool_context.cancellation.cancelled() => {
-                                tracing::info!("retry backoff interrupted — agent cancelled");
-                                break 'iter;
-                            }
-                        }
-                        stream_error_attempts += 1;
-                        continue;
-                    }
-                    Err(e) => {
-                        self.emit_run_event(super::protocol::RunEventKind::LlmAttemptFailed {
-                            iteration,
-                            error_kind: llm_error_kind(&e).to_string(),
-                            retryable: crate::llm::is_retryable(&e),
-                            after_tool_use: emitted_tool_use,
-                        });
-                        return Err(e);
-                    }
-                };
-
-                self.emit_run_event(super::protocol::RunEventKind::LlmAttemptCompleted {
-                    iteration,
-                    output_tokens,
-                    tool_calls: tool_calls.len(),
-                });
-
-                // Empty responses (no text, no tool calls) can happen
-                // transiently — retry per the same policy we use for network
-                // failures.  Skip for Observe mode, where tool calls in the
-                // stream are informational and absence doesn't indicate an
-                // empty reply.
-                let is_empty = assistant_msg.last_text().is_none()
-                    && tool_calls.is_empty()
-                    && tool_mode != crate::llm::ToolMode::Observe;
-                if is_empty && empty_attempts < self.max_retries {
-                    let delay_ms = compute_backoff_ms(empty_attempts);
-                    tracing::warn!(
-                        attempt = empty_attempts + 1,
-                        max = self.max_retries,
-                        delay_ms,
-                        "LLM returned no text and no tool calls — retrying"
-                    );
-                    tokio::select! {
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
-                        _ = self.tool_context.cancellation.cancelled() => {
-                            tracing::info!("retry backoff interrupted — agent cancelled");
-                            break 'iter;
-                        }
-                    }
-                    empty_attempts += 1;
-                    continue;
-                }
-
-                let cost_metadata = audit_id.map(|swarm_llm_audit_id| MessageCostMetadata {
-                    swarm_llm_audit_id: Some(swarm_llm_audit_id),
-                    display_cost_usd: None,
-                    cost_source: None,
-                    cost_finalized_at: None,
-                    provider,
-                    model,
-                    input_tokens: input_tokens.and_then(|n| i64::try_from(n).ok()),
-                    output_tokens: i64::try_from(output_tokens).ok(),
-                    key_source: None,
-                });
-
-                break (
-                    tool_mode,
-                    input_tokens,
-                    assistant_msg,
-                    tool_calls,
-                    output_tokens,
-                    stop_reason,
-                    cost_metadata,
-                );
+                    &skill_fragments,
+                    &mut recovered_this_turn,
+                    output,
+                )
+                .await?
+            {
+                IterationFlow::Ready(response) => response,
+                IterationFlow::RetryOuter => continue 'iter,
+                IterationFlow::Cancelled => break 'iter,
             };
-
-            if let Some(cost_metadata) = cost_metadata {
-                assistant_msg.cost = Some(finalize_cost_metadata(cost_metadata).await);
-            }
-
-            if let Some(input_tokens) = input_tokens {
-                self.conversation.token_budget.record_input(input_tokens);
-            }
-
-            if let Err(e) = self.conversation.token_budget.record(output_tokens) {
-                self.conversation.messages.push(assistant_msg);
-                self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
-                tracing::warn!(
-                    used = self.conversation.token_budget.output_tokens_used,
-                    "token budget exceeded — stopping agent loop"
-                );
-                output.error(&e)?;
+            if matches!(
+                self.handle_iteration_response(*response, iteration, &mut progress, output)
+                    .await?,
+                LoopControl::Break
+            ) {
                 break;
-            }
-
-            if let Some(text) = assistant_msg.last_text() {
-                any_text_streamed = true;
-                last_streamed_text = text.to_string();
-            }
-
-            self.log_response(&assistant_msg, &tool_calls);
-
-            // MaxTokens with no tool calls means the response was truncated
-            // mid-generation.  Push the partial message into history and
-            // inject a continuation prompt so the LLM picks up where it
-            // left off.  Skip for Observe mode (provider manages its own
-            // loop) and when tool calls are present (they'll execute
-            // normally and the next iteration continues naturally).
-            if stop_reason == crate::llm::stream::StopReason::MaxTokens
-                && tool_calls.is_empty()
-                && tool_mode != crate::llm::ToolMode::Observe
-            {
-                tracing::warn!("response truncated by max_tokens — injecting continuation prompt");
-                if let Some(text) = assistant_msg.last_text() {
-                    continuation_prefix.push_str(text);
-                }
-                self.conversation.messages.push(assistant_msg);
-                self.conversation.messages.push(Message::user(
-                    "[Your previous response was cut off because it exceeded the \
-                     output token limit. Please continue exactly where you left off.]",
-                ));
-                continue;
-            }
-
-            // MaxTokens WITH tool calls: if `finalize_tool_call` marked any
-            // call with `_parse_error`, the JSON was cut off mid-argument.
-            // Dispatching it would waste a round-trip and the model would
-            // re-emit the same oversized payload.  Redirect it to a smaller
-            // strategy instead.
-            if stop_reason == crate::llm::stream::StopReason::MaxTokens
-                && tool_mode != crate::llm::ToolMode::Observe
-                && tool_calls
-                    .iter()
-                    .any(|c| c.input.get("_parse_error").is_some())
-            {
-                let names: Vec<&str> = tool_calls
-                    .iter()
-                    .filter_map(|c| {
-                        c.input
-                            .get("_parse_error")
-                            .is_some()
-                            .then_some(c.name.as_str())
-                    })
-                    .collect();
-                tracing::warn!(
-                    tools = ?names,
-                    "tool call JSON truncated by max_tokens — redirecting LLM to split work"
-                );
-                self.conversation.messages.push(assistant_msg);
-                self.conversation
-                    .messages
-                    .push(Message::user(MAXTOKENS_TOOL_CALL_TRUNCATED));
-                continue;
-            }
-
-            // If no tool calls, we're done.  If the provider set Observe mode,
-            // tool calls in the stream are informational only — the provider
-            // already executed them internally (e.g. Claude Code CLI, Codex).
-            // We display them to the user but don't re-execute, and break to
-            // avoid an infinite loop re-feeding already-handled tool_use blocks.
-            if tool_calls.is_empty() || tool_mode == crate::llm::ToolMode::Observe {
-                if let Some(text) = assistant_msg.last_text() {
-                    final_text = text.to_string();
-                } else if any_text_streamed {
-                    // Retries were exhausted or disabled and this final
-                    // iteration came back empty, but the user already saw text
-                    // from an earlier iteration.  Surface that text as the
-                    // return value so callers (subagents, controllers) don't
-                    // receive an empty string.
-                    tracing::warn!(
-                        "LLM returned no text on final iteration — reusing last \
-                         streamed text as the return value"
-                    );
-                    final_text = last_streamed_text.clone();
-                } else {
-                    tracing::warn!("LLM returned no text and no tool calls — sending fallback");
-                    let fallback = "I wasn't able to generate a response. Please try again.";
-                    output.text_delta(fallback)?;
-                    final_text = fallback.to_string();
-                }
-                if !continuation_prefix.is_empty() {
-                    final_text = format!("{continuation_prefix}{final_text}");
-                }
-                self.conversation.messages.push(assistant_msg);
-                output.flush()?;
-                break;
-            }
-
-            self.conversation.messages.push(assistant_msg);
-            self.execute_tool_calls(&tool_calls, output).await?;
-            self.admit_pending_user_messages(output).await?;
-            self.limiter.reset_turn();
-
-            self.maybe_inject_budget_warning(iteration, output);
-
-            if iteration == self.max_iterations - 1 {
-                tracing::warn!(
-                    max = self.max_iterations,
-                    "agent hit maximum iterations — requesting summary"
-                );
-                hit_max_iterations = true;
             }
         }
 
-        if hit_max_iterations {
+        if progress.hit_max_iterations {
             self.last_run_status = super::protocol::RunStatus::IterationLimit;
-            final_text = self
+            progress.final_text = self
                 .summarize_on_max_iterations(&skill_fragments, output)
                 .await?;
-            if !continuation_prefix.is_empty() {
-                final_text = format!("{continuation_prefix}{final_text}");
+            if !progress.continuation_prefix.is_empty() {
+                progress.final_text =
+                    format!("{}{}", progress.continuation_prefix, progress.final_text);
             }
         }
 
@@ -501,7 +572,7 @@ impl Agent {
         self.fire_dreams(DreamEvent::TurnComplete {
             turn_count: self.conversation.turn_count,
         });
-        Ok(final_text)
+        Ok(progress.final_text)
     }
 
     async fn admit_pending_user_messages(&mut self, output: &mut dyn Output) -> Result<()> {

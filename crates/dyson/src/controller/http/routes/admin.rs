@@ -481,6 +481,74 @@ fn configure_verify_cache_key(
     }
 }
 
+fn update_identity(snapshot: &Settings, body: &ConfigureBody) -> Result<bool, Box<Resp>> {
+    if body.name.is_none()
+        && body.task.is_none()
+        && body.instance_id.is_none()
+        && body.identity_doc.is_none()
+    {
+        return Ok(false);
+    }
+    let mut workspace = open_workspace(snapshot)?;
+    if let Some(identity_doc) = body.identity_doc.as_deref() {
+        if !looks_like_full_identity_doc(identity_doc) {
+            return Err(Box::new(bad_request(
+                "identity_doc must be a full IDENTITY.md document",
+            )));
+        }
+        workspace.set("IDENTITY.md", identity_doc);
+    } else {
+        let existing = workspace.get("IDENTITY.md").unwrap_or_default();
+        let prior_name = extract_field(&existing, "Name");
+        let prior_instance = extract_field(&existing, "Swarm instance id");
+        let prior_mission = extract_section(&existing, "Mission")
+            .or_else(|| looks_like_full_identity_doc(&existing).then(|| existing.clone()));
+        let merged = build_identity_md(
+            body.name.as_deref().or(prior_name.as_deref()),
+            body.instance_id.as_deref().or(prior_instance.as_deref()),
+            body.task.as_deref().or(prior_mission.as_deref()),
+        );
+        workspace.set("IDENTITY.md", &merged);
+    }
+    workspace
+        .save()
+        .map_err(|error| Box::new(bad_request(&format!("workspace save failed: {error}"))))?;
+    Ok(true)
+}
+
+async fn reload_patched_config(
+    state: &HttpState,
+    snapshot: &Settings,
+    config_path: Option<&Path>,
+    changed: bool,
+) {
+    let Some(path) = config_path.filter(|_| changed) else {
+        return;
+    };
+    let path = path.to_path_buf();
+    match tokio::task::spawn_blocking(move || crate::config::loader::load_settings(Some(&path)))
+        .await
+    {
+        Ok(Ok(mut settings)) => {
+            preserve_runtime_only_settings(&mut settings, snapshot);
+            state.registry.reload(&settings, None);
+            if let Ok(mut current) = state.settings.write() {
+                *current = settings.clone();
+            }
+            crate::controller::publish_settings(std::sync::Arc::new(settings));
+            tracing::info!("dyson.json patched + registry reloaded by /api/admin/configure");
+        }
+        Ok(Err(error)) => tracing::warn!(
+            error = %error,
+            "post-patch settings reload failed; falling back to polling HotReloader"
+        ),
+        Err(error) => tracing::warn!(
+            error = %error,
+            "post-patch settings reload worker failed; falling back to polling HotReloader"
+        ),
+    }
+}
+
 pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
     // Pull the configure secret BEFORE consuming the body — the
     // header check runs first so an unauthenticated caller can't
@@ -505,43 +573,9 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     // 1. Workspace: rewrite IDENTITY.md from the new fields.  Empty
     //    fields are skipped (so a configure carrying only `models`
     //    won't blank the existing identity).
-    let identity_changed = if body.name.is_some()
-        || body.task.is_some()
-        || body.instance_id.is_some()
-        || body.identity_doc.is_some()
-    {
-        let mut ws = match open_workspace(&snapshot) {
-            Ok(w) => w,
-            Err(resp) => return *resp,
-        };
-        if let Some(identity_doc) = body.identity_doc.as_deref() {
-            if !looks_like_full_identity_doc(identity_doc) {
-                return bad_request("identity_doc must be a full IDENTITY.md document");
-            }
-            ws.set("IDENTITY.md", identity_doc);
-        } else {
-            // Merge: keep the existing IDENTITY.md fields when the new
-            // body omits them, so a partial update doesn't wipe identity.
-            // Extract first into owned Strings so the merge doesn't dangle
-            // references to temporaries.
-            let existing = ws.get("IDENTITY.md").unwrap_or_default();
-            let prior_name = extract_field(&existing, "Name");
-            let prior_instance = extract_field(&existing, "Swarm instance id");
-            let prior_mission = extract_section(&existing, "Mission")
-                .or_else(|| looks_like_full_identity_doc(&existing).then(|| existing.clone()));
-            let merged = build_identity_md(
-                body.name.as_deref().or(prior_name.as_deref()),
-                body.instance_id.as_deref().or(prior_instance.as_deref()),
-                body.task.as_deref().or(prior_mission.as_deref()),
-            );
-            ws.set("IDENTITY.md", &merged);
-        }
-        if let Err(e) = ws.save() {
-            return bad_request(&format!("workspace save failed: {e}"));
-        }
-        true
-    } else {
-        false
+    let identity_changed = match update_identity(&snapshot, &body) {
+        Ok(changed) => changed,
+        Err(response) => return *response,
     };
 
     // 2. dyson.json: patch the named Swarm provider's `models`, `api_key`,
@@ -716,34 +750,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //      client; the per-chat HotReloader's baseline is then
     //      post-patch, so subsequent turns see no change and never
     //      rebuild.  Eager reload closes the window entirely.
-    if any_config_changed && let Some(path) = config_path {
-        let path = path.to_path_buf();
-        match tokio::task::spawn_blocking(move || crate::config::loader::load_settings(Some(&path)))
-            .await
-        {
-            Ok(Ok(mut new_settings)) => {
-                preserve_runtime_only_settings(&mut new_settings, &snapshot);
-                state.registry.reload(&new_settings, None);
-                if let Ok(mut g) = state.settings.write() {
-                    *g = new_settings.clone();
-                }
-                crate::controller::publish_settings(std::sync::Arc::new(new_settings));
-                tracing::info!("dyson.json patched + registry reloaded by /api/admin/configure");
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    error = %e,
-                    "post-patch settings reload failed; falling back to polling HotReloader"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "post-patch settings reload worker failed; falling back to polling HotReloader"
-                );
-            }
-        }
-    }
+    reload_patched_config(state, &snapshot, config_path, any_config_changed).await;
 
     // Keep the runtime override aligned with the durable config. Without
     // this assignment an earlier UI switch can remain in memory and mask the
@@ -2578,12 +2585,8 @@ mod tests {
             }
         });
 
-        let changed = patch_active_selection_doc(
-            &mut doc,
-            "chatgpt-subscription",
-            "gpt-5.6-sol",
-        )
-        .unwrap();
+        let changed =
+            patch_active_selection_doc(&mut doc, "chatgpt-subscription", "gpt-5.6-sol").unwrap();
 
         assert!(changed);
         assert_eq!(doc["agent"]["provider"], "chatgpt-subscription");

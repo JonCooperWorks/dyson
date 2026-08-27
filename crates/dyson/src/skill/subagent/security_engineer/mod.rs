@@ -578,6 +578,80 @@ async fn upsert_findings_ledger(
     checkpoint.ledger_summary = summary;
 }
 
+fn has_pending_tasks(checkpoint: &SecurityCheckpoint) -> bool {
+    checkpoint
+        .pending_tasks
+        .iter()
+        .any(|task| task.status == TaskStatus::Pending)
+}
+
+fn merge_optional_stage_output(aggregate: &mut ToolOutput, output: Option<ToolOutput>) -> bool {
+    if let Some(output) = output {
+        self::runtime::merge_stage_tool_output(aggregate, output);
+        true
+    } else {
+        false
+    }
+}
+
+async fn run_gapfill_cycle(
+    rt: &SecurityHarnessRuntime,
+    store: &CheckpointStore,
+    checkpoint: &mut SecurityCheckpoint,
+) -> std::result::Result<Option<ToolOutput>, String> {
+    run_gapfill_stage(checkpoint);
+    if !has_pending_tasks(checkpoint) {
+        return Ok(None);
+    }
+    let mut aggregate = ToolOutput::success(String::new());
+    let hunted =
+        merge_optional_stage_output(&mut aggregate, run_hunt_stage(rt, store, checkpoint).await?);
+    let validated =
+        merge_optional_stage_output(&mut aggregate, run_validate_stage(rt, checkpoint).await?);
+    Ok((hunted || validated).then_some(aggregate))
+}
+
+async fn run_feedback_cycle(
+    rt: &SecurityHarnessRuntime,
+    store: &CheckpointStore,
+    checkpoint: &mut SecurityCheckpoint,
+) -> std::result::Result<Option<ToolOutput>, String> {
+    run_feedback_stage(checkpoint);
+    if !has_pending_tasks(checkpoint) {
+        return Ok(None);
+    }
+    let mut aggregate = ToolOutput::success(String::new());
+    let mut ran =
+        merge_optional_stage_output(&mut aggregate, run_hunt_stage(rt, store, checkpoint).await?);
+    ran |= merge_optional_stage_output(&mut aggregate, run_validate_stage(rt, checkpoint).await?);
+    ran |= merge_optional_stage_output(&mut aggregate, run_trace_stage(rt, checkpoint).await?);
+    ran |= merge_optional_stage_output(&mut aggregate, run_judgment_stage(rt, checkpoint).await?);
+    run_dedupe_stage(checkpoint);
+    Ok(ran.then_some(aggregate))
+}
+
+async fn run_harness_stage(
+    stage: SecurityHarnessStage,
+    rt: &SecurityHarnessRuntime,
+    store: &CheckpointStore,
+    checkpoint: &mut SecurityCheckpoint,
+) -> std::result::Result<Option<ToolOutput>, String> {
+    match stage {
+        SecurityHarnessStage::Recon => run_recon_stage(rt, checkpoint).await,
+        SecurityHarnessStage::Hunt => run_hunt_stage(rt, store, checkpoint).await,
+        SecurityHarnessStage::Validate => run_validate_stage(rt, checkpoint).await,
+        SecurityHarnessStage::Gapfill => run_gapfill_cycle(rt, store, checkpoint).await,
+        SecurityHarnessStage::Dedupe => {
+            run_dedupe_stage(checkpoint);
+            Ok(None)
+        }
+        SecurityHarnessStage::Trace => run_trace_stage(rt, checkpoint).await,
+        SecurityHarnessStage::Judgment => run_judgment_stage(rt, checkpoint).await,
+        SecurityHarnessStage::Feedback => run_feedback_cycle(rt, store, checkpoint).await,
+        SecurityHarnessStage::Report => run_report_stage(rt, checkpoint).await,
+    }
+}
+
 async fn run_security_harness_inner(
     rt: &SecurityHarnessRuntime,
     started_epoch: u64,
@@ -662,81 +736,7 @@ async fn run_security_harness_inner(
         );
 
         let stage_started = unix_seconds(std::time::SystemTime::now());
-        let stage_result = match stage {
-            SecurityHarnessStage::Recon => run_recon_stage(rt, &mut checkpoint).await,
-            SecurityHarnessStage::Hunt => run_hunt_stage(rt, &store, &mut checkpoint).await,
-            SecurityHarnessStage::Validate => run_validate_stage(rt, &mut checkpoint).await,
-            SecurityHarnessStage::Gapfill => {
-                async {
-                    run_gapfill_stage(&mut checkpoint);
-                    // Gapfill creates real pending work. Execute it once here,
-                    // then validate any newly discovered candidates before the
-                    // normal Dedupe/Trace stages continue.
-                    let mut aggregate = ToolOutput::success(String::new());
-                    let mut ran = false;
-                    if checkpoint
-                        .pending_tasks
-                        .iter()
-                        .any(|task| task.status == TaskStatus::Pending)
-                    {
-                        if let Some(stage_out) = run_hunt_stage(rt, &store, &mut checkpoint).await?
-                        {
-                            self::runtime::merge_stage_tool_output(&mut aggregate, stage_out);
-                            ran = true;
-                        }
-                        if let Some(stage_out) = run_validate_stage(rt, &mut checkpoint).await? {
-                            self::runtime::merge_stage_tool_output(&mut aggregate, stage_out);
-                            ran = true;
-                        }
-                    }
-                    Ok::<_, String>(ran.then_some(aggregate))
-                }
-                .await
-            }
-            SecurityHarnessStage::Dedupe => {
-                run_dedupe_stage(&mut checkpoint);
-                Ok(None)
-            }
-            SecurityHarnessStage::Trace => run_trace_stage(rt, &mut checkpoint).await,
-            SecurityHarnessStage::Judgment => run_judgment_stage(rt, &mut checkpoint).await,
-            SecurityHarnessStage::Feedback => {
-                async {
-                    run_feedback_stage(&mut checkpoint);
-                    // One bounded consumer-path cycle. Hunt already drains its
-                    // own follow-up queue in bounded waves; this does not recurse
-                    // back into Feedback and therefore cannot loop indefinitely.
-                    let mut aggregate = ToolOutput::success(String::new());
-                    let mut ran = false;
-                    if checkpoint
-                        .pending_tasks
-                        .iter()
-                        .any(|task| task.status == TaskStatus::Pending)
-                    {
-                        if let Some(stage_out) = run_hunt_stage(rt, &store, &mut checkpoint).await?
-                        {
-                            self::runtime::merge_stage_tool_output(&mut aggregate, stage_out);
-                            ran = true;
-                        }
-                        if let Some(stage_out) = run_validate_stage(rt, &mut checkpoint).await? {
-                            self::runtime::merge_stage_tool_output(&mut aggregate, stage_out);
-                            ran = true;
-                        }
-                        if let Some(stage_out) = run_trace_stage(rt, &mut checkpoint).await? {
-                            self::runtime::merge_stage_tool_output(&mut aggregate, stage_out);
-                            ran = true;
-                        }
-                        if let Some(stage_out) = run_judgment_stage(rt, &mut checkpoint).await? {
-                            self::runtime::merge_stage_tool_output(&mut aggregate, stage_out);
-                            ran = true;
-                        }
-                        run_dedupe_stage(&mut checkpoint);
-                    }
-                    Ok::<_, String>(ran.then_some(aggregate))
-                }
-                .await
-            }
-            SecurityHarnessStage::Report => run_report_stage(rt, &mut checkpoint).await,
-        };
+        let stage_result = run_harness_stage(*stage, rt, &store, &mut checkpoint).await;
 
         match stage_result {
             Ok(Some(stage_output)) => {
