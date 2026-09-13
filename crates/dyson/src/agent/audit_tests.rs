@@ -969,3 +969,15 @@ fn restored_task_respects_tighter_operator_budget() {
         Some(100)
     );
 }
+
+#[test]
+fn task_contract_schema_teaches_the_model_required_criterion_fields() {
+    let schema = super::task::TaskTool.input_schema();
+    let criterion = &schema["properties"]["criteria"]["items"];
+    for name in ["id", "description", "tool", "contains"] {
+        assert_eq!(
+            criterion["properties"][name]["type"], "string",
+            "criterion field {name} must be discoverable"
+        );
+    }
+}

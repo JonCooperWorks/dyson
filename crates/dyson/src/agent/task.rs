@@ -427,7 +427,18 @@ impl Tool for TaskTool {
         "Record/resume task contracts, steps and blockers; verify acceptance checks against real evidence; retrieve complete original tool output by ID. Does not run evaluations."
     }
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({"type":"object","required":["action"],"properties":{"action":{"type":"string","enum":["plan","status","update","verify","evidence"]},"objective":{"type":"string"},"criteria":{"type":"array","items":{"type":"object"}},"steps":{"type":"array","items":{"type":"string"}},"completed_steps":{"type":"array","items":{"type":"string"}},"blockers":{"type":"array","items":{"type":"string"}},"criterion":{"type":"string"},"evidence_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":16000},"replace":{"type":"boolean"}}})
+        serde_json::json!({"type":"object","required":["action"],"properties":{"action":{"type":"string","enum":["plan","status","update","verify","evidence"]},"objective":{"type":"string"},"criteria": {
+            "type": "array", "minItems": 1,
+            "description": "Required for plan: concrete acceptance checks to verify against real tool evidence.",
+            "items": {"type": "object", "required": ["id", "description", "tool", "contains"],
+                "properties": {
+                    "id": {"type": "string", "description": "Unique criterion ID; pass it as criterion to verify."},
+                    "description": {"type": "string", "description": "What successful completion establishes."},
+                    "tool": {"type": "string", "description": "Exact tool name expected to produce the evidence."},
+                    "contains": {"type": "string", "description": "Nonempty substring required in the successful tool result."}
+                }
+            }
+        },"steps":{"type":"array","items":{"type":"string"}},"completed_steps":{"type":"array","items":{"type":"string"}},"blockers":{"type":"array","items":{"type":"string"}},"criterion":{"type":"string"},"evidence_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":16000},"replace":{"type":"boolean"}}})
     }
     fn execution_plan(&self, _: &serde_json::Value, ctx: &ToolContext) -> ToolExecutionPlan {
         ToolExecutionPlan::read(format!(
