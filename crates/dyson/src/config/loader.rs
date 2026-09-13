@@ -165,6 +165,7 @@ struct JsonProviderConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct JsonAgent {
+    task_budget: Option<crate::agent::task::budget::Limits>,
     /// Optional model override — takes precedence over the provider's model.
     model: Option<String>,
     max_iterations: Option<usize>,
@@ -758,6 +759,9 @@ fn parse_agent_settings(agent: Option<JsonAgent>, settings: &mut Settings) {
     // Agent-level overrides (model can override the provider's model).
     if let Some(model) = agent.model {
         settings.agent.model = model;
+    }
+    if let Some(limits) = agent.task_budget {
+        settings.agent.task_budget = limits;
     }
     if let Some(max_iter) = agent.max_iterations {
         settings.agent.max_iterations = max_iter;

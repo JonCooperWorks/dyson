@@ -332,3 +332,34 @@ Many fields accept a literal value or resolver object:
 
 `$ENV_VAR` shorthand is supported in MCP environment maps. See
 [Secrets](secrets.md) for the resolver system.
+
+## Shared task budget
+
+The configuration JSON may include `task_budget` inside its `agent` object:
+
+```json
+{
+  "agent": {
+   "task_budget": {
+    "max_input_tokens": 500000,
+    "max_output_tokens": 50000,
+    "max_cost_microusd": 5000000,
+    "max_elapsed_ms": 3600000,
+    "prices": {
+      "your-exact-model-id": {
+        "input_microusd_per_million": 2000000,
+        "output_microusd_per_million": 8000000
+      }
+    }
+   }
+  }
+}
+```
+
+This example permits $5 of configured model cost and one hour. Supply actual
+model identifiers and operator-maintained prices; the example prices are not a
+model catalog. Every limit is optional. A configured cost limit requires a price
+for every requested model. Children, retries, reflection and summaries share
+the same durable budget. A restored task retains its consumed budget and adopts
+any tighter configured limits. See [harness contracts](harness-runtime.md) for
+reservation and provider-accounting limits.

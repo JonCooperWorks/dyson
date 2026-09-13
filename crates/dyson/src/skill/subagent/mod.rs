@@ -261,6 +261,7 @@ impl Skill for FilteredSkill {
 /// Arguments for [`spawn_child`].  `SubagentTool` and `CoderTool` each
 /// build one of these and delegate the common lifecycle.
 pub(crate) struct ChildSpawn<'a> {
+    pub harness: crate::agent::task::TaskRuntime,
     pub name: &'a str,
     pub settings: AgentSettings,
     pub inherited_tools: Vec<Arc<dyn Tool>>,
@@ -318,6 +319,7 @@ pub(crate) async fn spawn_child(spec: ChildSpawn<'_>) -> Result<ToolOutput> {
         builder = builder.workspace(ws);
     }
     let mut child_agent = builder.build()?;
+    child_agent.inherit_task_runtime(&spec.harness);
 
     child_agent.set_depth(spec.parent_depth + 1);
     if let Some(dir) = spec.working_dir {
@@ -484,6 +486,7 @@ impl Tool for SubagentTool {
         let started_at = std::time::SystemTime::now();
 
         let result = spawn_child(ChildSpawn {
+            harness: ctx.harness.clone(),
             name: &self.config.name,
             settings,
             inherited_tools: self.inherited_tools.clone(),

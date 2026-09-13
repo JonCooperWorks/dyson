@@ -803,6 +803,8 @@ async fn list_files_rejects_path_traversal() {
         subagent_events: None,
         artefacts: None,
         current_chat_id: None,
+        harness: dyson::agent::task::TaskRuntime::default(),
+        idempotency_key: None,
     };
 
     let tool = dyson::tool::list_files::ListFilesTool;
@@ -834,6 +836,8 @@ async fn search_files_rejects_path_traversal() {
         subagent_events: None,
         artefacts: None,
         current_chat_id: None,
+        harness: dyson::agent::task::TaskRuntime::default(),
+        idempotency_key: None,
     };
 
     let tool = dyson::tool::search_files::SearchFilesTool;

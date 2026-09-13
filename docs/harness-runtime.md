@@ -107,7 +107,8 @@ grader version, raw journal, and aggregate confidence intervals.
   local estimate when authoritative provider usage is unavailable. Request caps
   respect remaining output budget; up to 10% (at most 1,024 tokens) is reserved
   for a tool-free final summary. Provider-internal retries without surfaced
-  usage remain the provider/Swarm accounting boundary.
+  usage are conservatively reserved in the shared task budget; Swarm remains
+  authoritative for billing.
 - Compaction retains bounded tool evidence from both the beginning and end of
   each result, including error flags. It refuses truncated summaries and keeps
   original history on failure. Full pre-compaction transcripts are archived
@@ -132,3 +133,77 @@ It includes journal failure, interrupted mutation, explicit reconciliation,
 output disconnection, truncated generation, compaction evidence, repeated
 failures, unchanged reads, and exhausted budgets. These checks complement the
 existing end-to-end agent corpus; they do not claim a live model quality score.
+
+## Durable task control
+
+Every agent exposes `task_control`. Before an action task, `plan` records an
+objective, steps and acceptance criteria (`id`, `description`, `tool`, and a
+nonempty expected output substring in `contains`). `update` records remaining
+steps, completed steps and blockers. `status` returns the ledger and shared
+budget. Replacing an unfinished plan requires `replace: true` and should only
+follow a user change of objective.
+
+`verify` binds a criterion to an `evidence_id` produced by an actual successful
+tool call. The tool name and output must match the criterion; changed resources
+or subsequent mutations invalidate verification. `RunOutcome.task.completion`
+is `verified` when all declared checks pass without blockers, `unverified` for
+unfinished action tasks, or `answered` for a response without an action contract.
+Unverified action tasks end with `partial`, even when the model says “done”.
+Verification establishes the declared checks, not general task correctness.
+Model evaluations and their release policy remain in Swarm.
+
+The disk backend atomically stores versioned task state, pending mutation
+claims, receipts and budgets under `<chat>/harness/task.json`. Full redacted
+tool results live in separate content-hashed evidence records. They survive
+compaction and process restarts; `task_control` with `action: "evidence"`,
+`evidence_id`, `offset` and `limit` retrieves character pages (at most 16,000
+characters). Corrupt or unsupported checkpoints fail recovery explicitly.
+After reconstruction, criteria need fresh verification; objectives, steps,
+blockers, evidence and accounting remain available.
+
+## Coordination and recoverable effects
+
+Process-wide leases serialize overlapping writes across independent
+conversations. File claims resolve existing symlink ancestors. Child agents
+inherit their parent's lease ancestry and share its ledger and budget, avoiding
+self-deadlock while serializing competing children. File observations are
+checked under the lease before a write; a stale observation requires rereading
+the resource. This coordinates one runtime, not external writers or a fleetwide
+transaction system.
+
+An interrupted mutation quarantines its claims until explicit reconciliation.
+Pending claims are persisted and checked against unresolved journals from other
+stored conversations after restart. Read-only investigation remains allowed.
+External writes are detected at file observation/verification boundaries where
+fingerprints are available; resource declarations must accurately describe a
+tool's footprint.
+
+Tools declaring `Idempotency::Keyed` must implement `idempotency_key` with a
+stable provider operation key and use `ToolContext.idempotency_key` when making
+the request. Durable receipts deduplicate the same key and input; changed input
+under the same key is refused. `lookup_result` may return a provider-confirmed
+result to reconcile an indeterminate call. Without confirmation the runtime
+withholds reexecution. This is an opt-in provider contract, not an exactly-once
+guarantee for arbitrary tools. Receipt replay preserves text and error status;
+rich attachments require a tool-specific durable result reference.
+
+## Progress and shared budgets
+
+Eight calls without a new successful output request a strategy change; sixteen
+pause the run with `partial`. Merely changing command arguments does not count
+as progress. Criterion verification resets the stall counter. A new root user
+turn can resume the task without erasing its durable work or consumed budget.
+
+`task_budget` in agent configuration optionally caps input tokens, output tokens,
+cost in micro-USD and elapsed milliseconds. Reservations are shared by parents,
+children, background reflection, compaction, summaries and provider retries.
+Reservations are persisted before dispatch. Successful calls settle against
+reported usage; uncertain failures retain their reserved charge. Output caps
+are reduced to available capacity. Elapsed time includes downtime, and restored
+limits cannot relax tighter operator configuration.
+
+Cost caps require explicit per-model prices; an unknown model price refuses the
+request when a cost cap is set. Prices are configuration estimates and do not
+replace Swarm billing. Input estimates and provider reporting can differ, so
+actual reported usage is charged even if it exceeds a reservation; further
+calls are then withheld. Limits default to unset. The model cannot raise them.

@@ -172,28 +172,55 @@ pub(super) async fn run_mini_loop(
             }
         };
 
-        let response = match client
-            .stream(
-                &messages,
-                system_prompt,
-                "",
-                &tool_defs,
-                &tool_map,
-                &ctx.config,
-            )
-            .await
-        {
-            Ok(r) => r,
+        let mut config = ctx.config.clone();
+        let estimate = messages.iter().map(Message::estimate_tokens).sum::<usize>()
+            + crate::message::estimate_text_tokens(system_prompt)
+            + tool_defs
+                .iter()
+                .map(|t| crate::message::estimate_json_tokens(&t.input_schema))
+                .sum::<usize>();
+        let (reservation, cap) = super::task::budget::Reservation::reserve(
+            ctx.tool_context.harness.budget.clone(),
+            &config.model,
+            estimate as u64,
+            config.max_tokens,
+        )?;
+        config.max_tokens = cap;
+        ctx.tool_context.harness.checkpoint()?;
+        let deadline = ctx
+            .tool_context
+            .harness
+            .budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remaining_time()?;
+        let completion = async {
+            let response = super::task::budget::ACTIVE
+                .scope(
+                    ctx.tool_context.harness.clone(),
+                    client.stream(&messages, system_prompt, "", &tool_defs, &tool_map, &config),
+                )
+                .await?;
+            let observed_input = response.input_tokens;
+            let mut silent = SilentOutput;
+            let (message, calls, tokens, _) =
+                stream_handler::process_stream(response.stream, &mut silent).await?;
+            Ok::<_, crate::error::DysonError>((observed_input, message, calls, tokens))
+        };
+        let result = tokio::select! {
+            result = tokio::time::timeout(deadline, completion) => result.map_err(|_| crate::error::DysonError::Llm("background task deadline exceeded".into()))?,
+            _ = ctx.tool_context.cancellation.cancelled() => break,
+        };
+        let (observed_input, assistant_msg, tool_calls, tokens) = match result {
+            Ok(value) => value,
             Err(e) => {
                 tracing::warn!(error = %e, "{dream_label} LLM call failed");
                 break;
             }
         };
 
-        let mut silent = SilentOutput;
-        let (assistant_msg, tool_calls, _tokens, _stop_reason) =
-            stream_handler::process_stream(response.stream, &mut silent).await?;
-
+        reservation.settle(observed_input, tokens);
+        ctx.tool_context.harness.checkpoint()?;
         messages.push(assistant_msg);
 
         if tool_calls.is_empty() {

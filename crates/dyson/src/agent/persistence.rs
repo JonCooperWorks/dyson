@@ -34,6 +34,24 @@ impl Agent {
     }
 
     pub(crate) fn begin_run_protocol(&mut self) -> crate::error::Result<()> {
+        self.tool_context.harness.ensure_loaded()?;
+        if let Some(input) = self
+            .conversation
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == crate::message::Role::User)
+            .and_then(crate::message::Message::last_text)
+        {
+            self.tool_context.harness.seed_objective(input);
+        }
+        self.tool_context
+            .harness
+            .budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .started_ms
+            .get_or_insert_with(super::task::budget::now_ms);
         self.active_run_id = RunId::new();
         *self
             .event_sequence
@@ -67,6 +85,17 @@ impl Agent {
     }
 
     pub(crate) fn finish_run_protocol<T>(&mut self, result: &crate::error::Result<T>) {
+        if let Err(error) = self.tool_context.harness.checkpoint() {
+            self.run_warnings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(error.to_string());
+        }
+        if self.tool_context.harness.completion() == "unverified"
+            && self.last_run_status == RunStatus::Completed
+        {
+            self.last_run_status = RunStatus::Partial;
+        }
         self.last_run_status = if self.tool_context.cancellation.is_cancelled() {
             RunStatus::Cancelled
         } else if result.is_err() && self.last_run_status != RunStatus::BudgetExceeded {
@@ -143,7 +172,12 @@ impl Agent {
                     resolution: resolution.into(),
                 },
             ),
-        )
+        )?;
+        self.tool_context
+            .harness
+            .clear_pending(&format!("{}:{}", run_id.0, tool_use_id))?;
+        super::task::reconcile_lease(&format!("{}:{}", run_id.0, tool_use_id));
+        Ok(())
     }
 
     /// Install a callback that runs after every message push.  Used by the
@@ -168,6 +202,9 @@ impl Agent {
     /// to a timestamped archive file (via `ChatHistory::rotate`) before
     /// summarising.  This preserves the full verbatim history.
     pub fn set_chat_history(&mut self, store: Arc<dyn ChatHistory>, chat_id: String) {
+        self.tool_context
+            .harness
+            .attach(store.clone(), chat_id.clone());
         self.history_backend = Some(HistoryBackend { store, chat_id });
     }
 

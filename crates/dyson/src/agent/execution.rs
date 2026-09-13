@@ -189,25 +189,41 @@ impl Agent {
             iteration,
             attempt: 0,
         })?;
+        let mut config = self.budgeted_config();
+        let input_estimate = messages.iter().map(Message::estimate_tokens).sum::<usize>()
+            + crate::message::estimate_text_tokens(system)
+            + crate::message::estimate_text_tokens(suffix);
+        let (reservation, max_output) = super::task::budget::Reservation::reserve(
+            self.tool_context.harness.budget.clone(),
+            &config.model,
+            input_estimate as u64,
+            config.max_tokens,
+        )?;
+        config.max_tokens = max_output;
+        self.tool_context.harness.checkpoint()?;
         let mut observed_completion = false;
         let result = async {
-            let response = self
-                .client
-                .access()?
-                .stream(
-                    messages,
-                    system,
-                    suffix,
-                    &[] as &[ToolDefinition],
-                    &std::collections::HashMap::new(),
-                    &self.budgeted_config(),
+            let response = super::task::budget::ACTIVE
+                .scope(
+                    self.tool_context.harness.clone(),
+                    self.client.access()?.stream(
+                        messages,
+                        system,
+                        suffix,
+                        &[] as &[ToolDefinition],
+                        &std::collections::HashMap::new(),
+                        &config,
+                    ),
                 )
                 .await?;
             if let Some(tokens) = response.input_tokens {
                 self.conversation.token_budget.record_input(tokens);
             }
+            let observed_input = response.input_tokens;
             let (message, calls, tokens, stop) =
                 super::stream_handler::process_stream(response.stream, output).await?;
+            reservation.settle(observed_input, tokens);
+            self.tool_context.harness.checkpoint()?;
             let _ = self.conversation.token_budget.record(tokens);
             observed_completion = true;
             self.try_emit_run_event(super::protocol::RunEventKind::LlmAttemptCompleted {
@@ -247,10 +263,20 @@ impl Agent {
         let tool_result_msg = match &result {
             Ok((tool_output, duration)) => Message::tool_result(
                 &call.id,
-                &self
-                    .formatter
-                    .format(call, tool_output, *duration)
-                    .to_llm_message(),
+                &format!(
+                    "{}{}",
+                    self.formatter
+                        .format(call, tool_output, *duration)
+                        .to_llm_message(),
+                    tool_output
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.get("evidence_id"))
+                        .and_then(serde_json::Value::as_str)
+                        .map_or_else(String::new, |id| format!(
+                            "\n[Evidence: {id}; retrieve original with task_control evidence]"
+                        ))
+                ),
                 tool_output.is_error,
             ),
             Err(e) => {
@@ -538,6 +564,65 @@ impl Agent {
         }
     }
 
+    /// Recover a pending provider-keyed operation without repeating its side effect.
+    async fn lookup_pending_receipt(
+        &self,
+        tool: &dyn crate::tool::Tool,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
+        plan: &ToolExecutionPlan,
+    ) -> Result<Option<ToolOutput>> {
+        let name = tool.name();
+        if plan.idempotency == crate::tool::Idempotency::Keyed
+            && let Some(key) = tool.idempotency_key(input, ctx)
+        {
+            let receipt_key = super::task::digest(&format!("{name}:{key}"));
+            let hash = super::task::digest(&input.to_string());
+            if ctx.harness.receipt_pending(&receipt_key, &hash)? {
+                let mut lookup_ctx = ctx.clone();
+                lookup_ctx.idempotency_key = Some(key.clone());
+                let timeout = std::time::Duration::from_millis(plan.timeout_ms.max(1)).min(
+                    ctx.harness
+                        .budget
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remaining_time()?,
+                );
+                if let Some(mut output) =
+                    tokio::time::timeout(timeout, tool.lookup_result(&key, &lookup_ctx))
+                        .await
+                        .map_err(|_| DysonError::Llm("idempotency lookup timed out".into()))??
+                {
+                    // Provider lookup results need the same redaction as fresh results.
+                    self.sandbox.after(name, input, &mut output).await?;
+                    ctx.harness.receipt_write(
+                        &receipt_key,
+                        &hash,
+                        Some(if output.is_error {
+                            ToolOutput::error(output.content.clone())
+                        } else {
+                            ToolOutput::success(output.content.clone())
+                        }),
+                    )?;
+                    for unknown in self.unresolved_tool_outcomes()? {
+                        if unknown.effective_tool_name == name && unknown.idempotency_key == key {
+                            self.reconcile_tool_outcome(
+                                &unknown.run_id,
+                                &unknown.tool_use_id,
+                                "Provider result lookup confirmed this keyed operation",
+                            )?;
+                        }
+                    }
+                    return Ok(Some(output));
+                }
+                return Ok(Some(ToolOutput::error(
+                    "Provider has not confirmed the prior keyed operation; execution withheld",
+                )));
+            }
+        }
+        Ok(None)
+    }
+
     /// Look up `name`, run it with `input`, post-process through
     /// `sandbox.after`, and notify the owning skill.  Shared by the
     /// Allow and Redirect sandbox arms so post-processing stays identical.
@@ -570,6 +655,12 @@ impl Agent {
                 "Policy rewrite for '{name}' changed its resource or side-effect footprint; execution was withheld to prevent an unsafe scheduling race"
             )));
         }
+        if let Some(output) = self
+            .lookup_pending_receipt(tool.as_ref(), input, ctx, &plan)
+            .await?
+        {
+            return Ok(output);
+        }
         if plan
             .resources
             .iter()
@@ -579,6 +670,44 @@ impl Agent {
             return Ok(ToolOutput::error(
                 "Mutation withheld: unresolved prior tool outcome requires explicit reconciliation. Use read-only tools to verify what happened.",
             ));
+        }
+        let mut lease = super::task::acquire(&plan, ctx).await?;
+        let mut invocation_ctx = ctx.clone();
+        invocation_ctx.harness.ancestors.push(lease.id);
+        let ctx = &invocation_ctx;
+        let keyed = plan.idempotency == crate::tool::Idempotency::Keyed;
+        let provider_key = if keyed {
+            Some(
+                tool.idempotency_key(input, ctx)
+                    .filter(|k| !k.trim().is_empty())
+                    .ok_or_else(|| {
+                        DysonError::Llm("keyed tool did not supply a stable idempotency key".into())
+                    })?,
+            )
+        } else {
+            None
+        };
+        let receipt_key = provider_key
+            .as_ref()
+            .map(|k| super::task::digest(&format!("{name}:{k}")));
+        let input_hash = super::task::digest(&input.to_string());
+        if let Some(key) = &receipt_key {
+            if let Some(cached) = ctx.harness.receipt(key, &input_hash)? {
+                return Ok(cached);
+            }
+            ctx.harness.receipt_write(key, &input_hash, None)?;
+        }
+        let mut invocation_ctx = ctx.clone();
+        invocation_ctx.idempotency_key = provider_key;
+        let ctx = &invocation_ctx;
+        let mutates = plan
+            .resources
+            .iter()
+            .any(|r| r.access == crate::tool::ResourceAccess::Write);
+        if mutates {
+            ctx.harness.check_foreign_pending(&plan)?;
+            ctx.harness.validate_observations(&plan)?;
+            ctx.harness.prepare_mutation()?;
         }
         self.try_emit_run_event(super::protocol::RunEventKind::ToolAuthorized {
             tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
@@ -594,19 +723,55 @@ impl Agent {
         self.try_emit_run_event(super::protocol::RunEventKind::ToolStarted {
             tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
             effective_tool_name: name.to_string(),
-            idempotency_key,
+            idempotency_key: ctx.idempotency_key.clone().unwrap_or(idempotency_key),
         })?;
 
+        if mutates {
+            lease.arm(format!(
+                "{}:{}",
+                self.active_run_id.0,
+                ctx.tool_use_id.as_deref().unwrap_or("direct")
+            ));
+        }
+        if mutates {
+            ctx.harness.mark_pending(
+                &format!(
+                    "{}:{}",
+                    self.active_run_id.0,
+                    ctx.tool_use_id.as_deref().unwrap_or("direct")
+                ),
+                &plan,
+            )?;
+        }
         let started = std::time::Instant::now();
-        let mut tool_output = match tokio::time::timeout(
-            std::time::Duration::from_millis(plan.timeout_ms.max(1)),
-            tool.run(input, ctx),
-        )
-        .await
+        let execution_timeout = std::time::Duration::from_millis(plan.timeout_ms.max(1)).min(
+            ctx.harness
+                .budget
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remaining_time()?,
+        );
+        let mut tool_output = match tokio::time::timeout(execution_timeout, tool.run(input, ctx))
+            .await
         {
             Ok(Ok(out)) => out,
+            Ok(Err(e)) if keyed => {
+                self.try_emit_run_event(super::protocol::RunEventKind::ToolOutcomeUnknown {
+                    tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
+                    effective_tool_name: name.into(),
+                    reason: e.to_string(),
+                })?;
+                return Err(e);
+            }
             Ok(Err(e)) => ToolOutput::error(e.to_string()),
             Err(_) => {
+                if mutates {
+                    lease.quarantine(format!(
+                        "{}:{}",
+                        self.active_run_id.0,
+                        ctx.tool_use_id.as_deref().unwrap_or("direct")
+                    ));
+                }
                 self.run_warnings.lock().unwrap_or_else(|e| e.into_inner()).push(format!("Tool '{name}' timed out with an unknown outcome; reconcile before further mutations"));
                 self.try_emit_run_event(super::protocol::RunEventKind::ToolOutcomeUnknown {
                     tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
@@ -630,6 +795,29 @@ impl Agent {
             ));
         }
 
+        if name != "task_control" {
+            let evidence_id = ctx.harness.record(name, input, &tool_output, &plan)?;
+            let mut metadata = tool_output
+                .metadata
+                .take()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(object) = metadata.as_object_mut() {
+                object.insert("evidence_id".into(), evidence_id.clone().into());
+            }
+            tool_output.metadata = Some(metadata);
+        }
+        if let Some(key) = &receipt_key {
+            // Receipt is committed before reporting success; failure leaves an unknown operation.
+            ctx.harness.receipt_write(
+                key,
+                &input_hash,
+                Some(if tool_output.is_error {
+                    ToolOutput::error(tool_output.content.clone())
+                } else {
+                    ToolOutput::success(tool_output.content.clone())
+                }),
+            )?;
+        }
         self.notify_after_tool(name, &tool_output).await;
 
         self.try_emit_run_event(super::protocol::RunEventKind::ToolFinished {
@@ -638,6 +826,14 @@ impl Agent {
             is_error: tool_output.is_error,
             duration_ms: started.elapsed().as_millis() as u64,
         })?;
+        lease.complete();
+        if mutates {
+            ctx.harness.clear_pending(&format!(
+                "{}:{}",
+                self.active_run_id.0,
+                ctx.tool_use_id.as_deref().unwrap_or("direct")
+            ))?;
+        }
 
         Ok(tool_output)
     }

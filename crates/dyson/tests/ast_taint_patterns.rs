@@ -25,6 +25,8 @@ fn test_ctx(dir: &Path) -> ToolContext {
         subagent_events: None,
         artefacts: None,
         current_chat_id: None,
+        harness: dyson::agent::task::TaskRuntime::default(),
+        idempotency_key: None,
     }
 }
 

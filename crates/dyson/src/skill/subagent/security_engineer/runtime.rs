@@ -22,6 +22,7 @@ use crate::skill::subagent::orchestrator::OrchestratorInput;
 use crate::skill::subagent::{ChildSpawn, spawn_child};
 
 pub(crate) struct SecurityHarnessRuntime {
+    pub harness: crate::agent::task::TaskRuntime,
     pub config_name: &'static str,
     pub provider: LlmProvider,
     pub model: String,
@@ -85,6 +86,7 @@ pub(super) async fn spawn_stage(
         system_prompt,
     );
     let out = spawn_child(ChildSpawn {
+        harness: rt.harness.clone(),
         name: stage.as_str(),
         settings,
         inherited_tools: rt.all_tools.clone(),

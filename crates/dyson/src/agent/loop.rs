@@ -237,6 +237,7 @@ impl Agent {
         stream_error_attempts: usize,
         output: &mut dyn Output,
     ) -> Result<StreamAttempt> {
+        let observed_input = response.input_tokens;
         let (stream_result, emitted_visible_output, emitted_tool_use, estimated_output_tokens) = {
             let mut retry_output = StreamRetryOutput::new(output);
             let stream_result =
@@ -248,6 +249,12 @@ impl Agent {
                 retry_output.estimated_output_tokens,
             )
         };
+        if let Some(reservation) = self.pending_task_budget.take()
+            && let Ok((_, _, tokens, _)) = &stream_result
+        {
+            reservation.settle(observed_input, *tokens);
+        }
+        self.tool_context.harness.checkpoint()?;
         let transport_retryable_mid_stream =
             matches!(&stream_result, Err(crate::error::DysonError::Http(_)));
         match stream_result {
@@ -536,12 +543,49 @@ impl Agent {
     /// Assumes the caller has already pushed the user message to
     /// `self.conversation.messages`.
     pub(super) async fn run_inner(&mut self, output: &mut dyn Output) -> Result<String> {
+        let deadline = self
+            .tool_context
+            .harness
+            .budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remaining_time();
+        let deadline = match deadline {
+            Ok(d) => d,
+            Err(e) => {
+                self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+                return Err(e);
+            }
+        };
+        let runtime = self.tool_context.harness.clone();
+        let result = tokio::time::timeout(
+            deadline,
+            super::task::budget::ACTIVE.scope(runtime, self.run_inner_impl(output)),
+        )
+        .await;
+        match result {
+            Ok(value) => value,
+            Err(_) => {
+                self.pending_task_budget.take();
+                self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+                Err(crate::error::DysonError::Llm(
+                    "task elapsed-time budget exhausted".into(),
+                ))
+            }
+        }
+    }
+
+    async fn run_inner_impl(&mut self, output: &mut dyn Output) -> Result<String> {
         self.conversation.turn_count += 1;
         self.conversation.budget_warning_fired = false;
 
         let mut progress = TurnProgress::default();
 
-        let skill_fragments = self.collect_skill_context().await;
+        let skill_fragments = format!(
+            "{}\nTask checkpoint: {}",
+            self.collect_skill_context().await,
+            self.tool_context.harness.resume_summary()
+        );
 
         let turn_system_prompt: Arc<str> = if skill_fragments.is_empty() {
             Arc::clone(&self.system_prompt)
@@ -555,7 +599,30 @@ impl Agent {
 
         let mut recovered_this_turn = false;
 
+        let mut progress_nudged = false;
         'iter: for iteration in 0..self.max_iterations {
+            if self
+                .tool_context
+                .harness
+                .budget
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .exhausted()
+            {
+                self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+                break;
+            }
+            let stagnant = self.tool_context.harness.stagnant_calls();
+            if stagnant >= 16 {
+                self.last_run_status = super::protocol::RunStatus::Partial;
+                progress.final_text = "Task paused: repeated attempts have produced no new successful evidence. Review the durable task checkpoint and blockers before continuing.".into();
+                output.text_delta(&progress.final_text)?;
+                break;
+            }
+            if stagnant >= 8 && !progress_nudged {
+                self.conversation.messages.push(Message::user("TASK STALLED: eight attempts produced no new successful evidence, even across changed commands. Re-read task_control status, change the hypothesis or strategy, and verify a concrete criterion. Further unproductive work will pause this run."));
+                progress_nudged = true;
+            }
             if !self.conversation.token_budget.has_budget() {
                 self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
                 break;
@@ -837,6 +904,33 @@ impl Agent {
                 .max(1)
                 .min(u32::MAX as usize) as u32,
         );
+        let estimated_input = self
+            .conversation
+            .messages
+            .iter()
+            .map(Message::estimate_tokens)
+            .sum::<usize>()
+            + crate::message::estimate_text_tokens(&self.system_prompt)
+            + crate::message::estimate_text_tokens(skill_fragments)
+            + self.tool_registry.cached_tokens;
+        let (reservation, max_output) = match super::task::budget::Reservation::reserve(
+            self.tool_context.harness.budget.clone(),
+            &config.model,
+            estimated_input as u64,
+            config.max_tokens,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+                return StreamResult::Error(error);
+            }
+        };
+        config.max_tokens = max_output;
+        self.pending_task_budget = Some(reservation);
+        if let Err(error) = self.tool_context.harness.checkpoint() {
+            self.pending_task_budget.take();
+            return StreamResult::Error(error);
+        }
         let err = match client
             .stream(
                 &self.conversation.messages,
@@ -851,6 +945,8 @@ impl Agent {
             Ok(s) => return StreamResult::Response(s),
             Err(e) => e,
         };
+        self.pending_task_budget.take();
+        let _ = self.tool_context.harness.checkpoint();
 
         if *recovered_this_turn {
             return StreamResult::Error(err);

@@ -87,6 +87,7 @@ mod reflection;
 mod result_formatter;
 mod retry;
 mod silent_output;
+pub mod task;
 pub use silent_output::SilentOutput;
 mod r#loop;
 mod persistence;
@@ -137,6 +138,7 @@ use self::token_budget::TokenBudget;
 /// Conversation history (`conversation.messages`) persists across calls for
 /// multi-turn conversations.
 pub struct Agent {
+    pending_task_budget: Option<task::budget::Reservation>,
     /// LLM client for streaming completions, gated by rate limiting.
     ///
     /// Stored as a [`RateLimitedHandle`] so that multiple agents can share
@@ -371,6 +373,7 @@ impl Agent {
         advisor: Option<Box<dyn crate::advisor::Advisor>>,
     ) -> Result<Self> {
         let mut tool_registry = ToolRegistry::from_skills(&skills);
+        tool_registry.register_extra_tool(Arc::new(task::TaskTool));
 
         // Bind the advisor to the parent's resources, then register its tools
         // and collect API injections.
@@ -404,8 +407,18 @@ impl Agent {
             None
         };
 
-        let system_prompt = Self::compose_system_prompt(settings, &skills);
+        let system_prompt = format!(
+            "{}\n\n{}",
+            Self::compose_system_prompt(settings, &skills),
+            task::PROMPT
+        );
         let tool_context = Self::build_tool_context(&sandbox, workspace);
+        tool_context
+            .harness
+            .budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .limits = settings.task_budget.clone();
         let dream_handle = Self::build_dream_handle(&tool_context, nudge_interval);
 
         let config = CompletionConfig {
@@ -422,6 +435,7 @@ impl Agent {
         );
 
         Ok(Self {
+            pending_task_budget: None,
             client,
             sandbox,
             skills,
@@ -449,6 +463,10 @@ impl Agent {
             repeated_failures: std::collections::HashMap::new(),
             repeated_observations: std::collections::HashMap::new(),
         })
+    }
+
+    pub(crate) fn inherit_task_runtime(&mut self, parent: &task::TaskRuntime) {
+        self.tool_context.harness = parent.child();
     }
 
     /// Compose the system prompt from base + model info + skill fragments.
@@ -505,6 +523,8 @@ impl Agent {
             subagent_events: None,
             artefacts: None,
             current_chat_id: None,
+            harness: crate::agent::task::TaskRuntime::default(),
+            idempotency_key: None,
         };
         tool_context.workspace = workspace;
         tool_context
@@ -694,6 +714,7 @@ impl Agent {
     /// Append a direct controller-handled turn, such as an executable
     /// local-skill slash command that bypassed the LLM.
     pub fn append_direct_turn(&mut self, user_input: &str, assistant_output: &str) {
+        self.tool_context.harness.seed_objective(user_input);
         self.conversation.messages.push(Message::user(user_input));
         self.conversation
             .messages
@@ -912,6 +933,9 @@ impl Agent {
         );
         // Append the user's message to history.
         self.conversation.messages.push(Message::user(user_input));
+        if self.tool_context.depth == 0 {
+            self.tool_context.harness.resume_user_turn();
+        }
         self.persist();
         let result = match self.begin_run_protocol() {
             Ok(()) => self.run_inner(output).await,
@@ -938,6 +962,9 @@ impl Agent {
         self.conversation
             .messages
             .push(Message::user_multimodal(blocks));
+        if self.tool_context.depth == 0 {
+            self.tool_context.harness.resume_user_turn();
+        }
         self.persist();
         let result = match self.begin_run_protocol() {
             Ok(()) => self.run_inner(output).await,
@@ -991,6 +1018,9 @@ impl Agent {
         self.conversation
             .messages
             .push(Message::user_multimodal(blocks));
+        if self.tool_context.depth == 0 {
+            self.tool_context.harness.resume_user_turn();
+        }
         self.persist();
         let result = match self.begin_run_protocol() {
             Ok(()) => self.run_inner(output).await,
@@ -1019,6 +1049,7 @@ impl Agent {
         protocol::RunOutcome {
             run_id: self.active_run_id.clone(),
             status: self.last_run_status,
+            task: Some(self.tool_context.harness.snapshot()),
             final_text,
             usage: protocol::RunUsage {
                 input_tokens: self

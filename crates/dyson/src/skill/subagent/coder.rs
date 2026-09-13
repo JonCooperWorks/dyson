@@ -139,6 +139,7 @@ impl Tool for CoderTool {
         );
 
         spawn_child(ChildSpawn {
+            harness: ctx.harness.clone(),
             name: "coder",
             settings,
             inherited_tools: self.inherited_tools.clone(),

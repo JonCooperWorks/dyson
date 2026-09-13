@@ -120,6 +120,7 @@ impl Tool for AdvisorTool {
             builder = builder.workspace(Arc::clone(ws));
         }
         let mut child_agent = builder.build()?;
+        child_agent.inherit_task_runtime(&ctx.harness);
         child_agent.set_depth(ctx.depth + 1);
 
         let mut capture = crate::skill::subagent::CaptureOutput::new();

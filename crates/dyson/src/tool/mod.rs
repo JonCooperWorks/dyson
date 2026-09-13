@@ -142,6 +142,16 @@ pub trait Tool: Send + Sync {
     /// arguments to provide.  Must be a valid JSON Schema object.
     fn input_schema(&self) -> serde_json::Value;
 
+    /// Keyed tools must use this stable domain key in the upstream request.
+    fn idempotency_key(&self, _input: &serde_json::Value, _ctx: &ToolContext) -> Option<String> {
+        None
+    }
+
+    /// Read-only provider result lookup for an indeterminate keyed operation.
+    async fn lookup_result(&self, _key: &str, _ctx: &ToolContext) -> Result<Option<ToolOutput>> {
+        Ok(None)
+    }
+
     /// Whether this tool should only be available when Dyson executes
     /// tools directly (ToolMode::Execute).
     ///
@@ -439,6 +449,10 @@ pub struct ToolContext {
 
     /// Current conversation id for tools that need chat context.
     pub current_chat_id: Option<String>,
+    /// Shared task contract, evidence and child budget.
+    pub harness: crate::agent::task::TaskRuntime,
+    /// Stable provider idempotency key for opted-in keyed tools.
+    pub idempotency_key: Option<String>,
 }
 
 impl Clone for ToolContext {
@@ -456,6 +470,8 @@ impl Clone for ToolContext {
             subagent_events: self.subagent_events.clone(),
             artefacts: self.artefacts.as_ref().map(Arc::clone),
             current_chat_id: self.current_chat_id.clone(),
+            harness: self.harness.clone(),
+            idempotency_key: self.idempotency_key.clone(),
         }
     }
 }
@@ -479,6 +495,8 @@ impl ToolContext {
             subagent_events: None,
             artefacts: None,
             current_chat_id: None,
+            harness: crate::agent::task::TaskRuntime::default(),
+            idempotency_key: None,
         })
     }
 
@@ -501,6 +519,8 @@ impl ToolContext {
             subagent_events: None,
             artefacts: None,
             current_chat_id: None,
+            harness: crate::agent::task::TaskRuntime::default(),
+            idempotency_key: None,
         }
     }
 
@@ -524,6 +544,8 @@ impl ToolContext {
             subagent_events: None,
             artefacts: None,
             current_chat_id: None,
+            harness: crate::agent::task::TaskRuntime::default(),
+            idempotency_key: None,
         }
     }
 

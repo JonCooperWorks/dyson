@@ -63,6 +63,24 @@ use dyson_core::{Message, Result};
 /// call `save()` after each agent turn and `load()` when creating an
 /// agent for a chat.
 pub trait ChatHistory: Send + Sync {
+    /// Include durable task records even when the visible transcript was rotated.
+    fn list_harness_chats(&self) -> Result<Vec<String>> {
+        self.list()
+    }
+    /// Durable harness records, separate from the compacted transcript.
+    fn save_harness_record(
+        &self,
+        _chat_id: &str,
+        _key: &str,
+        _value: &serde_json::Value,
+    ) -> Result<()> {
+        Err(dyson_core::DysonError::Llm(
+            "history backend does not support durable task records".into(),
+        ))
+    }
+    fn load_harness_record(&self, _chat_id: &str, _key: &str) -> Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
     /// Save the conversation history for a chat.
     ///
     /// Called after each agent turn.  Replaces any previously saved

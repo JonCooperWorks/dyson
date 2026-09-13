@@ -269,6 +269,8 @@ mod tests {
             subagent_events: None,
             artefacts: None,
             current_chat_id: None,
+            harness: crate::agent::task::TaskRuntime::default(),
+            idempotency_key: None,
         };
 
         (ctx, tmp)
@@ -371,6 +373,8 @@ mod tests {
             subagent_events: None,
             artefacts: None,
             current_chat_id: None,
+            harness: crate::agent::task::TaskRuntime::default(),
+            idempotency_key: None,
         };
 
         let tool = ExportConversationTool;

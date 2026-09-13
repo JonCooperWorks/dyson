@@ -49,6 +49,9 @@ pub struct RunUsage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunOutcome {
+    /// Task completion/evidence and shared usage, separate from transport status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<serde_json::Value>,
     pub run_id: RunId,
     pub status: RunStatus,
     pub final_text: String,

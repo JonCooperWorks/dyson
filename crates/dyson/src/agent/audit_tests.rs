@@ -427,3 +427,545 @@ async fn repeated_unchanged_reads_surface_lack_of_progress() {
             .contains("NO PROGRESS")
     );
 }
+
+#[tokio::test]
+async fn task_completion_requires_observed_evidence() {
+    let (mut agent, mut output) = make_agent_with_history(
+        vec![],
+        vec![text("all done", StopReason::EndTurn)],
+        CompactionConfig::default(),
+    );
+    let plan = agent.execute_tool_direct("task_control", serde_json::json!({"action":"plan","objective":"fix the test","criteria":[{"id":"tests","description":"test passes","tool":"bash","contains":"test result: ok"}]})).await.unwrap();
+    assert!(
+        !plan.is_error,
+        "task contract must be accepted: {}",
+        plan.content
+    );
+    let outcome = agent.run_detailed("continue", &mut output).await.unwrap();
+    assert_eq!(
+        outcome.status,
+        protocol::RunStatus::Partial,
+        "a claim of completion is not evidence"
+    );
+}
+
+#[tokio::test]
+async fn task_checkpoint_survives_agent_reconstruction() {
+    let dir = tempfile::tempdir().unwrap();
+    let store =
+        Arc::new(crate::chat_history::DiskChatHistory::new(dir.path().to_path_buf()).unwrap());
+    let (mut agent, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    agent.set_chat_history(store.clone(), "durable".into());
+    let result = agent.execute_tool_direct("task_control", serde_json::json!({"action":"plan","objective":"ship invoices","criteria":[{"id":"test","description":"passes","tool":"bash","contains":"ok"}]})).await.unwrap();
+    assert!(!result.is_error);
+    drop(agent);
+    let (mut restored, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    restored.set_chat_history(store, "durable".into());
+    let status = restored
+        .execute_tool_direct("task_control", serde_json::json!({"action":"status"}))
+        .await
+        .unwrap();
+    assert!(status.content.contains("ship invoices"));
+}
+
+struct SlowSharedMutation(Arc<AtomicUsize>, Arc<AtomicUsize>);
+#[async_trait::async_trait]
+impl Tool for SlowSharedMutation {
+    fn name(&self) -> &str {
+        "shared_mutation"
+    }
+    fn description(&self) -> &str {
+        "claims the same resource across conversations"
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object"})
+    }
+    async fn run(&self, _: &serde_json::Value, _: &crate::tool::ToolContext) -> Result<ToolOutput> {
+        let active = self.0.fetch_add(1, Ordering::SeqCst) + 1;
+        self.1.fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        self.0.fetch_sub(1, Ordering::SeqCst);
+        Ok(ToolOutput::success("done"))
+    }
+}
+#[tokio::test]
+async fn separate_conversations_serialize_shared_mutations() {
+    let (mut a, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    let (mut b, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    let max = Arc::new(AtomicUsize::new(0));
+    let tool = Arc::new(SlowSharedMutation(
+        Arc::new(AtomicUsize::new(0)),
+        max.clone(),
+    ));
+    a.tool_registry.register_extra_tool(tool.clone());
+    b.tool_registry.register_extra_tool(tool);
+    let (x, y) = tokio::join!(
+        a.execute_tool_direct("shared_mutation", serde_json::json!({})),
+        b.execute_tool_direct("shared_mutation", serde_json::json!({}))
+    );
+    assert!(x.is_ok() && y.is_ok());
+    assert_eq!(max.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn task_input_budget_blocks_before_dispatch() {
+    let (mut agent, mut output) = make_agent_with_history(
+        vec![],
+        vec![text("should never run", StopReason::EndTurn)],
+        CompactionConfig::default(),
+    );
+    agent
+        .tool_context
+        .harness
+        .budget
+        .lock()
+        .unwrap()
+        .limits
+        .max_input_tokens = Some(0);
+    let result = agent.run_detailed("work", &mut output).await.unwrap();
+    assert_eq!(result.usage.llm_calls, 0);
+    assert_eq!(result.status, protocol::RunStatus::BudgetExceeded);
+}
+#[tokio::test]
+async fn task_deadline_blocks_before_dispatch() {
+    let (mut agent, mut output) = make_agent_with_history(
+        vec![],
+        vec![text("should never run", StopReason::EndTurn)],
+        CompactionConfig::default(),
+    );
+    agent
+        .tool_context
+        .harness
+        .budget
+        .lock()
+        .unwrap()
+        .limits
+        .max_elapsed_ms = Some(0);
+    let result = agent.run_detailed("work", &mut output).await.unwrap();
+    assert_eq!(result.usage.llm_calls, 0);
+    assert_eq!(result.status, protocol::RunStatus::BudgetExceeded);
+}
+
+#[tokio::test]
+async fn another_conversation_invalidates_stale_verification() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("proof");
+    std::fs::write(&path, "PASS").unwrap();
+    let (mut a, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    let (mut b, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    a.execute_tool_direct("task_control",serde_json::json!({"action":"plan","objective":"verify file","criteria":[{"id":"proof","description":"file passes","tool":"read_file","contains":"PASS"}]})).await.unwrap();
+    let read = a
+        .execute_tool_direct("read_file", serde_json::json!({"file_path":path}))
+        .await
+        .unwrap();
+    let id = read.metadata.unwrap()["evidence_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    b.execute_tool_direct(
+        "write_file",
+        serde_json::json!({"file_path":path,"content":"FAIL"}),
+    )
+    .await
+    .unwrap();
+    let result = a
+        .execute_tool_direct(
+            "task_control",
+            serde_json::json!({"action":"verify","criterion":"proof","evidence_id":id}),
+        )
+        .await;
+    assert!(
+        result.is_err() || result.unwrap().is_error,
+        "another conversation changed the verified resource"
+    );
+}
+
+#[tokio::test]
+async fn original_evidence_survives_compaction_and_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("proof");
+    std::fs::write(
+        &path,
+        format!(
+            "{}MIDDLE_DECISIVE_EVIDENCE{}",
+            "x".repeat(12000),
+            "z".repeat(12000)
+        ),
+    )
+    .unwrap();
+    let store =
+        Arc::new(crate::chat_history::DiskChatHistory::new(dir.path().join("history")).unwrap());
+    let (mut a, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    a.set_chat_history(store.clone(), "evidence".into());
+    let read = a
+        .execute_tool_direct("read_file", serde_json::json!({"file_path":path}))
+        .await
+        .unwrap();
+    let id = read.metadata.unwrap()["evidence_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    drop(a);
+    let (mut b, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    b.set_chat_history(store, "evidence".into());
+    let page = b
+        .execute_tool_direct(
+            "task_control",
+            serde_json::json!({"action":"evidence","evidence_id":id,"offset":11000,"limit":3000}),
+        )
+        .await
+        .unwrap();
+    assert!(page.content.contains("MIDDLE_DECISIVE_EVIDENCE"));
+}
+
+struct KeyedReceiptTool(Arc<AtomicUsize>);
+#[async_trait::async_trait]
+impl Tool for KeyedReceiptTool {
+    fn name(&self) -> &str {
+        "keyed_receipt"
+    }
+    fn description(&self) -> &str {
+        "idempotent fixture"
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object"})
+    }
+    fn execution_plan(
+        &self,
+        _: &serde_json::Value,
+        _: &crate::tool::ToolContext,
+    ) -> crate::tool::ToolExecutionPlan {
+        let mut p = crate::tool::ToolExecutionPlan::write("receipt:test");
+        p.idempotency = crate::tool::Idempotency::Keyed;
+        p
+    }
+    fn idempotency_key(
+        &self,
+        _: &serde_json::Value,
+        _: &crate::tool::ToolContext,
+    ) -> Option<String> {
+        Some("operation-42".into())
+    }
+    async fn run(
+        &self,
+        _: &serde_json::Value,
+        ctx: &crate::tool::ToolContext,
+    ) -> Result<ToolOutput> {
+        assert_eq!(ctx.idempotency_key.as_deref(), Some("operation-42"));
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput::success("receipt-42"))
+    }
+    async fn lookup_result(
+        &self,
+        key: &str,
+        _: &crate::tool::ToolContext,
+    ) -> Result<Option<ToolOutput>> {
+        assert_eq!(key, "operation-42");
+        Ok(Some(ToolOutput::success("provider-receipt-42")))
+    }
+}
+#[tokio::test]
+async fn keyed_receipts_deduplicate_across_restart_and_reject_changed_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let store =
+        Arc::new(crate::chat_history::DiskChatHistory::new(dir.path().join("history")).unwrap());
+    let count = Arc::new(AtomicUsize::new(0));
+    let (mut a, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    a.set_chat_history(store.clone(), "receipts".into());
+    a.tool_registry
+        .register_extra_tool(Arc::new(KeyedReceiptTool(count.clone())));
+    assert_eq!(
+        a.execute_tool_direct("keyed_receipt", serde_json::json!({"amount":1}))
+            .await
+            .unwrap()
+            .content,
+        "receipt-42"
+    );
+    drop(a);
+    let (mut b, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    b.set_chat_history(store, "receipts".into());
+    b.tool_registry
+        .register_extra_tool(Arc::new(KeyedReceiptTool(count.clone())));
+    assert_eq!(
+        b.execute_tool_direct("keyed_receipt", serde_json::json!({"amount":1}))
+            .await
+            .unwrap()
+            .content,
+        "receipt-42"
+    );
+    assert!(
+        b.execute_tool_direct("keyed_receipt", serde_json::json!({"amount":2}))
+            .await
+            .is_err()
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+#[tokio::test]
+async fn keyed_unknown_uses_provider_lookup_without_reexecuting() {
+    let (mut a, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    let count = Arc::new(AtomicUsize::new(0));
+    a.tool_registry
+        .register_extra_tool(Arc::new(KeyedReceiptTool(count.clone())));
+    a.tool_context
+        .harness
+        .receipt_write(
+            &super::super::task::digest("keyed_receipt:operation-42"),
+            &super::super::task::digest("{}"),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        a.execute_tool_direct("keyed_receipt", serde_json::json!({}))
+            .await
+            .unwrap()
+            .content,
+        "provider-receipt-42"
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+}
+#[test]
+fn child_budget_reservations_cannot_overspend_parent() {
+    use super::super::task::{
+        TaskRuntime,
+        budget::{Price, Reservation},
+    };
+    let parent = TaskRuntime::default();
+    {
+        let mut b = parent.budget.lock().unwrap();
+        b.limits.max_cost_microusd = Some(10);
+        b.limits.prices.insert(
+            "m".into(),
+            Price {
+                input_microusd_per_million: 1_000_000,
+                output_microusd_per_million: 1_000_000,
+            },
+        );
+    }
+    let child = parent.child();
+    let (hold, cap) = Reservation::reserve(parent.budget.clone(), "m", 2, 8).unwrap();
+    assert_eq!(cap, 8);
+    assert!(Reservation::reserve(child.budget.clone(), "m", 1, 1).is_err());
+    hold.settle(Some(2), 3);
+    assert_eq!(parent.budget.lock().unwrap().cost_microusd, 5);
+    let (_second, cap) = Reservation::reserve(child.budget, "m", 1, 100).unwrap();
+    assert_eq!(cap, 4);
+}
+#[test]
+fn cost_budget_refuses_unknown_prices() {
+    let runtime = super::super::task::TaskRuntime::default();
+    runtime.budget.lock().unwrap().limits.max_cost_microusd = Some(10);
+    assert!(
+        super::super::task::budget::Reservation::reserve(runtime.budget, "unpriced", 1, 1).is_err()
+    );
+}
+
+#[tokio::test]
+async fn verified_completion_includes_real_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("proof");
+    std::fs::write(&path, "PASS").unwrap();
+    let (mut a, mut output) = make_agent_with_history(
+        vec![],
+        vec![text("done", StopReason::EndTurn)],
+        CompactionConfig::default(),
+    );
+    a.execute_tool_direct("task_control",serde_json::json!({"action":"plan","objective":"verify file","criteria":[{"id":"proof","description":"file passes","tool":"read_file","contains":"PASS"}]})).await.unwrap();
+    let read = a
+        .execute_tool_direct("read_file", serde_json::json!({"file_path":path}))
+        .await
+        .unwrap();
+    let id = read.metadata.unwrap()["evidence_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !a.execute_tool_direct(
+            "task_control",
+            serde_json::json!({"action":"verify","criterion":"proof","evidence_id":id})
+        )
+        .await
+        .unwrap()
+        .is_error
+    );
+    let outcome = a.run_detailed("report", &mut output).await.unwrap();
+    assert_eq!(outcome.status, protocol::RunStatus::Completed);
+    assert_eq!(outcome.task.unwrap()["completion"], "verified");
+}
+struct ChangingFailure;
+#[async_trait::async_trait]
+impl Tool for ChangingFailure {
+    fn name(&self) -> &str {
+        "different_failure"
+    }
+    fn description(&self) -> &str {
+        "different failed commands without progress"
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object"})
+    }
+    fn execution_plan(
+        &self,
+        _: &serde_json::Value,
+        _: &crate::tool::ToolContext,
+    ) -> crate::tool::ToolExecutionPlan {
+        crate::tool::ToolExecutionPlan::read("failure-fixture")
+    }
+    async fn run(&self, _: &serde_json::Value, _: &crate::tool::ToolContext) -> Result<ToolOutput> {
+        Ok(ToolOutput::error("same underlying failure"))
+    }
+}
+#[tokio::test]
+async fn changing_commands_without_progress_pauses_task() {
+    let streams = (0..20)
+        .map(|i| {
+            vec![
+                StreamEvent::ToolUseComplete {
+                    id: format!("f{i}"),
+                    name: "different_failure".into(),
+                    input: serde_json::json!({"attempt":i}),
+                },
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::ToolUse,
+                    output_tokens: Some(1),
+                },
+            ]
+        })
+        .collect();
+    let (mut a, mut output) = make_agent_with_history(vec![], streams, CompactionConfig::default());
+    a.tool_registry
+        .register_extra_tool(Arc::new(ChangingFailure));
+    let outcome = a.run_detailed("fix this", &mut output).await.unwrap();
+    assert_eq!(outcome.status, protocol::RunStatus::Partial);
+    assert_eq!(outcome.usage.llm_calls, 16);
+    assert!(outcome.final_text.contains("Task paused"));
+}
+#[tokio::test]
+async fn failed_provider_retries_consume_shared_budget() {
+    use super::super::task::{
+        TaskRuntime,
+        budget::{ACTIVE, charge_uncertain_retry},
+    };
+    let runtime = TaskRuntime::default();
+    runtime.budget.lock().unwrap().limits.max_output_tokens = Some(10);
+    ACTIVE
+        .scope(runtime.clone(), async {
+            charge_uncertain_retry("m", 2, 6).unwrap();
+            assert!(charge_uncertain_retry("m", 2, 6).is_err());
+        })
+        .await;
+    assert_eq!(runtime.budget.lock().unwrap().output_tokens, 10);
+}
+
+#[tokio::test]
+async fn stale_read_cannot_overwrite_another_conversations_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shared");
+    std::fs::write(&path, "original").unwrap();
+    let (mut a, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    let (mut b, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    a.execute_tool_direct("read_file", serde_json::json!({"file_path":path}))
+        .await
+        .unwrap();
+    b.execute_tool_direct(
+        "write_file",
+        serde_json::json!({"file_path":path,"content":"b change"}),
+    )
+    .await
+    .unwrap();
+    let result = a
+        .execute_tool_direct(
+            "write_file",
+            serde_json::json!({"file_path":path,"content":"stale a change"}),
+        )
+        .await;
+    assert!(result.is_err() || result.unwrap().is_error);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "b change");
+}
+
+#[tokio::test]
+async fn recovered_foreign_mutation_blocks_conflicting_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shared");
+    let store =
+        Arc::new(crate::chat_history::DiskChatHistory::new(dir.path().join("history")).unwrap());
+    let (mut old, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    old.set_chat_history(store.clone(), "other".into());
+    old.tool_context.harness.checkpoint().unwrap();
+    let run = protocol::RunId::new();
+    let operation = format!("{}:lost", run.0);
+    store
+        .append_run_event(
+            "other",
+            &protocol::RunEvent::new(
+                1,
+                run,
+                1,
+                protocol::RunEventKind::ToolStarted {
+                    tool_use_id: "lost".into(),
+                    effective_tool_name: "write_file".into(),
+                    idempotency_key: "lost".into(),
+                },
+            ),
+        )
+        .unwrap();
+    let mut checkpoint = store.load_harness_record("other", "task").unwrap().unwrap();
+    checkpoint["pending"] = serde_json::json!({operation: [{"key":format!("file:{}",path.display()),"access":"write"}]});
+    store
+        .save_harness_record("other", "task", &checkpoint)
+        .unwrap();
+    drop(old);
+    let (mut current, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    current.set_chat_history(store, "current".into());
+    let result = current
+        .execute_tool_direct(
+            "write_file",
+            serde_json::json!({"file_path":path,"content":"bad"}),
+        )
+        .await;
+    assert!(result.is_err() || result.unwrap().is_error);
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn explicit_user_resumption_releases_no_progress_pause() {
+    let (mut agent, mut output) = make_agent_with_history(
+        vec![],
+        vec![text("resumed", StopReason::EndTurn)],
+        CompactionConfig::default(),
+    );
+    for _ in 0..16 {
+        agent
+            .tool_context
+            .harness
+            .record(
+                "failed",
+                &serde_json::json!({}),
+                &ToolOutput::error("same failure"),
+                &crate::tool::ToolExecutionPlan::read("task:test"),
+            )
+            .unwrap();
+    }
+    let outcome = agent
+        .run_detailed("try this new approach", &mut output)
+        .await
+        .unwrap();
+    assert_eq!(outcome.final_text, "resumed");
+}
+
+#[test]
+fn restored_task_respects_tighter_operator_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let store =
+        Arc::new(crate::chat_history::DiskChatHistory::new(dir.path().to_path_buf()).unwrap());
+    let original = super::task::TaskRuntime::default();
+    original.attach(store.clone(), "limits".into());
+    original.budget.lock().unwrap().limits.max_input_tokens = Some(1000);
+    original.checkpoint().unwrap();
+    let restored = super::task::TaskRuntime::default();
+    restored.budget.lock().unwrap().limits.max_input_tokens = Some(100);
+    restored.attach(store, "limits".into());
+    assert_eq!(
+        restored.budget.lock().unwrap().limits.max_input_tokens,
+        Some(100)
+    );
+}

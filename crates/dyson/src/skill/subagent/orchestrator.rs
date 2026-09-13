@@ -366,6 +366,7 @@ impl Tool for OrchestratorTool {
         if self.config.harness == Some(OrchestratorHarness::SecurityResearch) {
             return super::security_engineer::run_security_harness(
                 super::security_engineer::SecurityHarnessRuntime {
+                    harness: ctx.harness.clone(),
                     config_name: self.config.name,
                     provider: self.provider.clone(),
                     model: self.model.clone(),
@@ -414,6 +415,7 @@ impl Tool for OrchestratorTool {
 
         let child_working_dir = scoped_dir.clone();
         let spawn_result = spawn_child(ChildSpawn {
+            harness: ctx.harness.clone(),
             name: self.config.name,
             settings,
             inherited_tools: all_tools,

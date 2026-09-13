@@ -749,6 +749,8 @@ async fn memory_system_prompt_contains_usage_stats_and_curation_rules() {
         subagent_events: None,
         artefacts: None,
         current_chat_id: None,
+        harness: crate::agent::task::TaskRuntime::default(),
+        idempotency_key: None,
     };
 
     let prompt = reflection::build_memory_system_prompt(&ctx).await;
@@ -785,6 +787,8 @@ async fn reflection_system_prompt_lists_tools() {
         subagent_events: None,
         artefacts: None,
         current_chat_id: None,
+        harness: crate::agent::task::TaskRuntime::default(),
+        idempotency_key: None,
     };
     let prompt = reflection::build_reflection_system_prompt(&ctx).await;
     assert!(prompt.contains("skill_create"));
@@ -2976,8 +2980,8 @@ fn generic_advisor_inherits_parent_tools() {
     // The agent should have all the original tools PLUS the advisor tool.
     assert_eq!(
         agent.tool_registry.tools.len(),
-        skill_tool_count + 1,
-        "advisor tool should be registered alongside skill tools"
+        skill_tool_count + 2,
+        "advisor and task_control tools should be registered alongside skill tools"
     );
     assert!(
         agent.tool_registry.tools.contains_key("advisor"),
@@ -3063,8 +3067,8 @@ fn native_anthropic_advisor_injects_api_tool() {
     // No extra Dyson-side tools — native advisor is API-level.
     assert_eq!(
         agent.tool_registry.tools.len(),
-        skill_tool_count,
-        "native advisor should not add Dyson-side tools"
+        skill_tool_count + 1,
+        "task_control is registered; native advisor should not add Dyson-side tools"
     );
 
     // Should have one API tool injection.

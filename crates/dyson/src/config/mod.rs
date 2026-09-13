@@ -240,6 +240,8 @@ pub struct ControllerConfig {
 /// Knobs that control the agent loop and LLM interaction.
 #[derive(Debug, Clone)]
 pub struct AgentSettings {
+    /// Shared task input/output/cost/time caps and explicit model pricing.
+    pub task_budget: crate::agent::task::budget::Limits,
     /// LLM model identifier (e.g. "claude-sonnet-4-20250514").
     pub model: String,
 
@@ -945,6 +947,7 @@ pub struct WebSearchConfig {
 impl Default for AgentSettings {
     fn default() -> Self {
         Self {
+            task_budget: Default::default(),
             // No hardcoded model default.  The config loader rejects configs
             // that don't resolve to a concrete `agent.model` — users must
             // configure their model explicitly so Dyson never silently bills

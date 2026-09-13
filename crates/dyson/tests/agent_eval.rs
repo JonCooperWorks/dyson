@@ -263,11 +263,13 @@ fn empty_response_events() -> Vec<StreamEvent> {
 
 #[tokio::test]
 async fn durable_journal_records_and_grades_a_real_tool_trajectory() {
+    let fixture = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(fixture.path(), "journal-ok").unwrap();
     let llm = MockLlm::new(vec![
         tool_call_events(
             "call_journal",
-            "bash",
-            serde_json::json!({"command": "printf journal-ok"}),
+            "read_file",
+            serde_json::json!({"file_path": fixture.path()}),
         ),
         text_response_events("done"),
     ]);

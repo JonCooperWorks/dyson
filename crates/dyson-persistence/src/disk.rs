@@ -118,6 +118,77 @@ impl DiskChatHistory {
 }
 
 impl ChatHistory for DiskChatHistory {
+    fn list_harness_chats(&self) -> Result<Vec<String>> {
+        let mut chats = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            if entry.path().join("harness/task.json").is_file()
+                && let Some(chat) = entry.file_name().to_str()
+            {
+                chats.push(chat.to_owned());
+            }
+        }
+        Ok(chats)
+    }
+
+    fn save_harness_record(
+        &self,
+        chat_id: &str,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<()> {
+        use std::io::Write as _;
+        if [chat_id, key].iter().any(|s| {
+            s.is_empty()
+                || !s
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        }) {
+            return Err(dyson_core::DysonError::Llm(
+                "invalid harness record identifier".into(),
+            ));
+        }
+        let _guard = self.journal_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = self.chat_root(chat_id).join("harness");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{key}.json"));
+        let temp = dir.join(format!(".{key}.tmp"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
+        file.write_all(&serde_json::to_vec(value)?)?;
+        file.sync_all()?;
+        std::fs::rename(temp, path)?;
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    }
+    fn load_harness_record(&self, chat_id: &str, key: &str) -> Result<Option<serde_json::Value>> {
+        if [chat_id, key].iter().any(|s| {
+            s.is_empty()
+                || !s
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        }) {
+            return Err(dyson_core::DysonError::Llm(
+                "invalid harness record identifier".into(),
+            ));
+        }
+        match std::fs::read(
+            self.chat_root(chat_id)
+                .join("harness")
+                .join(format!("{key}.json")),
+        ) {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     fn save(&self, chat_id: &str, messages: &[Message]) -> Result<()> {
         let root = self.chat_root(chat_id);
         std::fs::create_dir_all(&root)?;

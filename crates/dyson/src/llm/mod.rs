@@ -643,6 +643,18 @@ impl LlmClient for RetryingLlmClient {
             {
                 Ok(r) => return Ok(r),
                 Err(e) if attempt < self.max_retries && is_retryable(&e) => {
+                    let input = messages.iter().map(Message::estimate_tokens).sum::<usize>()
+                        + crate::message::estimate_text_tokens(system)
+                        + crate::message::estimate_text_tokens(system_suffix)
+                        + tools
+                            .iter()
+                            .map(|t| crate::message::estimate_json_tokens(&t.input_schema))
+                            .sum::<usize>();
+                    crate::agent::task::budget::charge_uncertain_retry(
+                        &config.model,
+                        input as u64,
+                        config.max_tokens,
+                    )?;
                     // Server hint (Retry-After / X-RateLimit-Reset) wins over
                     // exponential backoff when present, but stays bounded so
                     // a misbehaving header can't hang the loop indefinitely.
