@@ -14,10 +14,7 @@ use std::fmt::Write;
 use crate::config::CompactionConfig;
 use crate::controller::Output;
 use crate::error::Result;
-use crate::llm::ToolDefinition;
 use crate::message::{ContentBlock, Message};
-
-use super::stream_handler;
 
 impl super::Agent {
     /// Compact the conversation using the five-phase Hermes-style algorithm.
@@ -113,10 +110,10 @@ impl super::Agent {
                         ContentBlock::ToolResult {
                             tool_use_id,
                             is_error,
-                            ..
+                            content,
                         } => ContentBlock::ToolResult {
                             tool_use_id: tool_use_id.clone(),
-                            content: "[tool output pruned]".to_string(),
+                            content: evidence_excerpt(content),
                             is_error: *is_error,
                         },
                         other => other.clone(),
@@ -240,29 +237,17 @@ impl super::Agent {
 
     /// Send messages to the LLM for summarisation and return the summary text.
     async fn summarise_messages(
-        &self,
+        &mut self,
         messages: &[Message],
         previous_summary: Option<&str>,
         output: &mut dyn Output,
     ) -> Result<String> {
         let compaction_system = self.build_compaction_prompt(previous_summary);
 
-        let empty_tools: &[ToolDefinition] = &[];
-        let response = self
-            .client
-            .access()?
-            .stream(
-                messages,
-                &compaction_system,
-                "",
-                empty_tools,
-                &std::collections::HashMap::new(),
-                &self.config,
-            )
+        let _ = output;
+        let assistant_msg = self
+            .auxiliary_completion(messages, &compaction_system, "", &mut super::SilentOutput)
             .await?;
-
-        let (assistant_msg, _tool_calls, _output_tokens, _stop_reason) =
-            stream_handler::process_stream(response.stream, output).await?;
 
         let mut result = String::new();
         for block in &assistant_msg.content {
@@ -286,6 +271,7 @@ impl super::Agent {
              ## Progress\nWhat has been done so far.\n\n\
              ## Key Decisions\nImportant choices and their rationale.\n\n\
              ## Files Modified\nList of files touched and changes made.\n\n\
+             ## Evidence and Uncertainty\nPreserve test results, exact errors, artifact paths, unknown tool outcomes and unverified claims.\n\n\
              ## Next Steps\nWhat was about to happen or still needs to happen.\n\n\
              Be concise but thorough.  Do NOT call any tools.  \
              Do NOT ask questions.  Just summarise.",
@@ -382,4 +368,19 @@ impl super::Agent {
         let message_tokens = self.conversation.estimated_message_tokens();
         system_tokens + message_tokens + self.tool_registry.cached_tokens
     }
+}
+
+/// Preserve both leading observations and terminal failures/artifact references.
+fn evidence_excerpt(content: &str) -> String {
+    const KEEP: usize = 4_000;
+    let chars: Vec<char> = content.chars().collect();
+    if chars.len() <= KEEP * 2 {
+        return content.to_owned();
+    }
+    format!(
+        "{}\n[{} characters omitted; full result in archived transcript]\n{}",
+        chars[..KEEP].iter().collect::<String>(),
+        chars.len() - KEEP * 2,
+        chars[chars.len() - KEEP..].iter().collect::<String>()
+    )
 }

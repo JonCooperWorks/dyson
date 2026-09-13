@@ -6,14 +6,11 @@ use super::protocol::{RunEvent, RunEventKind, RunId, RunStatus};
 use super::{Agent, HistoryBackend, PersistHook};
 
 impl Agent {
-    pub(crate) fn emit_run_event(&self, kind: RunEventKind) {
-        // Sequence assignment and durable append share one critical section.
-        // Parallel tool futures otherwise could allocate N/N+1 and append them
-        // in reverse order, making the canonical replay stream non-monotonic.
+    pub(crate) fn try_emit_run_event(&self, kind: RunEventKind) -> crate::error::Result<()> {
         let mut sequence = self
             .event_sequence
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(|e| e.into_inner());
         *sequence += 1;
         let event = RunEvent::new(
             *sequence,
@@ -21,34 +18,132 @@ impl Agent {
             self.conversation.turn_count,
             kind,
         );
-        if let Some(backend) = &self.history_backend
-            && let Err(error) = backend.store.append_run_event(&backend.chat_id, &event)
-        {
-            tracing::error!(error = %error, "failed to persist canonical run event");
+        if let Some(backend) = &self.history_backend {
+            backend.store.append_run_event(&backend.chat_id, &event)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn emit_run_event(&self, kind: RunEventKind) {
+        if let Err(error) = self.try_emit_run_event(kind) {
+            self.run_warnings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(format!("Journal write failed: {error}"));
         }
     }
 
-    pub(crate) fn begin_run_protocol(&mut self) {
+    pub(crate) fn begin_run_protocol(&mut self) -> crate::error::Result<()> {
         self.active_run_id = RunId::new();
         *self
             .event_sequence
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = 0;
-        self.last_run_status = RunStatus::Completed;
-        self.emit_run_event(RunEventKind::RunStarted);
+            .unwrap_or_else(|e| e.into_inner()) = 0;
+        self.run_warnings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.limiter.reset_turn();
+        self.repeated_failures.clear();
+        self.repeated_observations.clear();
+        self.last_run_status = RunStatus::Partial;
+        self.try_emit_run_event(RunEventKind::RunStarted)?;
+        let unresolved = self.unresolved_tool_outcomes()?;
+        if !unresolved.is_empty() {
+            let warning = format!(
+                "{} prior tool outcome(s) require reconciliation. Read-only investigation is allowed; mutations are withheld. Unresolved calls: {}",
+                unresolved.len(),
+                serde_json::to_string(&unresolved)?
+            );
+            self.run_warnings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(warning.clone());
+            self.conversation
+                .messages
+                .push(crate::message::Message::user(&warning));
+        }
+        Ok(())
     }
 
     pub(crate) fn finish_run_protocol<T>(&mut self, result: &crate::error::Result<T>) {
         self.last_run_status = if self.tool_context.cancellation.is_cancelled() {
             RunStatus::Cancelled
-        } else if result.is_err() {
+        } else if result.is_err() && self.last_run_status != RunStatus::BudgetExceeded {
             RunStatus::Failed
         } else {
             self.last_run_status
         };
-        self.emit_run_event(RunEventKind::RunFinished {
+        if let Err(error) = result {
+            self.run_warnings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(error.to_string());
+        }
+        if !self
+            .run_warnings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+            && self.last_run_status == RunStatus::Completed
+        {
+            self.last_run_status = RunStatus::Partial;
+        }
+        if let Err(error) = self.try_emit_run_event(RunEventKind::RunFinished {
             status: self.last_run_status,
-        });
+        }) {
+            self.last_run_status = RunStatus::Failed;
+            self.run_warnings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(format!("Terminal journal write failed: {error}"));
+        }
+    }
+
+    /// Record an operator-verified resolution. Never called automatically by the model.
+    pub fn reconcile_tool_outcome(
+        &self,
+        run_id: &RunId,
+        tool_use_id: &str,
+        resolution: &str,
+    ) -> crate::error::Result<()> {
+        if resolution.trim().is_empty() {
+            return Err(crate::error::DysonError::Llm(
+                "A reconciliation requires evidence of the outcome".into(),
+            ));
+        }
+        let backend = self
+            .history_backend
+            .as_ref()
+            .ok_or_else(|| crate::error::DysonError::Llm("No execution journal attached".into()))?;
+        let events = backend.store.load_run_events(&backend.chat_id)?;
+        if !super::protocol::unresolved_tool_outcomes(&events)
+            .iter()
+            .any(|t| &t.run_id == run_id && t.tool_use_id == tool_use_id)
+        {
+            return Err(crate::error::DysonError::Llm(
+                "No matching unresolved invocation".into(),
+            ));
+        }
+        let sequence = events
+            .iter()
+            .filter(|e| &e.run_id == run_id)
+            .map(|e| e.sequence)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        backend.store.append_run_event(
+            &backend.chat_id,
+            &RunEvent::new(
+                sequence,
+                run_id.clone(),
+                self.conversation.turn_count,
+                RunEventKind::ToolReconciled {
+                    tool_use_id: tool_use_id.into(),
+                    resolution: resolution.into(),
+                },
+            ),
+        )
     }
 
     /// Install a callback that runs after every message push.  Used by the

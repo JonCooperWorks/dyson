@@ -299,6 +299,16 @@ fn extract_resources(call: &ToolCall) -> Vec<ResourceAccess> {
 /// - `earlier` reads a resource that `later` writes (RAW) — to preserve ordering
 fn has_dependency(earlier: &[ResourceAccess], later: &[ResourceAccess]) -> bool {
     use std::collections::HashSet;
+    // Global exclusive claims are a barrier, not a distinct named file.
+    let global = |accesses: &[ResourceAccess]| {
+        accesses.iter().any(|a| {
+            a.kind == AccessKind::Write
+                && matches!(&a.resource, Resource::File(key) if key == "global:tool-execution")
+        })
+    };
+    if global(earlier) || global(later) {
+        return true;
+    }
 
     // Build sets for O(1) lookup instead of O(n*m) nested iteration.
     let earlier_writes: HashSet<&Resource> = earlier
@@ -492,5 +502,25 @@ mod test_dependency_analyzer {
             ToolExecutionPlan::exclusive(),
         ];
         assert_eq!(DependencyAnalyzer::analyze_plans(&plans).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod audit_regressions {
+    use super::*;
+    #[test]
+    fn exclusive_conflicts_with_named_resources_in_both_orders() {
+        for plans in [
+            vec![
+                ToolExecutionPlan::exclusive(),
+                ToolExecutionPlan::read("file:/a"),
+            ],
+            vec![
+                ToolExecutionPlan::write("file:/a"),
+                ToolExecutionPlan::exclusive(),
+            ],
+        ] {
+            assert_eq!(DependencyAnalyzer::analyze_plans(&plans).len(), 2);
+        }
     }
 }

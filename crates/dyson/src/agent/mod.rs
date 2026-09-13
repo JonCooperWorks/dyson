@@ -231,6 +231,9 @@ pub struct Agent {
     active_run_id: protocol::RunId,
     event_sequence: std::sync::Mutex<u64>,
     last_run_status: protocol::RunStatus,
+    run_warnings: std::sync::Mutex<Vec<String>>,
+    repeated_failures: std::collections::HashMap<String, usize>,
+    repeated_observations: std::collections::HashMap<String, (String, usize)>,
 }
 
 /// Callback fired whenever the agent's message history changes.
@@ -442,6 +445,9 @@ impl Agent {
             active_run_id: protocol::RunId::new(),
             event_sequence: std::sync::Mutex::new(0),
             last_run_status: protocol::RunStatus::Completed,
+            run_warnings: std::sync::Mutex::new(Vec::new()),
+            repeated_failures: std::collections::HashMap::new(),
+            repeated_observations: std::collections::HashMap::new(),
         })
     }
 
@@ -651,6 +657,11 @@ impl Agent {
                 .client
                 .with_priority(rate_limiter::Priority::Background),
             config: self.config.clone(),
+            sandbox: self.sandbox.clone(),
+            history: self
+                .history_backend
+                .as_ref()
+                .map(|b| (b.store.clone(), b.chat_id.clone())),
             tool_context: self.tool_context.clone(),
             messages,
             turn_count: self.conversation.turn_count,
@@ -902,8 +913,10 @@ impl Agent {
         // Append the user's message to history.
         self.conversation.messages.push(Message::user(user_input));
         self.persist();
-        self.begin_run_protocol();
-        let result = self.run_inner(output).await;
+        let result = match self.begin_run_protocol() {
+            Ok(()) => self.run_inner(output).await,
+            Err(error) => Err(error),
+        };
         self.finish_run_protocol(&result);
         result
     }
@@ -926,8 +939,10 @@ impl Agent {
             .messages
             .push(Message::user_multimodal(blocks));
         self.persist();
-        self.begin_run_protocol();
-        let result = self.run_inner(output).await;
+        let result = match self.begin_run_protocol() {
+            Ok(()) => self.run_inner(output).await,
+            Err(error) => Err(error),
+        };
         self.finish_run_protocol(&result);
         result
     }
@@ -977,10 +992,57 @@ impl Agent {
             .messages
             .push(Message::user_multimodal(blocks));
         self.persist();
-        self.begin_run_protocol();
-        let result = self.run_inner(output).await;
+        let result = match self.begin_run_protocol() {
+            Ok(()) => self.run_inner(output).await,
+            Err(error) => Err(error),
+        };
         self.finish_run_protocol(&result);
         result
+    }
+
+    /// Multimodal counterpart with the same typed terminal contract.
+    pub async fn run_with_attachments_detailed(
+        &mut self,
+        text: &str,
+        attachments: Vec<crate::media::Attachment>,
+        output: &mut dyn Output,
+    ) -> Result<protocol::RunOutcome> {
+        let before = self.conversation.token_budget.clone();
+        let final_text = self
+            .run_with_attachments(text, attachments, output)
+            .await
+            .unwrap_or_default();
+        Ok(self.detailed_outcome(&before, final_text))
+    }
+
+    fn detailed_outcome(&self, before: &TokenBudget, final_text: String) -> protocol::RunOutcome {
+        protocol::RunOutcome {
+            run_id: self.active_run_id.clone(),
+            status: self.last_run_status,
+            final_text,
+            usage: protocol::RunUsage {
+                input_tokens: self
+                    .conversation
+                    .token_budget
+                    .input_tokens_used
+                    .saturating_sub(before.input_tokens_used),
+                output_tokens: self
+                    .conversation
+                    .token_budget
+                    .output_tokens_used
+                    .saturating_sub(before.output_tokens_used),
+                llm_calls: self
+                    .conversation
+                    .token_budget
+                    .llm_calls
+                    .saturating_sub(before.llm_calls),
+            },
+            warnings: self
+                .run_warnings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        }
     }
 
     /// Execute a turn and return a typed outcome suitable for orchestration,
@@ -990,33 +1052,9 @@ impl Agent {
         user_input: &str,
         output: &mut dyn Output,
     ) -> Result<protocol::RunOutcome> {
-        let before_input = self.conversation.token_budget.input_tokens_used;
-        let before_output = self.conversation.token_budget.output_tokens_used;
-        let before_calls = self.conversation.token_budget.llm_calls;
-        let final_text = self.run(user_input, output).await?;
-        Ok(protocol::RunOutcome {
-            run_id: self.active_run_id.clone(),
-            status: self.last_run_status,
-            final_text,
-            usage: protocol::RunUsage {
-                input_tokens: self
-                    .conversation
-                    .token_budget
-                    .input_tokens_used
-                    .saturating_sub(before_input),
-                output_tokens: self
-                    .conversation
-                    .token_budget
-                    .output_tokens_used
-                    .saturating_sub(before_output),
-                llm_calls: self
-                    .conversation
-                    .token_budget
-                    .llm_calls
-                    .saturating_sub(before_calls),
-            },
-            warnings: Vec::new(),
-        })
+        let before = self.conversation.token_budget.clone();
+        let final_text = self.run(user_input, output).await.unwrap_or_default();
+        Ok(self.detailed_outcome(&before, final_text))
     }
 }
 

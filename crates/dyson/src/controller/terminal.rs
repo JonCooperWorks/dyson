@@ -253,7 +253,11 @@ impl super::Controller for TerminalController {
                 }
             }
 
-            match agent.run(input, &mut output).await {
+            match agent
+                .run_detailed(input, &mut output)
+                .await
+                .and_then(super::completed_text)
+            {
                 Ok(_) => println!(),
                 Err(e) => eprintln!("\n[Error]: {e}"),
             }

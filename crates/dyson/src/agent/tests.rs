@@ -1826,9 +1826,9 @@ async fn compact_preserves_lifetime_token_budget() {
 
     agent.compact(&mut output).await.unwrap();
 
-    assert_eq!(agent.conversation.token_budget.output_tokens_used, 50);
+    assert_eq!(agent.conversation.token_budget.output_tokens_used, 60);
     assert_eq!(agent.conversation.token_budget.input_tokens_used, 0);
-    assert_eq!(agent.conversation.token_budget.llm_calls, 1);
+    assert_eq!(agent.conversation.token_budget.llm_calls, 2);
 }
 
 #[tokio::test]
@@ -3308,3 +3308,6 @@ async fn token_estimate_stays_correct_through_compaction() {
         "compaction rebuilds the history — the cache must have been invalidated"
     );
 }
+
+#[path = "audit_tests.rs"]
+mod audit_regressions;

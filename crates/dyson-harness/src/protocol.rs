@@ -126,6 +126,10 @@ pub enum RunEventKind {
         effective_tool_name: String,
         reason: String,
     },
+    ToolReconciled {
+        tool_use_id: String,
+        resolution: String,
+    },
     ContextCompacted {
         old_messages: usize,
         new_messages: usize,
@@ -185,7 +189,7 @@ pub fn unresolved_tool_outcomes(events: &[RunEvent]) -> Vec<UnresolvedToolOutcom
                 );
             }
             RunEventKind::ToolFinished { tool_use_id, .. }
-            | RunEventKind::ToolOutcomeUnknown { tool_use_id, .. } => {
+            | RunEventKind::ToolReconciled { tool_use_id, .. } => {
                 active.remove(&(event.run_id.clone(), tool_use_id.clone()));
             }
             _ => {}
@@ -219,6 +223,9 @@ pub fn evaluate_run(events: &[RunEvent], run_id: &RunId) -> RunEvaluation {
     }
 
     let mut previous_sequence = None;
+    let mut requested_tools = HashSet::new();
+    let mut authorized_tools = HashMap::new();
+    let mut active_attempts = HashSet::new();
     let mut started_tools = HashSet::new();
     let mut terminal_tools = HashSet::new();
     let mut tool_calls_failed = 0;
@@ -230,9 +237,55 @@ pub fn evaluate_run(events: &[RunEvent], run_id: &RunId) -> RunEvaluation {
             failures.push("event sequence is not strictly increasing".to_string());
         }
         previous_sequence = Some(event.sequence);
+        if event.schema_version != RUN_EVENT_SCHEMA_VERSION {
+            failures.push("unsupported event schema version".into());
+        }
+        if terminal_count > 0 {
+            failures.push("event after run_finished".into());
+        }
         match &event.kind {
-            RunEventKind::LlmAttemptStarted { .. } => llm_attempts += 1,
-            RunEventKind::ToolStarted { tool_use_id, .. } => {
+            RunEventKind::ToolRequested { tool_use_id, .. } => {
+                if !requested_tools.insert(tool_use_id.clone()) {
+                    failures.push(format!("duplicate request {tool_use_id}"));
+                }
+            }
+            RunEventKind::ToolAuthorized {
+                tool_use_id,
+                effective_tool_name,
+                ..
+            } => {
+                if !requested_tools.contains(tool_use_id) {
+                    failures.push(format!("authorization without request {tool_use_id}"));
+                }
+                if authorized_tools
+                    .insert(tool_use_id.clone(), effective_tool_name.clone())
+                    .is_some()
+                {
+                    failures.push(format!("duplicate authorization {tool_use_id}"));
+                }
+            }
+            RunEventKind::LlmAttemptStarted { iteration, .. } => {
+                llm_attempts += 1;
+                if !active_attempts.insert(*iteration) {
+                    failures.push(format!("overlapping model attempt {iteration}"));
+                }
+            }
+            RunEventKind::LlmAttemptCompleted { iteration, .. }
+            | RunEventKind::LlmAttemptFailed { iteration, .. } => {
+                if !active_attempts.remove(iteration) {
+                    failures.push(format!("model attempt ended without start {iteration}"));
+                }
+            }
+            RunEventKind::ToolStarted {
+                tool_use_id,
+                effective_tool_name,
+                ..
+            } => {
+                if authorized_tools.get(tool_use_id) != Some(effective_tool_name) {
+                    failures.push(format!(
+                        "tool {tool_use_id} started without matching authorization"
+                    ));
+                }
                 match started_tools.insert(tool_use_id.clone()) {
                     true => {}
                     false => {
@@ -274,6 +327,9 @@ pub fn evaluate_run(events: &[RunEvent], run_id: &RunId) -> RunEvaluation {
             }
             _ => {}
         }
+    }
+    if !active_attempts.is_empty() {
+        failures.push("unfinished model attempt".into());
     }
     if terminal_count != 1 {
         failures.push(format!(
@@ -370,6 +426,16 @@ mod tests {
                 3,
                 run_id.clone(),
                 1,
+                RunEventKind::LlmAttemptCompleted {
+                    iteration: 0,
+                    output_tokens: 1,
+                    tool_calls: 0,
+                },
+            ),
+            RunEvent::new(
+                4,
+                run_id.clone(),
+                1,
                 RunEventKind::RunFinished {
                     status: RunStatus::Completed,
                 },
@@ -378,5 +444,99 @@ mod tests {
         let evaluation = evaluate_run(&events, &run_id);
         assert!(evaluation.passed, "{:?}", evaluation.failures);
         assert_eq!(evaluation.llm_attempts, 1);
+    }
+}
+
+#[cfg(test)]
+mod audit_regressions {
+    use super::*;
+    #[test]
+    fn unknown_outcome_remains_reconcilable() {
+        let id = RunId::new();
+        let events = vec![
+            RunEvent::new(
+                1,
+                id.clone(),
+                1,
+                RunEventKind::ToolStarted {
+                    tool_use_id: "t".into(),
+                    effective_tool_name: "write".into(),
+                    idempotency_key: "k".into(),
+                },
+            ),
+            RunEvent::new(
+                2,
+                id,
+                1,
+                RunEventKind::ToolOutcomeUnknown {
+                    tool_use_id: "t".into(),
+                    effective_tool_name: "write".into(),
+                    reason: "timeout".into(),
+                },
+            ),
+        ];
+        assert_eq!(unresolved_tool_outcomes(&events).len(), 1);
+    }
+    #[test]
+    fn grader_rejects_unfinished_model_attempt() {
+        let id = RunId::new();
+        let events = vec![
+            RunEvent::new(1, id.clone(), 1, RunEventKind::RunStarted),
+            RunEvent::new(
+                2,
+                id.clone(),
+                1,
+                RunEventKind::LlmAttemptStarted {
+                    iteration: 0,
+                    attempt: 0,
+                },
+            ),
+            RunEvent::new(
+                3,
+                id.clone(),
+                1,
+                RunEventKind::RunFinished {
+                    status: RunStatus::Completed,
+                },
+            ),
+        ];
+        assert!(!evaluate_run(&events, &id).passed);
+    }
+    #[test]
+    fn grader_rejects_unauthorized_execution() {
+        let id = RunId::new();
+        let events = vec![
+            RunEvent::new(1, id.clone(), 1, RunEventKind::RunStarted),
+            RunEvent::new(
+                2,
+                id.clone(),
+                1,
+                RunEventKind::ToolStarted {
+                    tool_use_id: "t".into(),
+                    effective_tool_name: "write".into(),
+                    idempotency_key: "k".into(),
+                },
+            ),
+            RunEvent::new(
+                3,
+                id.clone(),
+                1,
+                RunEventKind::ToolFinished {
+                    tool_use_id: "t".into(),
+                    effective_tool_name: "write".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                },
+            ),
+            RunEvent::new(
+                4,
+                id.clone(),
+                1,
+                RunEventKind::RunFinished {
+                    status: RunStatus::Completed,
+                },
+            ),
+        ];
+        assert!(!evaluate_run(&events, &id).passed);
     }
 }

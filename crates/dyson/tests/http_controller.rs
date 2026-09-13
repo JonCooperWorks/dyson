@@ -5988,3 +5988,72 @@ async fn unauthorized_strips_quote_from_oidc_authorization_endpoint() {
     // sanitisation only strips bytes from operator-supplied URLs.
     assert!(www.contains(r#"realm="dyson""#));
 }
+
+#[tokio::test]
+async fn http_turn_journals_and_exposes_operator_recovery() {
+    use dyson::agent::protocol::{RunEvent, RunEventKind, RunId, evaluate_run};
+    let r = rig().await;
+    let id = create_chat(&r, "harness recovery").await;
+    assert_eq!(
+        post_json(
+            &format!("{}/api/conversations/{id}/turn", r.base),
+            &serde_json::json!({"prompt":"hello"})
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    let store = r.state.history_for_test().unwrap();
+    let mut events = vec![];
+    for _ in 0..100 {
+        events = store.load_run_events(&id).unwrap();
+        if events
+            .iter()
+            .any(|e| matches!(e.kind, RunEventKind::RunFinished { .. }))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        !events.is_empty(),
+        "HTTP turns must attach the journal backend"
+    );
+    assert!(evaluate_run(&events, &events[0].run_id).passed);
+    let interrupted = RunId::new();
+    store
+        .append_run_event(
+            &id,
+            &RunEvent::new(
+                1,
+                interrupted.clone(),
+                1,
+                RunEventKind::ToolStarted {
+                    tool_use_id: "lost".into(),
+                    effective_tool_name: "write_file".into(),
+                    idempotency_key: "lost-key".into(),
+                },
+            ),
+        )
+        .unwrap();
+    let recovery_url = format!("{}/api/conversations/{id}/recovery", r.base);
+    let unresolved = body_json(get(&recovery_url).await).await;
+    assert_eq!(unresolved.as_array().unwrap().len(), 1);
+    let mut resolved = false;
+    for _ in 0..100 {
+        let response=post_json(&recovery_url,&serde_json::json!({"run_id":interrupted,"tool_use_id":"lost","resolution":"Operator verified destination was not changed"})).await;
+        if response.status() == StatusCode::OK {
+            resolved = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(resolved);
+    assert!(
+        body_json(get(&recovery_url).await)
+            .await
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}

@@ -58,6 +58,17 @@ impl TokenBudget {
         }
     }
 
+    /// Keep a small part of a configured budget for a final tool-free response.
+    pub fn summary_reserve(&self) -> usize {
+        self.max_output_tokens.map_or(0, |max| (max / 10).min(1024))
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.max_output_tokens.map_or(usize::MAX, |max| {
+            max.saturating_sub(self.output_tokens_used)
+        })
+    }
+
     /// Record input tokens from a completed LLM turn (informational only).
     pub const fn record_input(&mut self, input_tokens: usize) {
         self.input_tokens_used += input_tokens;

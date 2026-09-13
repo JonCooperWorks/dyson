@@ -50,6 +50,12 @@ export function dispatchStreamEvent(msg, callbacks) {
     case 'title':       callbacks.onTitle && callbacks.onTitle(msg); return true;
     case 'llm_error':   callbacks.onError && callbacks.onError(msg.message); return true;
     case 'compacting':  callbacks.onCompacting && callbacks.onCompacting(msg); return true;
+    case 'run_outcome':
+      callbacks.onRunOutcome?.(msg.outcome);
+      if (msg.outcome?.status && msg.outcome.status !== 'completed') {
+        callbacks.onError?.(`Agent stopped: ${msg.outcome.status}`);
+      }
+      return true;
     case 'done':        callbacks.onDone && callbacks.onDone(); return true;
     default:            return false;
   }

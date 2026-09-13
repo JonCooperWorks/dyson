@@ -100,6 +100,8 @@ pub struct DreamContext {
 
     /// LLM configuration (model, max_tokens, temperature).
     pub config: CompletionConfig,
+    pub sandbox: Arc<dyn crate::sandbox::Sandbox>,
+    pub history: Option<(Arc<dyn crate::chat_history::ChatHistory>, String)>,
 
     /// Tool context with workspace access, working dir, cancellation.
     pub tool_context: ToolContext,
@@ -312,6 +314,8 @@ pub(crate) struct DreamRequest {
     pub(crate) event: DreamEvent,
     pub(crate) client: RateLimitedHandle<Box<dyn LlmClient>>,
     pub(crate) config: CompletionConfig,
+    pub(crate) sandbox: Arc<dyn crate::sandbox::Sandbox>,
+    pub(crate) history: Option<(Arc<dyn crate::chat_history::ChatHistory>, String)>,
     pub(crate) tool_context: ToolContext,
     /// Shared snapshot of the conversation — avoids cloning the entire Vec
     /// on every dream event.  The dream thread converts to a slice reference
@@ -392,6 +396,8 @@ impl DreamHandle {
                         runner.fire(&req.event, || DreamContext {
                             client: req.client.clone(),
                             config: req.config.clone(),
+                            sandbox: req.sandbox.clone(),
+                            history: req.history.clone(),
                             tool_context: req.tool_context.clone(),
                             conversation_summary: summary.clone(),
                             turn_count: req.turn_count,

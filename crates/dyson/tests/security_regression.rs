@@ -43,33 +43,23 @@ fn path_traversal_allows_valid_paths() {
 
 #[test]
 fn path_traversal_rejects_symlinks() {
-    // Create a temp directory with a symlink.
-    let dir = std::env::temp_dir().join(format!("dyson-symlink-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-
-    let target = dir.join("real_file.txt");
+    // Keep paths relative without mutating the process-wide working directory:
+    // other parallel tests spawn children using their captured cwd.
+    let dir = tempfile::Builder::new()
+        .prefix("dyson-symlink-test-")
+        .tempdir_in(std::env::current_dir().unwrap())
+        .unwrap();
+    let target = dir.path().join("real_file.txt");
     std::fs::write(&target, "secret").unwrap();
-
-    let link = dir.join("link");
-    std::os::unix::fs::symlink(&target, &link).unwrap();
-
-    // validate_workspace_path checks relative paths from CWD.
-    // We need the symlink to exist at the relative path.
-    let saved_cwd = std::env::current_dir().unwrap();
-    std::env::set_current_dir(&dir).unwrap();
-
-    let result = dyson::tool::validate_workspace_path("link");
+    std::os::unix::fs::symlink(&target, dir.path().join("link")).unwrap();
+    let relative = std::path::Path::new(dir.path().file_name().unwrap());
+    let result = dyson::tool::validate_workspace_path(relative.join("link").to_str().unwrap());
     assert!(result.is_err(), "symlinks must be rejected");
+    assert!(result.unwrap_err().contains("symlink"));
     assert!(
-        result.unwrap_err().contains("symlink"),
-        "error message should mention 'symlink'"
+        dyson::tool::validate_workspace_path(relative.join("real_file.txt").to_str().unwrap())
+            .is_ok()
     );
-
-    // Non-symlink file should still work.
-    assert!(dyson::tool::validate_workspace_path("real_file.txt").is_ok());
-
-    std::env::set_current_dir(&saved_cwd).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // =========================================================================

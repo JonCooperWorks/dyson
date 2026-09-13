@@ -1188,7 +1188,11 @@ pub(crate) async fn spawn_background_agent(
 
     let handle = tokio::spawn(async move {
         tracing::info!(id, prompt = %prompt_owned, "background agent starting");
-        let result: Result<String, String> = match bg_agent.run(&prompt_owned, &mut output).await {
+        let result: Result<String, String> = match bg_agent
+            .run_detailed(&prompt_owned, &mut output)
+            .await
+            .and_then(completed_text)
+        {
             Ok(text) => {
                 tracing::info!(id, text_len = text.len(), "background agent completed");
                 Ok(text)
@@ -1343,6 +1347,19 @@ fn read_log_tail_from_dir(log_dir: &std::path::Path, n: usize) -> Result<String,
 ///         ├── output.tool_result(...)
 ///         └── output.flush()
 /// ```
+/// Preserve terminal status when an older controller requires a string result.
+pub(crate) fn completed_text(outcome: crate::agent::protocol::RunOutcome) -> crate::Result<String> {
+    if outcome.status == crate::agent::protocol::RunStatus::Completed {
+        Ok(outcome.final_text)
+    } else {
+        Err(DysonError::Llm(format!(
+            "Agent stopped with {:?}: {}",
+            outcome.status,
+            outcome.warnings.join("; ")
+        )))
+    }
+}
+
 pub trait Output: Send {
     /// A fragment of text from the LLM's response.
     fn text_delta(&mut self, text: &str) -> std::result::Result<(), DysonError>;

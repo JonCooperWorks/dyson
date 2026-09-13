@@ -34,7 +34,7 @@ impl Agent {
         tool_name: &str,
         input: serde_json::Value,
     ) -> Result<ToolOutput> {
-        self.begin_run_protocol();
+        self.begin_run_protocol()?;
         let result = if let Err(e) = self.limiter.check(tool_name) {
             Ok(ToolOutput::error(e.to_string()))
         } else {
@@ -43,6 +43,9 @@ impl Agent {
                 .await
                 .map(|(output, _)| output)
         };
+        if result.as_ref().is_ok_and(|out| !out.is_error) {
+            self.last_run_status = super::protocol::RunStatus::Completed;
+        }
         self.finish_run_protocol(&result);
         result
     }
@@ -56,6 +59,21 @@ impl Agent {
         let mut limited_calls: Vec<usize> = Vec::with_capacity(tool_calls.len());
         let mut persisted_rate_limit_result = false;
         for (i, call) in tool_calls.iter().enumerate() {
+            if self
+                .repeated_failures
+                .get(&format!("{}:{}", call.name, call.input))
+                .copied()
+                .unwrap_or(0)
+                >= 3
+            {
+                // Count withheld repetitions against the same user-turn cap.
+                let reason = self.limiter.check(&call.name).err().map_or_else(|| "NO PROGRESS: identical invocation repeatedly failed. Change arguments or approach; do not repeat it.".into(), |e| e.to_string());
+                self.conversation
+                    .messages
+                    .push(Message::tool_result(&call.id, &reason, true));
+                persisted_rate_limit_result = true;
+                continue;
+            }
             if let Err(e) = self.limiter.check(&call.name) {
                 tracing::warn!(tool = call.name, error = %e, "tool call rate-limited");
                 self.conversation.messages.push(Message::tool_result(
@@ -121,7 +139,7 @@ impl Agent {
         output: &mut dyn Output,
     ) -> Result<String> {
         self.conversation.messages.push(Message::user(
-            "You have reached the maximum number of iterations and must stop now. \
+            "You have reached the execution budget and must stop now. \
              Please provide a brief summary of:\n\
              1. What you have accomplished so far\n\
              2. What still needs to be done\n\
@@ -129,36 +147,93 @@ impl Agent {
              Do NOT call any tools. Just summarize.",
         ));
 
-        let empty_tools: &[ToolDefinition] = &[];
-        match self
-            .client
-            .access()?
-            .stream(
-                &self.conversation.messages,
-                &self.system_prompt,
-                skill_fragments,
-                empty_tools,
-                &std::collections::HashMap::new(),
-                &self.config,
-            )
-            .await
-        {
-            Ok(response) => {
-                let (assistant_msg, _tool_calls, _output_tokens, _stop_reason) =
-                    super::stream_handler::process_stream(response.stream, output).await?;
-                let text = assistant_msg.last_text().unwrap_or_default().to_string();
-                self.conversation.messages.push(assistant_msg);
-                Ok(text)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "summary LLM call failed — falling back to error");
-                output.error(&DysonError::Llm(format!(
-                    "Reached maximum iterations ({}) — stopping",
-                    self.max_iterations
-                )))?;
-                Ok(String::new())
-            }
+        if !self.conversation.token_budget.has_budget() {
+            return Ok(
+                "Stopped at the iteration limit; no model budget remains for a summary.".into(),
+            );
         }
+        let messages = self.conversation.messages.clone();
+        let system = self.system_prompt.clone();
+        let assistant_msg = self
+            .auxiliary_completion(&messages, &system, skill_fragments, output)
+            .await?;
+        let text = assistant_msg.last_text().unwrap_or_default().to_string();
+        self.conversation.messages.push(assistant_msg);
+        Ok(text)
+    }
+
+    pub(super) fn budgeted_config(&self) -> crate::llm::CompletionConfig {
+        let mut config = self.config.clone();
+        if let Some(max) = self.conversation.token_budget.max_output_tokens {
+            config.max_tokens = config.max_tokens.min(
+                max.saturating_sub(self.conversation.token_budget.output_tokens_used)
+                    .min(u32::MAX as usize) as u32,
+            );
+        }
+        config
+    }
+
+    /// Shared accounting and protocol path for compaction and final summaries.
+    pub(super) async fn auxiliary_completion(
+        &mut self,
+        messages: &[Message],
+        system: &str,
+        suffix: &str,
+        output: &mut dyn Output,
+    ) -> Result<Message> {
+        if !self.conversation.token_budget.has_budget() {
+            return Err(DysonError::Llm("token budget exhausted".into()));
+        }
+        let iteration = usize::MAX;
+        self.try_emit_run_event(super::protocol::RunEventKind::LlmAttemptStarted {
+            iteration,
+            attempt: 0,
+        })?;
+        let mut observed_completion = false;
+        let result = async {
+            let response = self
+                .client
+                .access()?
+                .stream(
+                    messages,
+                    system,
+                    suffix,
+                    &[] as &[ToolDefinition],
+                    &std::collections::HashMap::new(),
+                    &self.budgeted_config(),
+                )
+                .await?;
+            if let Some(tokens) = response.input_tokens {
+                self.conversation.token_budget.record_input(tokens);
+            }
+            let (message, calls, tokens, stop) =
+                super::stream_handler::process_stream(response.stream, output).await?;
+            let _ = self.conversation.token_budget.record(tokens);
+            observed_completion = true;
+            self.try_emit_run_event(super::protocol::RunEventKind::LlmAttemptCompleted {
+                iteration,
+                output_tokens: tokens,
+                tool_calls: calls.len(),
+            })?;
+            if stop == crate::llm::stream::StopReason::MaxTokens || !calls.is_empty() {
+                return Err(DysonError::Llm(
+                    "Auxiliary response was incomplete; original context retained".into(),
+                ));
+            }
+            Ok(message)
+        }
+        .await;
+        if result.is_err() && !observed_completion {
+            self.conversation.token_budget.llm_calls += 1;
+            // Failed requests still consume an attempt, even without provider usage.
+            self.emit_run_event(super::protocol::RunEventKind::LlmAttemptFailed {
+                iteration,
+                error_kind: "auxiliary".into(),
+                retryable: false,
+                after_tool_use: false,
+            });
+        }
+        result
     }
 
     /// Process a tool execution result: render to output, format for the LLM,
@@ -169,50 +244,88 @@ impl Agent {
         result: Result<(ToolOutput, std::time::Duration)>,
         output: &mut dyn Output,
     ) -> Result<()> {
-        let tool_result_msg = match result {
-            Ok((ref tool_output, duration)) => {
-                output.tool_result(tool_output)?;
-
-                // Send any attached files to the user via the controller.
-                for file_path in &tool_output.files {
-                    if let Err(e) = output.send_file(file_path) {
-                        tracing::warn!(
-                            path = %file_path.display(),
-                            error = %e,
-                            "failed to send file"
-                        );
-                    }
-                }
-
-                // Forward any progress checkpoints emitted by the tool.
-                // Side-channel: the default `Output::checkpoint` impl drops
-                // them; controllers that want progress reporting override it.
-                for cp in &tool_output.checkpoints {
-                    if let Err(e) = output.checkpoint(cp) {
-                        tracing::warn!(error = %e, "failed to deliver checkpoint");
-                    }
-                }
-
-                // Forward any artefacts (e.g. security-review reports)
-                // emitted by the tool.  Side-channel — the LLM never
-                // sees these; the HTTP controller renders them in the
-                // Artefacts tab.  Other controllers drop them.
-                for artefact in &tool_output.artefacts {
-                    if let Err(e) = output.send_artefact(artefact) {
-                        tracing::warn!(error = %e, "failed to deliver artefact");
-                    }
-                }
-
-                // Format the result for the LLM with the actual execution duration.
-                let formatted = self.formatter.format(call, tool_output, duration);
-                let content = formatted.to_llm_message();
-                Message::tool_result(&call.id, &content, tool_output.is_error)
+        let tool_result_msg = match &result {
+            Ok((tool_output, duration)) => Message::tool_result(
+                &call.id,
+                &self
+                    .formatter
+                    .format(call, tool_output, *duration)
+                    .to_llm_message(),
+                tool_output.is_error,
+            ),
+            Err(e) => {
+                self.run_warnings
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(e.to_string());
+                Message::tool_result(&call.id, &e.to_string(), true)
             }
-            Err(ref e) => Message::tool_result(&call.id, &e.to_string(), true),
         };
-
+        let key = format!("{}:{}", call.name, call.input);
+        if result.as_ref().map_or(true, |(out, _)| out.is_error) {
+            let count = self.repeated_failures.entry(key).or_default();
+            *count += 1;
+            if *count == 3 {
+                self.conversation.messages.push(Message::user("NO PROGRESS: this invocation has failed three times. Inspect the failure, change approach, or report the concrete blocker; identical retries are now withheld."));
+            }
+        } else {
+            self.repeated_failures.remove(&key);
+            if let Ok((out, _)) = &result {
+                use sha2::Digest as _;
+                let digest = format!("{:x}", sha2::Sha256::digest(out.content.as_bytes()));
+                let entry = self
+                    .repeated_observations
+                    .entry(key)
+                    .or_insert_with(|| (digest.clone(), 0));
+                if entry.0 != digest {
+                    *entry = (digest, 0);
+                }
+                entry.1 += 1;
+                if entry.1 == 5 {
+                    self.conversation.messages.push(Message::user("NO PROGRESS: five identical observations from the same invocation. Use the evidence already collected and change approach. Continue polling only if waiting for a known external state change."));
+                }
+            }
+        }
         self.conversation.messages.push(tool_result_msg);
         self.persist();
+        if let Ok((ref tool_output, _duration)) = result {
+            if let Err(error) = output.tool_result(tool_output) {
+                self.run_warnings
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(format!("Tool result delivery failed: {error}"));
+            }
+
+            // Send any attached files to the user via the controller.
+            for file_path in &tool_output.files {
+                if let Err(e) = output.send_file(file_path) {
+                    tracing::warn!(
+                        path = %file_path.display(),
+                        error = %e,
+                        "failed to send file"
+                    );
+                }
+            }
+
+            // Forward any progress checkpoints emitted by the tool.
+            // Side-channel: the default `Output::checkpoint` impl drops
+            // them; controllers that want progress reporting override it.
+            for cp in &tool_output.checkpoints {
+                if let Err(e) = output.checkpoint(cp) {
+                    tracing::warn!(error = %e, "failed to deliver checkpoint");
+                }
+            }
+
+            // Forward any artefacts (e.g. security-review reports)
+            // emitted by the tool.  Side-channel — the LLM never
+            // sees these; the HTTP controller renders them in the
+            // Artefacts tab.  Other controllers drop them.
+            for artefact in &tool_output.artefacts {
+                if let Err(e) = output.send_artefact(artefact) {
+                    tracing::warn!(error = %e, "failed to deliver artefact");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -244,6 +357,12 @@ impl Agent {
         if let Some(activity) = &self.tool_context.activity {
             activity.touch();
         }
+        let scheduled_plan = self
+            .tool_registry
+            .get(&call.name)
+            .map_or_else(ToolExecutionPlan::exclusive, |tool| {
+                tool.execution_plan(&call.input, &self.tool_context)
+            });
         // -- Pre-tool hooks --
         let effective_call;
         let call = if !self.tool_hooks.is_empty() {
@@ -279,7 +398,7 @@ impl Agent {
         };
 
         let tool_start = std::time::Instant::now();
-        let result = self.execute_tool_call(call).await;
+        let result = self.execute_tool_call(call, &scheduled_plan).await;
         let duration = tool_start.elapsed();
         let tool_ms = duration.as_millis();
 
@@ -353,15 +472,19 @@ impl Agent {
     /// 2. On Allow: look up tool → `tool.run()` → `sandbox.after()`
     /// 3. On Deny: return error ToolOutput
     /// 4. On Redirect: look up redirected tool → run it → `sandbox.after()`
-    async fn execute_tool_call(&self, call: &ToolCall) -> Result<ToolOutput> {
+    async fn execute_tool_call(
+        &self,
+        call: &ToolCall,
+        scheduled_plan: &ToolExecutionPlan,
+    ) -> Result<ToolOutput> {
         use sha2::Digest as _;
         let input_bytes = serde_json::to_vec(&call.input).unwrap_or_default();
         let input_sha256 = format!("{:x}", sha2::Sha256::digest(input_bytes));
-        self.emit_run_event(super::protocol::RunEventKind::ToolRequested {
+        self.try_emit_run_event(super::protocol::RunEventKind::ToolRequested {
             tool_use_id: call.id.clone(),
             tool_name: call.name.clone(),
             input_sha256,
-        });
+        })?;
         // Per-call clone of the tool context so each tool sees its own
         // `tool_use_id`.  Cloning is cheap (Arcs and small primitives)
         // and is the only safe way to stamp per-call state when the
@@ -371,12 +494,6 @@ impl Agent {
         // event with its owning subagent box.
         let mut ctx = self.tool_context.clone();
         ctx.tool_use_id = Some(call.id.clone());
-        let scheduled_plan = self
-            .tool_registry
-            .get(&call.name)
-            .map_or_else(ToolExecutionPlan::exclusive, |tool| {
-                tool.execution_plan(&call.input, &ctx)
-            });
         // -- Ask the sandbox --
         //
         // Sandbox and tool-lookup errors are converted to error ToolOutputs
@@ -393,7 +510,7 @@ impl Agent {
 
         match decision {
             SandboxDecision::Allow { input } => {
-                self.run_named_tool(&call.name, &input, &ctx, &scheduled_plan)
+                self.run_named_tool(&call.name, &input, &ctx, scheduled_plan)
                     .await
             }
 
@@ -415,7 +532,7 @@ impl Agent {
                 );
                 // The redirected call keeps the original `tool_use_id` — the
                 // sandbox didn't change which message id the LLM is waiting on.
-                self.run_named_tool(&tool_name, &input, &ctx, &scheduled_plan)
+                self.run_named_tool(&tool_name, &input, &ctx, scheduled_plan)
                     .await
             }
         }
@@ -453,22 +570,32 @@ impl Agent {
                 "Policy rewrite for '{name}' changed its resource or side-effect footprint; execution was withheld to prevent an unsafe scheduling race"
             )));
         }
-        self.emit_run_event(super::protocol::RunEventKind::ToolAuthorized {
+        if plan
+            .resources
+            .iter()
+            .any(|r| r.access == crate::tool::ResourceAccess::Write)
+            && !self.unresolved_tool_outcomes()?.is_empty()
+        {
+            return Ok(ToolOutput::error(
+                "Mutation withheld: unresolved prior tool outcome requires explicit reconciliation. Use read-only tools to verify what happened.",
+            ));
+        }
+        self.try_emit_run_event(super::protocol::RunEventKind::ToolAuthorized {
             tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
             effective_tool_name: name.to_string(),
             idempotency: plan.idempotency,
             timeout_ms: plan.timeout_ms,
-        });
+        })?;
         let idempotency_key = format!(
             "{}:{}",
             self.active_run_id.0,
             ctx.tool_use_id.as_deref().unwrap_or("direct")
         );
-        self.emit_run_event(super::protocol::RunEventKind::ToolStarted {
+        self.try_emit_run_event(super::protocol::RunEventKind::ToolStarted {
             tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
             effective_tool_name: name.to_string(),
             idempotency_key,
-        });
+        })?;
 
         let started = std::time::Instant::now();
         let mut tool_output = match tokio::time::timeout(
@@ -480,11 +607,12 @@ impl Agent {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => ToolOutput::error(e.to_string()),
             Err(_) => {
-                self.emit_run_event(super::protocol::RunEventKind::ToolOutcomeUnknown {
+                self.run_warnings.lock().unwrap_or_else(|e| e.into_inner()).push(format!("Tool '{name}' timed out with an unknown outcome; reconcile before further mutations"));
+                self.try_emit_run_event(super::protocol::RunEventKind::ToolOutcomeUnknown {
                     tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
                     effective_tool_name: name.to_string(),
                     reason: format!("execution exceeded {} ms deadline", plan.timeout_ms),
-                });
+                })?;
                 return Ok(ToolOutput::error(format!(
                     "Tool '{name}' exceeded its {} ms execution deadline; side-effect outcome is unknown and the runtime will not retry it automatically",
                     plan.timeout_ms
@@ -504,12 +632,12 @@ impl Agent {
 
         self.notify_after_tool(name, &tool_output).await;
 
-        self.emit_run_event(super::protocol::RunEventKind::ToolFinished {
+        self.try_emit_run_event(super::protocol::RunEventKind::ToolFinished {
             tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
             effective_tool_name: name.to_string(),
             is_error: tool_output.is_error,
             duration_ms: started.elapsed().as_millis() as u64,
-        });
+        })?;
 
         Ok(tool_output)
     }

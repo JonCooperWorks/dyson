@@ -599,6 +599,9 @@ pub(super) async fn post(
         // synchronously on the runtime for every message (O(n²) per
         // turn).  The end-of-turn `checkpoint()` below guarantees the
         // final state is on disk before `Done` is emitted.
+        if let Some(store) = &history {
+            agent.set_chat_history(Arc::clone(store), chat_id.clone());
+        }
         let persister = history.as_ref().map(|h| {
             crate::chat_history::coalesce::CoalescingPersister::new(Arc::clone(h), chat_id.clone())
         });
@@ -647,13 +650,17 @@ pub(super) async fn post(
                     } else {
                         tracing::info!(chat_id = %chat_id, prompt_len = next_prompt.len(), atts = next_attachments.len(), "TURN_WORKER: calling agent.run");
                         let r = if next_attachments.is_empty() {
-                            agent.run(&next_prompt, &mut output).await
+                            agent.run_detailed(&next_prompt, &mut output).await
                         } else {
                             let atts = std::mem::take(&mut next_attachments);
-                            agent.run_with_attachments(&next_prompt, atts, &mut output).await
+                            agent.run_with_attachments_detailed(&next_prompt, atts, &mut output).await
                         };
                         tracing::info!(chat_id = %chat_id, ok = r.is_ok(), "TURN_WORKER: agent.run returned");
-                        r
+                        r.map(|outcome| {
+                            let text = outcome.final_text.clone();
+                            chat_handle.emit(SseEvent::RunOutcome { outcome });
+                            text
+                        })
                     }
                 } => r,
             };

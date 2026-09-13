@@ -1309,9 +1309,15 @@ async fn run_telegram_turn(
         super::slash::SlashDispatch::Handled(_) => Ok(String::new()),
         super::slash::SlashDispatch::NotSlash | super::slash::SlashDispatch::BuiltinOrUnhandled => {
             if attachments.is_empty() {
-                agent.run(text, output).await
+                agent
+                    .run_detailed(text, output)
+                    .await
+                    .and_then(super::completed_text)
             } else {
-                agent.run_with_attachments(text, attachments, output).await
+                agent
+                    .run_with_attachments_detailed(text, attachments, output)
+                    .await
+                    .and_then(super::completed_text)
             }
         }
     }

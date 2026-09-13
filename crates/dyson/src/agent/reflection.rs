@@ -33,7 +33,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
+use crate::llm::ToolDefinition;
+#[cfg(test)]
+use crate::llm::{CompletionConfig, LlmClient};
 use crate::message::{ContentBlock, Message};
 use crate::tool::{Tool, ToolContext};
 
@@ -116,7 +118,7 @@ and that is a fine place to land.\n\
 
 /// Run a mini agent loop: LLM calls tools in a loop until it stops or hits
 /// `max_iterations`.  Returns `(actions_taken, per-tool artifacts)`.
-async fn run_mini_loop(
+pub(super) async fn run_mini_loop(
     ctx: &DreamContext,
     system_prompt: &str,
     tools: Vec<Arc<dyn Tool>>,
@@ -139,11 +141,29 @@ async fn run_mini_loop(
         .map(|t| (t.name().to_string(), t))
         .collect();
 
+    let settings = crate::config::AgentSettings {
+        api_key: "background".into(),
+        ..Default::default()
+    };
+    let mut executor = super::Agent::builder(ctx.client.clone(), ctx.sandbox.clone())
+        .settings(&settings)
+        .build()?;
+    executor.tool_context = ctx.tool_context.clone();
+    executor.config = ctx.config.clone();
+    for tool in tool_map.values() {
+        executor.register_tool(tool.clone());
+    }
+    if let Some((store, chat_id)) = &ctx.history {
+        executor.set_chat_history(store.clone(), chat_id.clone());
+    }
     let mut messages = vec![Message::user(initial_message)];
     let mut actions_taken = 0usize;
     let mut artifacts = Vec::new();
 
     for _iteration in 0..max_iterations {
+        if ctx.tool_context.cancellation.is_cancelled() {
+            break;
+        }
         let client = match ctx.client.access() {
             Ok(guard) => guard,
             Err(e) => {
@@ -194,10 +214,14 @@ async fn run_mini_loop(
                 }
             };
 
-            let result = tool.run(&call.input, &ctx.tool_context).await;
+            let _ = tool;
+            snapshot_learning_workspace(&ctx.tool_context).await?;
+            let result = executor
+                .execute_tool_direct(&call.name, call.input.clone())
+                .await;
             let tool_result_msg = match result {
                 Ok(ref output) => {
-                    actions_taken += 1;
+                    actions_taken += usize::from(!output.is_error);
                     tracing::info!(tool = call.name.as_str(), "{dream_label}: tool ok");
                     Message::tool_result(&call.id, &output.content, output.is_error)
                 }
@@ -389,13 +413,14 @@ impl Dream for LearningSynthesisDream {
         };
 
         let start = std::time::Instant::now();
-        let client = ctx.client.access()?;
-
-        synthesize_to_workspace(
-            &**client,
-            &ctx.config,
+        let system = build_memory_system_prompt(&ctx.tool_context).await;
+        let (actions_taken, _) = run_mini_loop(
+            &ctx,
+            &system,
+            vec![Arc::new(crate::tool::workspace::WorkspaceTool)],
             &ctx.conversation_summary,
-            &workspace,
+            3,
+            "learning-synthesis",
         )
         .await?;
 
@@ -406,7 +431,7 @@ impl Dream for LearningSynthesisDream {
 
         Ok(DreamOutcome {
             dream_name: self.name().to_string(),
-            actions_taken: 1,
+            actions_taken,
             duration: start.elapsed(),
             artifacts: vec![format!("updated MEMORY.md ({new_len} chars)")],
         })
@@ -499,6 +524,7 @@ impl Dream for MemoryMaintenanceDream {
 /// Summarise a conversation and merge the result into the workspace's
 /// MEMORY.md.  Separated from the Dream impl so it can be tested with
 /// a mock LLM client.
+#[cfg(test)]
 pub(super) async fn synthesize_to_workspace(
     client: &dyn LlmClient,
     config: &CompletionConfig,
@@ -811,4 +837,24 @@ async fn save_reflection_log(
             "saved reflection log"
         );
     }
+}
+
+/// Save a unique, restorable pre-image before background memory/skill changes.
+async fn snapshot_learning_workspace(ctx: &ToolContext) -> Result<()> {
+    let Some(workspace) = &ctx.workspace else {
+        return Ok(());
+    };
+    let mut ws = workspace.write().await;
+    let files: std::collections::BTreeMap<_, _> = ws
+        .list_files()
+        .into_iter()
+        .filter(|key| !key.starts_with("improvement/"))
+        .filter_map(|key| ws.get(&key).map(|content| (key, content)))
+        .collect();
+    let snapshot = serde_json::to_string_pretty(&files)?;
+    ws.set(
+        &format!("improvement/before-{:032x}.json", rand::random::<u128>()),
+        &snapshot,
+    );
+    ws.save()
 }

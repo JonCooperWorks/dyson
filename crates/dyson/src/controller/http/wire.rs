@@ -193,6 +193,9 @@ pub(crate) const MAX_MIND_BODY: usize = 4 * 1024 * 1024;
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseEvent {
+    RunOutcome {
+        outcome: crate::agent::protocol::RunOutcome,
+    },
     Text {
         delta: String,
     },

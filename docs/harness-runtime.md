@@ -81,3 +81,54 @@ and provider matrix, persist the journal, then combine:
 Mocked tests remain the fast CI layer. They are not a substitute for the live
 matrix, and live runs should publish their corpus version, model identifiers,
 grader version, raw journal, and aggregate confidence intervals.
+
+## Enforced runtime behavior (September 2026)
+
+- Global exclusive execution claims conflict with every resource. File plans use
+  the schema's `file_path` field, and pre-tool rewrites retain the original plan
+  for footprint validation.
+- HTTP turns attach both transcript persistence and the durable execution
+  journal. Failed start/authorization writes prevent dispatch. Finished tool
+  results enter history before output delivery; delivery failures produce run
+  warnings without discarding subsequent batch results.
+- Unknown outcomes remain unresolved until an operator records a resolution.
+  Reads can investigate them; further mutations are withheld. For a loaded,
+  idle conversation, authenticated operators can inspect
+  `GET /api/conversations/:id/recovery` and resolve with
+  `POST /api/conversations/:id/recovery`, supplying `run_id`, `tool_use_id`, and
+  a nonempty `resolution` describing the verified evidence. Resolution is never
+  an automatically exposed model tool.
+- HTTP emits `run_outcome` before `done`. The UI surfaces non-completed status;
+  terminal, Telegram, and background controllers also consume typed outcomes.
+  Multimodal calls have the same detailed outcome API. Failed detailed calls
+  retain their run id, known usage, and warnings.
+- Every observed main-loop response, empty retry, compaction, and final summary
+  contributes to usage. Failed streams account for visible generation with a
+  local estimate when authoritative provider usage is unavailable. Request caps
+  respect remaining output budget; up to 10% (at most 1,024 tokens) is reserved
+  for a tool-free final summary. Provider-internal retries without surfaced
+  usage remain the provider/Swarm accounting boundary.
+- Compaction retains bounded tool evidence from both the beginning and end of
+  each result, including error flags. It refuses truncated summaries and keeps
+  original history on failure. Full pre-compaction transcripts are archived
+  when a history backend is available.
+- Tool limits span a complete user turn. Three identical failed invocations
+  trigger a changed-approach instruction and block identical retries. Five
+  unchanged successful observations trigger a progress warning without
+  prohibiting legitimate polling.
+- Background learning tools use the normal sandbox, schema validation, journal,
+  timeout, and execution hooks available to their restricted executor. Before
+  background changes, workspace pre-images are saved under
+  `improvement/before-*.json` for inspection and restoration. Synthesis uses the
+  same restricted path as maintenance.
+
+## Regression corpus
+
+The executable deterministic corpus is in `agent/audit_tests.rs`, the harness
+scheduler/protocol regression modules, the HTTP controller integration test,
+and `run-outcome.test.js`. It asserts actual filesystem state, captured model
+context, terminal outcomes, usage, journal replay, and browser event delivery.
+It includes journal failure, interrupted mutation, explicit reconciliation,
+output disconnection, truncated generation, compaction evidence, repeated
+failures, unchanged reads, and exhausted budgets. These checks complement the
+existing end-to-end agent corpus; they do not claim a live model quality score.

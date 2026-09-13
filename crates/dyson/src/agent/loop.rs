@@ -22,6 +22,7 @@ struct StreamRetryOutput<'a> {
     // streams that error after partial text are now retryable, and the
     // duplicate text just reads as the model restating itself.
     emitted_tool_use: bool,
+    estimated_output_tokens: usize,
 }
 
 impl<'a> StreamRetryOutput<'a> {
@@ -30,6 +31,7 @@ impl<'a> StreamRetryOutput<'a> {
             inner,
             emitted_visible_output: false,
             emitted_tool_use: false,
+            estimated_output_tokens: 0,
         }
     }
 
@@ -47,10 +49,12 @@ impl Output for StreamRetryOutput<'_> {
         if !text.is_empty() {
             self.emitted_visible_output = true;
         }
+        self.estimated_output_tokens += crate::message::estimate_text_tokens(text);
         self.inner.text_delta(text)
     }
 
     fn thinking_delta(&mut self, text: &str) -> std::result::Result<(), crate::error::DysonError> {
+        self.estimated_output_tokens += crate::message::estimate_text_tokens(text);
         self.inner.thinking_delta(text)
     }
 
@@ -174,6 +178,12 @@ impl Agent {
         recovered_this_turn: &mut bool,
         output: &mut dyn Output,
     ) -> Result<Option<crate::llm::StreamResponse>> {
+        if !self.conversation.token_budget.has_budget() {
+            self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+            return Err(crate::error::DysonError::Llm(
+                "token budget exhausted".into(),
+            ));
+        }
         self.emit_run_event(super::protocol::RunEventKind::LlmAttemptStarted {
             iteration,
             attempt,
@@ -184,10 +194,12 @@ impl Agent {
         {
             StreamResult::Response(response) => Ok(Some(response)),
             StreamResult::Recovered(error) => {
+                self.conversation.token_budget.llm_calls += 1;
                 self.emit_failed_attempt(iteration, &error, false);
                 Ok(None)
             }
             StreamResult::Error(error) => {
+                self.conversation.token_budget.llm_calls += 1;
                 self.emit_failed_attempt(iteration, &error, false);
                 Err(error)
             }
@@ -219,13 +231,13 @@ impl Agent {
     }
 
     async fn process_stream_attempt(
-        &self,
+        &mut self,
         response: crate::llm::StreamResponse,
         iteration: usize,
         stream_error_attempts: usize,
         output: &mut dyn Output,
     ) -> Result<StreamAttempt> {
-        let (stream_result, emitted_visible_output, emitted_tool_use) = {
+        let (stream_result, emitted_visible_output, emitted_tool_use, estimated_output_tokens) = {
             let mut retry_output = StreamRetryOutput::new(output);
             let stream_result =
                 stream_handler::process_stream(response.stream, &mut retry_output).await;
@@ -233,6 +245,7 @@ impl Agent {
                 stream_result,
                 retry_output.emitted_visible_output(),
                 retry_output.emitted_tool_use(),
+                retry_output.estimated_output_tokens,
             )
         };
         let transport_retryable_mid_stream =
@@ -252,6 +265,11 @@ impl Agent {
                     && !emitted_tool_use
                     && (!emitted_visible_output || transport_retryable_mid_stream) =>
             {
+                let _ = self
+                    .conversation
+                    .token_budget
+                    .record(estimated_output_tokens);
+                self.emit_failed_attempt(iteration, &error, emitted_tool_use);
                 let delay_ms = compute_backoff_ms(stream_error_attempts);
                 tracing::warn!(
                     attempt = stream_error_attempts + 1,
@@ -268,6 +286,10 @@ impl Agent {
                 }
             }
             Err(error) => {
+                let _ = self
+                    .conversation
+                    .token_budget
+                    .record(estimated_output_tokens);
                 self.emit_failed_attempt(iteration, &error, emitted_tool_use);
                 Err(error)
             }
@@ -298,6 +320,9 @@ impl Agent {
             };
             let tool_mode = response.tool_mode;
             let input_tokens = response.input_tokens;
+            if let Some(tokens) = input_tokens {
+                self.conversation.token_budget.record_input(tokens);
+            }
             let audit_id = response.swarm_llm_audit_id;
             let provider = response.provider.clone();
             let model = response.model.clone();
@@ -328,10 +353,14 @@ impl Agent {
                 tool_calls: tool_calls.len(),
             });
 
+            let _ = self.conversation.token_budget.record(output_tokens);
             let empty = assistant_msg.last_text().is_none()
                 && tool_calls.is_empty()
                 && tool_mode != crate::llm::ToolMode::Observe;
-            if empty && empty_attempts < self.max_retries {
+            if empty
+                && empty_attempts < self.max_retries
+                && self.conversation.token_budget.has_budget()
+            {
                 let delay_ms = compute_backoff_ms(empty_attempts);
                 tracing::warn!(
                     attempt = empty_attempts + 1,
@@ -390,6 +419,11 @@ impl Agent {
             progress.final_text =
                 format!("{}{}", progress.continuation_prefix, progress.final_text);
         }
+        self.last_run_status = if assistant_msg.last_text().is_some() {
+            super::protocol::RunStatus::Completed
+        } else {
+            super::protocol::RunStatus::Partial
+        };
         self.conversation.messages.push(assistant_msg);
         output.flush()
     }
@@ -413,10 +447,14 @@ impl Agent {
         if let Some(cost_metadata) = cost_metadata {
             assistant_msg.cost = Some(finalize_cost_metadata(cost_metadata).await);
         }
-        if let Some(input_tokens) = input_tokens {
-            self.conversation.token_budget.record_input(input_tokens);
-        }
-        if let Err(error) = self.conversation.token_budget.record(output_tokens) {
+        let _ = (input_tokens, output_tokens);
+        if self
+            .conversation
+            .token_budget
+            .max_output_tokens
+            .is_some_and(|max| self.conversation.token_budget.output_tokens_used > max)
+        {
+            let error = crate::error::DysonError::Llm("token budget exceeded".into());
             self.conversation.messages.push(assistant_msg);
             self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
             tracing::warn!(
@@ -481,7 +519,6 @@ impl Agent {
         self.conversation.messages.push(assistant_msg);
         self.execute_tool_calls(&tool_calls, output).await?;
         self.admit_pending_user_messages(output).await?;
-        self.limiter.reset_turn();
         self.maybe_inject_budget_warning(iteration, output);
         if iteration == self.max_iterations - 1 {
             tracing::warn!(
@@ -519,6 +556,18 @@ impl Agent {
         let mut recovered_this_turn = false;
 
         'iter: for iteration in 0..self.max_iterations {
+            if !self.conversation.token_budget.has_budget() {
+                self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+                break;
+            }
+            let budget = &self.conversation.token_budget;
+            if budget.summary_reserve() > 0 && budget.remaining() <= budget.summary_reserve() {
+                self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+                progress.final_text = self
+                    .summarize_on_max_iterations(&skill_fragments, output)
+                    .await?;
+                break;
+            }
             // Check for cooperative cancellation (used by /stop).
             if self.tool_context.cancellation.is_cancelled() {
                 tracing::info!("agent cancelled — breaking loop");
@@ -542,7 +591,12 @@ impl Agent {
                 .await?
             {
                 IterationFlow::Ready(response) => response,
-                IterationFlow::RetryOuter => continue 'iter,
+                IterationFlow::RetryOuter => {
+                    if iteration + 1 == self.max_iterations {
+                        progress.hit_max_iterations = true;
+                    }
+                    continue 'iter;
+                }
                 IterationFlow::Cancelled => break 'iter,
             };
             if matches!(
@@ -552,8 +606,14 @@ impl Agent {
             ) {
                 break;
             }
+            if iteration + 1 == self.max_iterations {
+                progress.hit_max_iterations = true;
+            }
         }
 
+        if self.max_iterations == 0 {
+            progress.hit_max_iterations = true;
+        }
         if progress.hit_max_iterations {
             self.last_run_status = super::protocol::RunStatus::IterationLimit;
             progress.final_text = self
@@ -768,6 +828,15 @@ impl Agent {
             }
         };
 
+        let mut config = self.budgeted_config();
+        let budget = &self.conversation.token_budget;
+        config.max_tokens = config.max_tokens.min(
+            budget
+                .remaining()
+                .saturating_sub(budget.summary_reserve())
+                .max(1)
+                .min(u32::MAX as usize) as u32,
+        );
         let err = match client
             .stream(
                 &self.conversation.messages,
@@ -775,7 +844,7 @@ impl Agent {
                 skill_fragments,
                 tools_for_llm,
                 &self.tool_registry.tools,
-                &self.config,
+                &config,
             )
             .await
         {

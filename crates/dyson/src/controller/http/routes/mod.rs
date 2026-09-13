@@ -40,6 +40,7 @@ mod model;
 mod models;
 mod provider_auth;
 mod providers;
+mod recovery;
 mod sse;
 mod static_assets;
 mod turns;
@@ -332,6 +333,8 @@ async fn dispatch_conversations(
         (&Method::DELETE, [id]) => conversations::delete(&state, id).await,
         (&Method::POST, [id, "turn"]) => turns::post(req, state, id).await,
         (&Method::POST, [id, "cancel"]) => conversations::cancel(&state, id).await,
+        (&Method::GET, [id, "recovery"]) => recovery::get(&state, id).await,
+        (&Method::POST, [id, "recovery"]) => recovery::post(req, &state, id).await,
         (&Method::GET, [id, "events"]) => sse::events(&state, id, &req).await,
         (&Method::GET, [id, "files", file_id]) => {
             let (Some(id), Some(file_id)) = (url_decode_strict(id), url_decode_strict(file_id))
