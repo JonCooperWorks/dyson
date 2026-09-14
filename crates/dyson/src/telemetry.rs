@@ -71,18 +71,34 @@ where
     })
 }
 
+tokio::task_local! {
+    /// Correlation is independent of whether local OTel export is configured.
+    pub(crate) static CONVERSATION_ID: Option<String>;
+}
+
 /// Propagate correlation only to the configured Swarm proxy, never model vendors.
 pub fn inject_proxy_context(
     request: reqwest::RequestBuilder,
     url: &str,
 ) -> reqwest::RequestBuilder {
-    use opentelemetry::{propagation::TextMapPropagator, trace::TraceContextExt};
-    use tracing_opentelemetry::OpenTelemetrySpanExt;
     let Ok(base) = std::env::var("SWARM_PROXY_URL") else {
         return request;
     };
-    if !is_proxy_url(&base, url) {
+    inject_proxy_context_for_base(request, &base, url)
+}
+
+fn inject_proxy_context_for_base(
+    mut request: reqwest::RequestBuilder,
+    base: &str,
+    url: &str,
+) -> reqwest::RequestBuilder {
+    use opentelemetry::{propagation::TextMapPropagator, trace::TraceContextExt};
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    if !is_proxy_url(base, url) {
         return request;
+    }
+    if let Ok(Some(id)) = CONVERSATION_ID.try_with(Clone::clone) {
+        request = request.header("x-dyson-conversation-id", id);
     }
     let context = tracing::Span::current().context();
     if !context.span().span_context().is_valid() {
@@ -243,4 +259,38 @@ async fn initializes_and_shuts_down_inside_async_main() {
     let guard = start_provider("test");
     assert!(guard.0.is_some());
     drop(guard);
+}
+
+#[tokio::test]
+async fn conversation_headers_are_task_scoped_and_only_sent_to_swarm() {
+    async fn headers(id: &str, target: &str) -> reqwest::header::HeaderMap {
+        CONVERSATION_ID
+            .scope(Some(id.to_owned()), async {
+                tokio::task::yield_now().await;
+                inject_proxy_context_for_base(
+                    reqwest::Client::new().post(target),
+                    "https://swarm.example/llm",
+                    target,
+                )
+                .build()
+                .unwrap()
+                .headers()
+                .clone()
+            })
+            .await
+    }
+    let proxy = "https://swarm.example/llm/openrouter/v1/chat/completions";
+    let (a, b) = tokio::join!(headers("chat-a", proxy), headers("chat-b", proxy));
+    assert_eq!(a["x-dyson-conversation-id"], "chat-a");
+    assert_eq!(b["x-dyson-conversation-id"], "chat-b");
+    assert!(
+        !headers("private-chat", "https://vendor.example/v1/chat/completions")
+            .await
+            .contains_key("x-dyson-conversation-id")
+    );
+    assert!(
+        !headers("private-chat", "https://swarm.example/other")
+            .await
+            .contains_key("x-dyson-conversation-id")
+    );
 }

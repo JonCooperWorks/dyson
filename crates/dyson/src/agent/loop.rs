@@ -572,9 +572,13 @@ impl Agent {
             }
         };
         let runtime = self.tool_context.harness.clone();
+        let conversation_id = self.tool_context.current_chat_id.clone();
         let result = tokio::time::timeout(
             deadline,
-            super::task::budget::ACTIVE.scope(runtime, self.run_inner_impl(output)),
+            crate::telemetry::CONVERSATION_ID.scope(
+                conversation_id,
+                super::task::budget::ACTIVE.scope(runtime, self.run_inner_impl(output)),
+            ),
         )
         .await;
         if !matches!(&result, Ok(Ok(_))) {

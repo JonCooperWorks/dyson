@@ -131,11 +131,12 @@ impl LlmClient for GeminiClient {
             "sending Gemini streaming request"
         );
 
-        let response = self
+        let request = self
             .client
             .post(&url)
             .header("x-goog-api-key", &self.api_key)
-            .json(&body)
+            .json(&body);
+        let response = crate::telemetry::inject_proxy_context(request, &url)
             .send()
             .await?;
 
