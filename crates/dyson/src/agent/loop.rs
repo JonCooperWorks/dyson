@@ -170,6 +170,12 @@ enum LoopControl {
 }
 
 impl Agent {
+    #[tracing::instrument(
+        target = "dyson_otel",
+        name = "model.request",
+        skip_all,
+        fields(iteration, attempt)
+    )]
     async fn start_stream_attempt(
         &mut self,
         iteration: usize,
@@ -303,6 +309,12 @@ impl Agent {
         }
     }
 
+    #[tracing::instrument(
+        target = "dyson_otel",
+        name = "agent.iteration",
+        skip_all,
+        fields(iteration)
+    )]
     async fn stream_iteration(
         &mut self,
         iteration: usize,
@@ -542,6 +554,7 @@ impl Agent {
     ///
     /// Assumes the caller has already pushed the user message to
     /// `self.conversation.messages`.
+    #[tracing::instrument(target = "dyson_otel", name = "agent.turn", skip_all, fields(session.id = self.tool_context.current_chat_id.as_deref(), gen_ai.request.model = %self.config.model, otel.status_code = tracing::field::Empty))]
     pub(super) async fn run_inner(&mut self, output: &mut dyn Output) -> Result<String> {
         let deadline = self
             .tool_context
@@ -554,6 +567,7 @@ impl Agent {
             Ok(d) => d,
             Err(e) => {
                 self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+                tracing::Span::current().record("otel.status_code", "ERROR");
                 return Err(e);
             }
         };
@@ -563,6 +577,9 @@ impl Agent {
             super::task::budget::ACTIVE.scope(runtime, self.run_inner_impl(output)),
         )
         .await;
+        if !matches!(&result, Ok(Ok(_))) {
+            tracing::Span::current().record("otel.status_code", "ERROR");
+        }
         match result {
             Ok(value) => value,
             Err(_) => {

@@ -36,6 +36,7 @@ impl super::Agent {
     ///   offline-estimated context size exceeds `compaction_config.threshold()`.
     /// - Manually: a controller can call `agent.compact()` directly
     ///   (e.g. in response to a `/compact` command).
+    #[tracing::instrument(target = "dyson_otel", name = "agent.compaction", skip_all)]
     pub async fn compact(&mut self, output: &mut dyn Output) -> Result<()> {
         if self.conversation.messages.is_empty() {
             return Ok(());

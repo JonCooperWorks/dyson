@@ -77,3 +77,5 @@ pub mod workspace;
 // ---------------------------------------------------------------------------
 
 pub use error::{DysonError, Result};
+
+pub mod telemetry;

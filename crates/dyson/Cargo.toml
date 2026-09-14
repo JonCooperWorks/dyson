@@ -6,6 +6,11 @@ description = "Streaming, composable AI agent loop in Rust"
 build = "build.rs"
 
 [dependencies]
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = { version = "0.33", default-features = false }
+
 dyson-core = { path = "../dyson-core" }
 dyson-ast = { path = "../dyson-ast" }
 dyson-dependency-analysis = { path = "../dyson-dependency-analysis" }
@@ -114,6 +119,7 @@ tempfile = "3"
 tikv-jemallocator = "0.7"
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "testing"] }
 proptest = "1"
 wiremock = "0.6"
 # `test-util` enables tokio::time::pause / start_paused so retry-backoff

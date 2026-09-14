@@ -216,6 +216,7 @@ impl OpenAiClient {
             .header("Content-Type", "application/json")
             .json(&body);
 
+        let req = crate::telemetry::inject_proxy_context(req, &url);
         let response = self.auth.apply_to_request(req).await?.send().await?;
 
         if !response.status().is_success() {
