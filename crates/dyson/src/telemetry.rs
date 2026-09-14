@@ -81,7 +81,9 @@ pub fn inject_proxy_context(
     request: reqwest::RequestBuilder,
     url: &str,
 ) -> reqwest::RequestBuilder {
-    let Ok(base) = std::env::var("SWARM_PROXY_URL") else {
+    // Warm templates receive their active proxy through /configure after boot.
+    // Use that runtime setting rather than the template's original environment.
+    let Some((base, _token)) = crate::swarm_cost::runtime_proxy_parts() else {
         return request;
     };
     inject_proxy_context_for_base(request, &base, url)
@@ -263,19 +265,27 @@ async fn initializes_and_shuts_down_inside_async_main() {
 
 #[tokio::test]
 async fn conversation_headers_are_task_scoped_and_only_sent_to_swarm() {
+    let _guard = crate::swarm_cost::test_config_guard().await;
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::swarm_cost::set_runtime_config(None);
+        }
+    }
+    let _reset = Reset;
+    crate::swarm_cost::set_runtime_config_from_parts(
+        "https://swarm.example/llm/openrouter",
+        "runtime-token",
+    );
     async fn headers(id: &str, target: &str) -> reqwest::header::HeaderMap {
         CONVERSATION_ID
             .scope(Some(id.to_owned()), async {
                 tokio::task::yield_now().await;
-                inject_proxy_context_for_base(
-                    reqwest::Client::new().post(target),
-                    "https://swarm.example/llm",
-                    target,
-                )
-                .build()
-                .unwrap()
-                .headers()
-                .clone()
+                inject_proxy_context(reqwest::Client::new().post(target), target)
+                    .build()
+                    .unwrap()
+                    .headers()
+                    .clone()
             })
             .await
     }
