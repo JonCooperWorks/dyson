@@ -535,24 +535,7 @@ mod tests {
     }
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            working_dir: wd(),
-            env: std::collections::HashMap::new(),
-            cancellation: tokio_util::sync::CancellationToken::new(),
-            workspace: None,
-            depth: 0,
-            sandbox_bypass: None,
-            taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
-            activity: None,
-            tool_use_id: None,
-            subagent_events: None,
-            artefacts: None,
-            current_chat_id: None,
-            harness: crate::agent::task::TaskRuntime::default(),
-            idempotency_key: None,
-        }
+        ToolContext::new(wd())
     }
 
     fn sandbox(overrides: HashMap<String, ToolPolicyConfig>) -> PolicySandbox {

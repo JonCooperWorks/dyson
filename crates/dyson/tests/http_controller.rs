@@ -40,6 +40,63 @@ struct Rig {
     _handle: JoinHandle<dyson::error::Result<()>>,
 }
 
+impl Rig {
+    async fn create_chat(&self, title: &str) -> serde_json::Value {
+        let response = self
+            .post_json("/api/conversations", &serde_json::json!({"title": title}))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        body_json(response).await
+    }
+    async fn create_chat_id(&self, title: &str) -> String {
+        self.create_chat(title).await["id"]
+            .as_str()
+            .expect("chat id")
+            .to_string()
+    }
+
+    async fn get(&self, path: &str) -> Response<Incoming> {
+        get(&format!("{}{path}", self.base)).await
+    }
+    async fn get_json(&self, path: &str) -> serde_json::Value {
+        body_json(self.get(path).await).await
+    }
+    async fn get_with_header(&self, path: &str, name: &str, value: &str) -> Response<Incoming> {
+        get_with_header(&format!("{}{path}", self.base), name, value).await
+    }
+    async fn post_json<B: serde::Serialize>(&self, path: &str, body: &B) -> Response<Incoming> {
+        post_json(&format!("{}{path}", self.base), body).await
+    }
+    async fn post_json_body<B: serde::Serialize>(&self, path: &str, body: &B) -> serde_json::Value {
+        body_json(self.post_json(path, body).await).await
+    }
+    async fn post_json_with_headers<B: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+        headers: &[(&str, &str)],
+    ) -> Response<Incoming> {
+        post_json_with_headers(&format!("{}{path}", self.base), body, headers).await
+    }
+    async fn request(
+        &self,
+        path: &str,
+        method: Method,
+        body: Option<Vec<u8>>,
+    ) -> Response<Incoming> {
+        request(&format!("{}{path}", self.base), method, body).await
+    }
+    async fn request_with_headers(
+        &self,
+        path: &str,
+        method: Method,
+        body: Option<Vec<u8>>,
+        headers: &[(&str, &str)],
+    ) -> Response<Incoming> {
+        request_with_headers(&format!("{}{path}", self.base), method, body, headers).await
+    }
+}
+
 struct StubLlmClient;
 
 #[async_trait::async_trait]
@@ -375,14 +432,14 @@ async fn readyz_rejects_warmup_placeholder_while_healthz_stays_live() {
     }
     r.state.replace_settings_for_test(warmup_settings);
 
-    let live = get(&format!("{}/healthz", r.base)).await;
+    let live = r.get("/healthz").await;
     assert_eq!(
         live.status(),
         StatusCode::OK,
         "D1 liveness must stay 200 while readiness is false"
     );
 
-    let ready = get(&format!("{}/readyz", r.base)).await;
+    let ready = r.get("/readyz").await;
     assert_eq!(
         ready.status(),
         StatusCode::SERVICE_UNAVAILABLE,
@@ -533,7 +590,7 @@ async fn body_string(resp: Response<Incoming>) -> String {
 #[tokio::test]
 async fn list_conversations_starts_empty() {
     let r = rig().await;
-    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    let resp = r.get("/api/conversations").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(body, serde_json::json!([]));
@@ -542,18 +599,11 @@ async fn list_conversations_starts_empty() {
 #[tokio::test]
 async fn create_then_list_returns_chat_with_only_real_fields() {
     let r = rig().await;
-    let created = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "smoke" }),
-        )
-        .await,
-    )
-    .await;
+    let created = r.create_chat("smoke").await;
     assert_eq!(created["title"], "smoke");
     let id = created["id"].as_str().unwrap().to_string();
 
-    let listed = body_json(get(&format!("{}/api/conversations", r.base)).await).await;
+    let listed = r.get_json("/api/conversations").await;
     let list = listed.as_array().unwrap();
     assert_eq!(list.len(), 1);
     let only = &list[0];
@@ -586,14 +636,12 @@ async fn create_with_requested_id_is_idempotent_and_preserves_history() {
     let r = rig().await;
     let chat_id = "c-swarm-webhooks";
 
-    let created = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
+    let created = r
+        .post_json_body(
+            "/api/conversations",
             &serde_json::json!({ "id": chat_id, "title": "Webhook inbox" }),
         )
-        .await,
-    )
-    .await;
+        .await;
     assert_eq!(created["id"], chat_id);
     assert_eq!(created["title"], "Webhook inbox");
 
@@ -605,14 +653,12 @@ async fn create_with_requested_id_is_idempotent_and_preserves_history() {
     .await
     .expect("seed transcript");
 
-    let again = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
+    let again = r
+        .post_json_body(
+            "/api/conversations",
             &serde_json::json!({ "id": chat_id, "title": "Webhook inbox" }),
         )
-        .await,
-    )
-    .await;
+        .await;
     assert_eq!(again["id"], chat_id);
 
     let stored = r
@@ -633,11 +679,12 @@ async fn create_with_requested_id_is_idempotent_and_preserves_history() {
 #[tokio::test]
 async fn create_rejects_unsafe_requested_id() {
     let r = rig().await;
-    let resp = post_json(
-        &format!("{}/api/conversations", r.base),
-        &serde_json::json!({ "id": "../nope", "title": "bad" }),
-    )
-    .await;
+    let resp = r
+        .post_json(
+            "/api/conversations",
+            &serde_json::json!({ "id": "../nope", "title": "bad" }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = body_string(resp).await;
     assert!(body.contains("chat id must start with c-"));
@@ -646,7 +693,7 @@ async fn create_rejects_unsafe_requested_id() {
 #[tokio::test]
 async fn providers_returns_full_models_list_with_active_first() {
     let r = rig().await;
-    let body = body_json(get(&format!("{}/api/providers", r.base)).await).await;
+    let body = r.get_json("/api/providers").await;
     let provs = body.as_array().unwrap();
     assert_eq!(provs.len(), 1);
     let p = &provs[0];
@@ -674,7 +721,7 @@ async fn providers_list_reflects_hot_reloaded_models() {
     // drives the swap directly.
     let r = rig().await;
 
-    let before = body_json(get(&format!("{}/api/providers", r.base)).await).await;
+    let before = r.get_json("/api/providers").await;
     let initial_models: Vec<&str> = before[0]["models"]
         .as_array()
         .unwrap()
@@ -697,7 +744,7 @@ async fn providers_list_reflects_hot_reloaded_models() {
         .push("anthropic/claude-opus-4-7".to_string());
     r.state.replace_settings_for_test(new_settings);
 
-    let after = body_json(get(&format!("{}/api/providers", r.base)).await).await;
+    let after = r.get_json("/api/providers").await;
     let updated_models: Vec<&str> = after[0]["models"]
         .as_array()
         .unwrap()
@@ -715,7 +762,7 @@ async fn skills_endpoint_is_gone() {
     // Regression: /api/skills was removed when the Sandbox view was
     // deleted.  Hitting it must 404 rather than silently succeed.
     let r = rig().await;
-    let resp = get(&format!("{}/api/skills", r.base)).await;
+    let resp = r.get("/api/skills").await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -724,12 +771,13 @@ async fn admin_configure_rejects_identity_doc_in_task_without_explicit_field() {
     let r = rig().await;
     let secret = "test-configure-secret";
 
-    let rejected = post_json_with_headers(
-        &format!("{}/api/admin/configure", r.base),
-        &serde_json::json!({ "task": "# Identity\npwned" }),
-        &[("x-swarm-configure", secret)],
-    )
-    .await;
+    let rejected = r
+        .post_json_with_headers(
+            "/api/admin/configure",
+            &serde_json::json!({ "task": "# Identity\npwned" }),
+            &[("x-swarm-configure", secret)],
+        )
+        .await;
     assert_eq!(
         rejected.status(),
         StatusCode::BAD_REQUEST,
@@ -741,12 +789,13 @@ async fn admin_configure_rejects_identity_doc_in_task_without_explicit_field() {
     );
 
     let full_doc = "# Identity\n\nName: explicit\n\n## Mission\n\npwned\n";
-    let accepted = post_json_with_headers(
-        &format!("{}/api/admin/configure", r.base),
-        &serde_json::json!({ "identity_doc": full_doc }),
-        &[("x-swarm-configure", secret)],
-    )
-    .await;
+    let accepted = r
+        .post_json_with_headers(
+            "/api/admin/configure",
+            &serde_json::json!({ "identity_doc": full_doc }),
+            &[("x-swarm-configure", secret)],
+        )
+        .await;
     assert_eq!(
         accepted.status(),
         StatusCode::OK,
@@ -829,7 +878,7 @@ async fn admin_configure_first_boot_does_not_block_runtime_timer() {
 
     tokio::task::yield_now().await;
     let health = tokio::time::timeout(Duration::from_millis(100), async {
-        get(&format!("{}/healthz", r.base)).await.status()
+        r.get("/healthz").await.status()
     })
     .await;
     assert!(
@@ -1032,31 +1081,32 @@ async fn admin_configure_multi_patch_replaces_config_once() {
     let r = rig_with_config_path(config_path.clone()).await;
     let _configure_root = isolate_configure_workspace(&r);
     let (stop, handle) = spawn_config_replace_counter(&config_path);
-    let resp = post_json_with_headers(
-        &format!("{}/api/admin/configure", r.base),
-        &serde_json::json!({
-            "name": "multi",
-            "task": "run once",
-            "instance_id": "i-multi",
-            "models": ["openai/gpt-5"],
-            "proxy_token": "pt_aaaadeadbeefcafebabe1234567890ab",
-            "proxy_base": "https://swarm.test/llm/openrouter",
-            "image_provider_name": "image",
-            "image_provider_block": {
-                "type": "openrouter",
-                "api_key": "pt_real",
-                "models": ["google/gemini-image"]
-            },
-            "image_generation_provider": "image",
-            "image_generation_model": "google/gemini-image",
-            "tools": ["read_file"],
-            "mcp_servers": {
-                "search": { "url": "https://swarm.test/mcp/i-multi/search" }
-            }
-        }),
-        &[("x-swarm-configure", "test-configure-secret")],
-    )
-    .await;
+    let resp = r
+        .post_json_with_headers(
+            "/api/admin/configure",
+            &serde_json::json!({
+                "name": "multi",
+                "task": "run once",
+                "instance_id": "i-multi",
+                "models": ["openai/gpt-5"],
+                "proxy_token": "pt_aaaadeadbeefcafebabe1234567890ab",
+                "proxy_base": "https://swarm.test/llm/openrouter",
+                "image_provider_name": "image",
+                "image_provider_block": {
+                    "type": "openrouter",
+                    "api_key": "pt_real",
+                    "models": ["google/gemini-image"]
+                },
+                "image_generation_provider": "image",
+                "image_generation_model": "google/gemini-image",
+                "tools": ["read_file"],
+                "mcp_servers": {
+                    "search": { "url": "https://swarm.test/mcp/i-multi/search" }
+                }
+            }),
+            &[("x-swarm-configure", "test-configure-secret")],
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
     tokio::time::sleep(Duration::from_millis(50)).await;
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1077,12 +1127,13 @@ async fn runtime_tool_definitions_follow_builtin_tool_allowlist() {
         }),
     )
     .await;
-    let id = create_chat(&r, "without artifacts").await;
-    let resp = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "record tools" }),
-    )
-    .await;
+    let id = r.create_chat_id("without artifacts").await;
+    let resp = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "record tools" }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let names = wait_for_nonempty_tool_capture(&without_artifacts, 0).await;
     assert!(
@@ -1102,12 +1153,13 @@ async fn runtime_tool_definitions_follow_builtin_tool_allowlist() {
         }),
     )
     .await;
-    let id = create_chat(&r, "with artifacts").await;
-    let resp = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "record tools" }),
-    )
-    .await;
+    let id = r.create_chat_id("with artifacts").await;
+    let resp = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "record tools" }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let names = wait_for_nonempty_tool_capture(&with_artifacts, 0).await;
     assert!(
@@ -1175,7 +1227,7 @@ async fn artefact_listing_slow_disk_read_does_not_block_runtime() {
 
     tokio::task::yield_now().await;
     let health = tokio::time::timeout(Duration::from_millis(100), async {
-        get(&format!("{}/healthz", r.base)).await.status()
+        r.get("/healthz").await.status()
     })
     .await;
     unblock.await.unwrap();
@@ -1194,25 +1246,27 @@ async fn artefact_listing_slow_disk_read_does_not_block_runtime() {
 async fn admin_state_file_replay_enforces_durable_allowlist() {
     let r = rig().await;
     let secret = "test-configure-secret";
-    let configure = post_json_with_headers(
-        &format!("{}/api/admin/configure", r.base),
-        &serde_json::json!({}),
-        &[("x-swarm-configure", secret)],
-    )
-    .await;
+    let configure = r
+        .post_json_with_headers(
+            "/api/admin/configure",
+            &serde_json::json!({}),
+            &[("x-swarm-configure", secret)],
+        )
+        .await;
     assert_eq!(configure.status(), StatusCode::OK);
 
-    let allowed = post_json_with_headers(
-        &format!("{}/api/admin/state/file", r.base),
-        &serde_json::json!({
-            "namespace": "workspace",
-            "path": "memory/SOUL.md",
-            "mime": "text/markdown",
-            "body_b64": "aGVsbG8="
-        }),
-        &[("x-swarm-configure", secret)],
-    )
-    .await;
+    let allowed = r
+        .post_json_with_headers(
+            "/api/admin/state/file",
+            &serde_json::json!({
+                "namespace": "workspace",
+                "path": "memory/SOUL.md",
+                "mime": "text/markdown",
+                "body_b64": "aGVsbG8="
+            }),
+            &[("x-swarm-configure", secret)],
+        )
+        .await;
     assert_eq!(allowed.status(), StatusCode::OK);
     assert_eq!(
         std::fs::read_to_string(r.workspace_dir.path().join("memory/SOUL.md")).unwrap(),
@@ -1220,17 +1274,18 @@ async fn admin_state_file_replay_enforces_durable_allowlist() {
     );
 
     for path in ["dyson.json", ".env", "memory.db", "channels/c-1/memory.db"] {
-        let resp = post_json_with_headers(
-            &format!("{}/api/admin/state/file", r.base),
-            &serde_json::json!({
-                "namespace": "workspace",
-                "path": path,
-                "mime": "application/octet-stream",
-                "body_b64": "c2hvdWxkLW5vdC1iZS1kdXJhYmxl"
-            }),
-            &[("x-swarm-configure", secret)],
-        )
-        .await;
+        let resp = r
+            .post_json_with_headers(
+                "/api/admin/state/file",
+                &serde_json::json!({
+                    "namespace": "workspace",
+                    "path": path,
+                    "mime": "application/octet-stream",
+                    "body_b64": "c2hvdWxkLW5vdC1iZS1kdXJhYmxl"
+                }),
+                &[("x-swarm-configure", secret)],
+            )
+            .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "path {path}");
         assert!(
             !r.workspace_dir.path().join(path).exists(),
@@ -1238,17 +1293,18 @@ async fn admin_state_file_replay_enforces_durable_allowlist() {
         );
     }
 
-    let empty_chat = post_json_with_headers(
-        &format!("{}/api/admin/state/file", r.base),
-        &serde_json::json!({
-            "namespace": "chats",
-            "path": "c-1/transcript.json",
-            "mime": "application/json",
-            "body_b64": ""
-        }),
-        &[("x-swarm-configure", secret)],
-    )
-    .await;
+    let empty_chat = r
+        .post_json_with_headers(
+            "/api/admin/state/file",
+            &serde_json::json!({
+                "namespace": "chats",
+                "path": "c-1/transcript.json",
+                "mime": "application/json",
+                "body_b64": ""
+            }),
+            &[("x-swarm-configure", secret)],
+        )
+        .await;
     assert_eq!(empty_chat.status(), StatusCode::BAD_REQUEST);
     assert!(
         !r.chat_dir.path().join("c-1/transcript.json").exists(),
@@ -1263,26 +1319,28 @@ async fn admin_state_file_replay_advances_file_and_artefact_ids() {
 
     let r = rig().await;
     let secret = "test-configure-secret";
-    let configure = post_json_with_headers(
-        &format!("{}/api/admin/configure", r.base),
-        &serde_json::json!({}),
-        &[("x-swarm-configure", secret)],
-    )
-    .await;
-    assert_eq!(configure.status(), StatusCode::OK);
-
-    async fn replay_state_file(r: &Rig, secret: &str, path: &str, bytes: &[u8]) {
-        let resp = post_json_with_headers(
-            &format!("{}/api/admin/state/file", r.base),
-            &serde_json::json!({
-                "namespace": "chats",
-                "path": path,
-                "mime": "application/octet-stream",
-                "body_b64": B64.encode(bytes),
-            }),
+    let configure = r
+        .post_json_with_headers(
+            "/api/admin/configure",
+            &serde_json::json!({}),
             &[("x-swarm-configure", secret)],
         )
         .await;
+    assert_eq!(configure.status(), StatusCode::OK);
+
+    async fn replay_state_file(r: &Rig, secret: &str, path: &str, bytes: &[u8]) {
+        let resp = r
+            .post_json_with_headers(
+                "/api/admin/state/file",
+                &serde_json::json!({
+                    "namespace": "chats",
+                    "path": path,
+                    "mime": "application/octet-stream",
+                    "body_b64": B64.encode(bytes),
+                }),
+                &[("x-swarm-configure", secret)],
+            )
+            .await;
         assert_eq!(resp.status(), StatusCode::OK, "state replay path {path}");
     }
 
@@ -1304,11 +1362,12 @@ async fn admin_state_file_replay_advances_file_and_artefact_ids() {
     .await;
     replay_state_file(&r, secret, "c-0042/transcript.json", b"[]").await;
 
-    let created = post_json(
-        &format!("{}/api/conversations", r.base),
-        &serde_json::json!({ "title": "after replay" }),
-    )
-    .await;
+    let created = r
+        .post_json(
+            "/api/conversations",
+            &serde_json::json!({ "title": "after replay" }),
+        )
+        .await;
     assert_eq!(created.status(), StatusCode::OK);
     let created = body_json(created).await;
     assert_eq!(
@@ -1342,23 +1401,20 @@ async fn admin_idle_quiesce_blocks_new_turns_until_unquiesced() {
     // snapshotting a cube. They must exist on Dyson and must stop new
     // writes while the snapshot is being taken.
     let r = rig().await;
-    let id = create_chat(&r, "maintenance gate").await;
+    let id = r.create_chat_id("maintenance gate").await;
     let secret = "test-configure-secret";
-    let configure = post_json_with_headers(
-        &format!("{}/api/admin/configure", r.base),
-        &serde_json::json!({}),
-        &[("x-swarm-configure", secret)],
-    )
-    .await;
+    let configure = r
+        .post_json_with_headers(
+            "/api/admin/configure",
+            &serde_json::json!({}),
+            &[("x-swarm-configure", secret)],
+        )
+        .await;
     assert_eq!(configure.status(), StatusCode::OK);
 
     let idle = body_json(
-        get_with_header(
-            &format!("{}/api/admin/idle", r.base),
-            "x-swarm-configure",
-            secret,
-        )
-        .await,
+        r.get_with_header("/api/admin/idle", "x-swarm-configure", secret)
+            .await,
     )
     .await;
     assert_eq!(idle["idle"], true);
@@ -1366,8 +1422,8 @@ async fn admin_idle_quiesce_blocks_new_turns_until_unquiesced() {
     assert_eq!(idle["quiesced"], false);
 
     let quiesced = body_json(
-        post_json_with_headers(
-            &format!("{}/api/admin/quiesce", r.base),
+        r.post_json_with_headers(
+            "/api/admin/quiesce",
             &serde_json::json!({}),
             &[("x-swarm-configure", secret)],
         )
@@ -1376,16 +1432,17 @@ async fn admin_idle_quiesce_blocks_new_turns_until_unquiesced() {
     .await;
     assert_eq!(quiesced["quiesced"], true);
 
-    let blocked = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "must not start" }),
-    )
-    .await;
+    let blocked = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "must not start" }),
+        )
+        .await;
     assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     let unquiesced = body_json(
-        post_json_with_headers(
-            &format!("{}/api/admin/unquiesce", r.base),
+        r.post_json_with_headers(
+            "/api/admin/unquiesce",
             &serde_json::json!({}),
             &[("x-swarm-configure", secret)],
         )
@@ -1394,11 +1451,12 @@ async fn admin_idle_quiesce_blocks_new_turns_until_unquiesced() {
     .await;
     assert_eq!(unquiesced["quiesced"], false);
 
-    let accepted = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "ok now" }),
-    )
-    .await;
+    let accepted = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "ok now" }),
+        )
+        .await;
     assert_eq!(accepted.status(), StatusCode::ACCEPTED);
 }
 
@@ -1416,21 +1474,23 @@ async fn admin_quiesce_returns_conflict_while_a_turn_is_in_flight() {
         }),
     )
     .await;
-    let id = create_chat(&r, "busy gate").await;
+    let id = r.create_chat_id("busy gate").await;
     let secret = "test-configure-secret";
-    let configure = post_json_with_headers(
-        &format!("{}/api/admin/configure", r.base),
-        &serde_json::json!({}),
-        &[("x-swarm-configure", secret)],
-    )
-    .await;
+    let configure = r
+        .post_json_with_headers(
+            "/api/admin/configure",
+            &serde_json::json!({}),
+            &[("x-swarm-configure", secret)],
+        )
+        .await;
     assert_eq!(configure.status(), StatusCode::OK);
 
-    let turn = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "stay busy" }),
-    )
-    .await;
+    let turn = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "stay busy" }),
+        )
+        .await;
     assert_eq!(turn.status(), StatusCode::ACCEPTED);
     for _ in 0..100 {
         if started.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1440,12 +1500,13 @@ async fn admin_quiesce_returns_conflict_while_a_turn_is_in_flight() {
     }
     assert!(started.load(std::sync::atomic::Ordering::SeqCst));
 
-    let resp = post_json_with_headers(
-        &format!("{}/api/admin/quiesce", r.base),
-        &serde_json::json!({}),
-        &[("x-swarm-configure", secret)],
-    )
-    .await;
+    let resp = r
+        .post_json_with_headers(
+            "/api/admin/quiesce",
+            &serde_json::json!({}),
+            &[("x-swarm-configure", secret)],
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body = body_json(resp).await;
     assert_eq!(body["quiesced"], false);
@@ -1470,13 +1531,14 @@ async fn get_conversation_during_live_turn_returns_checkpoint_without_waiting_fo
         }),
     )
     .await;
-    let id = create_chat(&r, "visible while busy").await;
+    let id = r.create_chat_id("visible while busy").await;
 
-    let turn = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "stay visible on refresh" }),
-    )
-    .await;
+    let turn = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "stay visible on refresh" }),
+        )
+        .await;
     assert_eq!(turn.status(), StatusCode::ACCEPTED);
     for _ in 0..100 {
         if started.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1488,7 +1550,7 @@ async fn get_conversation_during_live_turn_returns_checkpoint_without_waiting_fo
 
     let fetched = tokio::time::timeout(
         Duration::from_millis(200),
-        get(&format!("{}/api/conversations/{id}", r.base)),
+        r.get(&format!("/api/conversations/{id}")),
     )
     .await;
     release.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1507,7 +1569,7 @@ async fn get_conversation_during_live_turn_returns_checkpoint_without_waiting_fo
 async fn mind_lists_workspace_files_and_round_trips_an_edit() {
     let r = rig().await;
     // Newly-created workspace populates SOUL.md/IDENTITY.md/etc.
-    let mind = body_json(get(&format!("{}/api/mind", r.base)).await).await;
+    let mind = r.get_json("/api/mind").await;
     let files: Vec<&str> = mind["files"]
         .as_array()
         .unwrap()
@@ -1517,15 +1579,16 @@ async fn mind_lists_workspace_files_and_round_trips_an_edit() {
     assert!(files.contains(&"SOUL.md"), "files = {files:?}");
 
     // Write through the API.
-    let resp = post_json(
-        &format!("{}/api/mind/file", r.base),
-        &serde_json::json!({ "path": "_test.md", "content": "hello world" }),
-    )
-    .await;
+    let resp = r
+        .post_json(
+            "/api/mind/file",
+            &serde_json::json!({ "path": "_test.md", "content": "hello world" }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Read back.
-    let read = body_json(get(&format!("{}/api/mind/file?path=_test.md", r.base)).await).await;
+    let read = r.get_json("/api/mind/file?path=_test.md").await;
     assert_eq!(read["content"], "hello world");
     assert_eq!(read["path"], "_test.md");
 
@@ -1537,37 +1600,27 @@ async fn mind_lists_workspace_files_and_round_trips_an_edit() {
 #[tokio::test]
 async fn feedback_round_trip_telegram_compatible() {
     let r = rig().await;
-    let id = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "rate me" }),
-        )
-        .await,
-    )
-    .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = r.create_chat_id("rate me").await;
 
     // Empty feedback initially.
-    let initial =
-        body_json(get(&format!("{}/api/conversations/{id}/feedback", r.base)).await).await;
+    let initial = r
+        .get_json(&format!("/api/conversations/{id}/feedback"))
+        .await;
     assert_eq!(initial, serde_json::json!([]));
 
     // Set a 👍.
-    let set = body_json(
-        post_json(
-            &format!("{}/api/conversations/{id}/feedback", r.base),
+    let set = r
+        .post_json_body(
+            &format!("/api/conversations/{id}/feedback"),
             &serde_json::json!({ "turn_index": 1, "emoji": "👍" }),
         )
-        .await,
-    )
-    .await;
+        .await;
     assert_eq!(set["rating"], "good");
 
     // Read it back.
-    let entries =
-        body_json(get(&format!("{}/api/conversations/{id}/feedback", r.base)).await).await;
+    let entries = r
+        .get_json(&format!("/api/conversations/{id}/feedback"))
+        .await;
     let arr = entries.as_array().unwrap();
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["turn_index"], 1);
@@ -1580,34 +1633,27 @@ async fn feedback_round_trip_telegram_compatible() {
     assert!(path.exists(), "feedback file not on disk: {path:?}");
 
     // Empty emoji removes.
-    post_json(
-        &format!("{}/api/conversations/{id}/feedback", r.base),
+    r.post_json(
+        &format!("/api/conversations/{id}/feedback"),
         &serde_json::json!({ "turn_index": 1, "emoji": "" }),
     )
     .await;
-    let after = body_json(get(&format!("{}/api/conversations/{id}/feedback", r.base)).await).await;
+    let after = r
+        .get_json(&format!("/api/conversations/{id}/feedback"))
+        .await;
     assert_eq!(after, serde_json::json!([]));
 }
 
 #[tokio::test]
 async fn unknown_emoji_is_rejected_400() {
     let r = rig().await;
-    let id = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "x" }),
+    let id = r.create_chat_id("x").await;
+    let resp = r
+        .post_json(
+            &format!("/api/conversations/{id}/feedback"),
+            &serde_json::json!({ "turn_index": 0, "emoji": "🦀" }),
         )
-        .await,
-    )
-    .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let resp = post_json(
-        &format!("{}/api/conversations/{id}/feedback", r.base),
-        &serde_json::json!({ "turn_index": 0, "emoji": "🦀" }),
-    )
-    .await;
+        .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -1617,7 +1663,7 @@ async fn embedded_static_assets_serve_with_correct_content_types() {
     // and discovers the real paths from the injected <script>/<link>
     // tags rather than hardcoding names that would drift on rebuild.
     let r = rig().await;
-    let resp = get(&format!("{}/", r.base)).await;
+    let resp = r.get("/").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let ct = resp
         .headers()
@@ -1629,7 +1675,7 @@ async fn embedded_static_assets_serve_with_correct_content_types() {
     let html = body_string(resp).await;
 
     let js = find_asset_href(&html, ".js").expect("index.html must link a JS chunk");
-    let resp = get(&format!("{}{}", r.base, js)).await;
+    let resp = r.get(&js).await;
     assert_eq!(resp.status(), StatusCode::OK, "GET {js}");
     let ct = resp
         .headers()
@@ -1647,7 +1693,7 @@ async fn embedded_static_assets_serve_with_correct_content_types() {
     // emits a separate `.css` chunk past a size threshold.  Either is
     // fine — accept whichever shape the bundle produced.
     if let Some(css) = find_asset_href(&html, ".css") {
-        let resp = get(&format!("{}{}", r.base, css)).await;
+        let resp = r.get(&css).await;
         assert_eq!(resp.status(), StatusCode::OK, "GET {css}");
         let ct = resp
             .headers()
@@ -1688,7 +1734,7 @@ fn find_asset_href(html: &str, suffix: &str) -> Option<String> {
 #[tokio::test]
 async fn unknown_route_returns_404_not_method_not_allowed() {
     let r = rig().await;
-    let resp = get(&format!("{}/api/this-does-not-exist", r.base)).await;
+    let resp = r.get("/api/this-does-not-exist").await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -1698,13 +1744,10 @@ async fn create_chat_appears_at_top_of_list() {
     // must be the first list entry, before any prior ones.
     let r = rig().await;
     for title in ["first", "second", "third"] {
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": title }),
-        )
-        .await;
+        r.post_json("/api/conversations", &serde_json::json!({ "title": title }))
+            .await;
     }
-    let listed = body_json(get(&format!("{}/api/conversations", r.base)).await).await;
+    let listed = r.get_json("/api/conversations").await;
     let titles: Vec<&str> = listed
         .as_array()
         .unwrap()
@@ -1717,11 +1760,9 @@ async fn create_chat_appears_at_top_of_list() {
 #[tokio::test]
 async fn cancel_unknown_chat_returns_404() {
     let r = rig().await;
-    let resp = post_json(
-        &format!("{}/api/conversations/c-nope/cancel", r.base),
-        &serde_json::json!({}),
-    )
-    .await;
+    let resp = r
+        .post_json("/api/conversations/c-nope/cancel", &serde_json::json!({}))
+        .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -1731,7 +1772,7 @@ async fn activity_endpoint_is_honest_about_being_empty() {
     // BackgroundAgentRegistry aggregation doesn't exist yet.  The
     // endpoint must not invent fake activity to fill the page.
     let r = rig().await;
-    let body = body_json(get(&format!("{}/api/activity", r.base)).await).await;
+    let body = r.get_json("/api/activity").await;
     assert_eq!(body["lanes"].as_array().unwrap().len(), 0);
 }
 
@@ -1742,26 +1783,16 @@ async fn activity_endpoint_is_honest_about_being_empty() {
 #[tokio::test]
 async fn get_conversation_404_for_unknown_id() {
     let r = rig().await;
-    let resp = get(&format!("{}/api/conversations/c-nope", r.base)).await;
+    let resp = r.get("/api/conversations/c-nope").await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn get_conversation_returns_empty_messages_for_new_chat() {
     let r = rig().await;
-    let id = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "fresh" }),
-        )
-        .await,
-    )
-    .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = r.create_chat_id("fresh").await;
 
-    let body = body_json(get(&format!("{}/api/conversations/{id}", r.base)).await).await;
+    let body = r.get_json(&format!("/api/conversations/{id}")).await;
     assert_eq!(body["id"], id);
     assert_eq!(body["title"], "fresh");
     assert!(body["messages"].as_array().unwrap().is_empty());
@@ -1777,17 +1808,17 @@ async fn get_conversation_reports_live_flag_so_spa_can_reattach_sse() {
     // until the next turn.  This test pins the field on the per-chat
     // body and asserts the busy flag round-trips into it.
     let r = rig().await;
-    let id = create_chat(&r, "live-flag").await;
+    let id = r.create_chat_id("live-flag").await;
 
     // Idle chat: live should be false.
-    let body = body_json(get(&format!("{}/api/conversations/{id}", r.base)).await).await;
+    let body = r.get_json(&format!("/api/conversations/{id}")).await;
     assert_eq!(body["live"], false, "fresh chat is not live");
 
     // Flip the busy latch via test helper to simulate an in-flight turn.
     test_helpers::set_chat_busy_for_test(r.state.clone(), &id, true)
         .await
         .expect("set busy");
-    let body = body_json(get(&format!("{}/api/conversations/{id}", r.base)).await).await;
+    let body = r.get_json(&format!("/api/conversations/{id}")).await;
     assert_eq!(body["live"], true, "busy chat must report live: true");
 }
 
@@ -1796,7 +1827,7 @@ async fn get_feedback_for_unknown_chat_returns_empty_list() {
     // FeedbackStore::load returns Ok(empty) when the file doesn't
     // exist; no need to check chat existence.  Match that.
     let r = rig().await;
-    let body = body_json(get(&format!("{}/api/conversations/c-nope/feedback", r.base)).await).await;
+    let body = r.get_json("/api/conversations/c-nope/feedback").await;
     assert_eq!(body, serde_json::json!([]));
 }
 
@@ -1804,29 +1835,21 @@ async fn get_feedback_for_unknown_chat_returns_empty_list() {
 async fn cancel_unknown_chat_404_but_known_chat_idempotent() {
     let r = rig().await;
     // Unknown → 404
-    let bad = post_json(
-        &format!("{}/api/conversations/c-missing/cancel", r.base),
-        &serde_json::json!({}),
-    )
-    .await;
+    let bad = r
+        .post_json(
+            "/api/conversations/c-missing/cancel",
+            &serde_json::json!({}),
+        )
+        .await;
     assert_eq!(bad.status(), StatusCode::NOT_FOUND);
     // Known but no turn running → still 200 (idempotent)
-    let id = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "x" }),
+    let id = r.create_chat_id("x").await;
+    let ok = r
+        .post_json(
+            &format!("/api/conversations/{id}/cancel"),
+            &serde_json::json!({}),
         )
-        .await,
-    )
-    .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let ok = post_json(
-        &format!("{}/api/conversations/{id}/cancel", r.base),
-        &serde_json::json!({}),
-    )
-    .await;
+        .await;
     assert_eq!(ok.status(), StatusCode::OK);
     assert_eq!(body_json(ok).await["ok"], true);
 }
@@ -1834,11 +1857,12 @@ async fn cancel_unknown_chat_404_but_known_chat_idempotent() {
 #[tokio::test]
 async fn post_turn_404_for_unknown_chat() {
     let r = rig().await;
-    let resp = post_json(
-        &format!("{}/api/conversations/c-nope/turn", r.base),
-        &serde_json::json!({ "prompt": "hi" }),
-    )
-    .await;
+    let resp = r
+        .post_json(
+            "/api/conversations/c-nope/turn",
+            &serde_json::json!({ "prompt": "hi" }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -1849,7 +1873,7 @@ async fn post_turn_rejects_swarm_warmup_config_before_building_agent() {
     // provider.  The turn must fail fast instead of caching a bad client
     // on the chat and making every later turn hit upstream auth errors.
     let r = rig().await;
-    let id = create_chat(&r, "New conversation").await;
+    let id = r.create_chat_id("New conversation").await;
 
     let mut warmup_settings = r.state.settings_snapshot();
     warmup_settings.agent.model = "warmup-placeholder".into();
@@ -1859,11 +1883,12 @@ async fn post_turn_rejects_swarm_warmup_config_before_building_agent() {
     }
     r.state.replace_settings_for_test(warmup_settings);
 
-    let rejected = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "what is secretpeek?" }),
-    )
-    .await;
+    let rejected = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "what is secretpeek?" }),
+        )
+        .await;
     assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = body_json(rejected).await;
     assert!(
@@ -1877,11 +1902,12 @@ async fn post_turn_rejects_swarm_warmup_config_before_building_agent() {
     // The failed admission must not leave the chat busy.  A second POST
     // under the same warmup config should get the same explicit 503, not a
     // 200 queued response behind a phantom in-flight turn.
-    let again = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "what is secretpeek?" }),
-    )
-    .await;
+    let again = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "what is secretpeek?" }),
+        )
+        .await;
     assert_eq!(again.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
@@ -1892,18 +1918,19 @@ async fn post_turn_rejects_named_provider_config_without_active_provider() {
     // fall back to the registry's direct default client; in swarm that
     // fallback is how a stale placeholder config becomes a real turn.
     let r = rig().await;
-    let id = create_chat(&r, "New conversation").await;
+    let id = r.create_chat_id("New conversation").await;
 
     let mut settings = r.state.settings_snapshot();
     settings.active_provider = None;
     settings.agent.model = "not-in-provider-list".into();
     r.state.replace_settings_for_test(settings);
 
-    let rejected = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "what is secretpeek?" }),
-    )
-    .await;
+    let rejected = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "what is secretpeek?" }),
+        )
+        .await;
     assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = body_json(rejected).await;
     assert!(
@@ -1922,14 +1949,15 @@ async fn accepted_turn_checkpoint_does_not_duplicate_first_user_message() {
     // from disk it must drop that provisional tail before calling
     // Agent::run(), otherwise the first prompt is persisted twice.
     let r = rig().await;
-    let id = create_chat(&r, "duplicate guard").await;
+    let id = r.create_chat_id("duplicate guard").await;
     let prompt = "persist me once";
 
-    let resp = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": prompt }),
-    )
-    .await;
+    let resp = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": prompt }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
 
     let history = r.state.history_for_test().expect("history");
@@ -1960,17 +1988,18 @@ async fn accepted_turn_checkpoint_does_not_duplicate_first_user_message() {
 #[tokio::test]
 async fn first_turn_generates_chat_title_in_background() {
     let r = rig().await;
-    let id = create_chat(&r, "New conversation").await;
-    let resp = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "investigate the login failure" }),
-    )
-    .await;
+    let id = r.create_chat_id("New conversation").await;
+    let resp = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "investigate the login failure" }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
 
     let mut seen = None;
     for _ in 0..20 {
-        let list = body_json(get(&format!("{}/api/conversations", r.base)).await).await;
+        let list = r.get_json("/api/conversations").await;
         seen = list
             .as_array()
             .and_then(|rows| {
@@ -1996,16 +2025,17 @@ async fn post_turn_while_busy_enqueues_instead_of_409() {
     // return 200 with `queued: true` + 1-indexed position, and persist
     // the queue file under data_dir so a restart picks it up.
     let r = rig().await;
-    let id = create_chat(&r, "queue test").await;
+    let id = r.create_chat_id("queue test").await;
     test_helpers::set_chat_busy_for_test(r.state.clone(), &id, true)
         .await
         .expect("set busy");
 
-    let resp = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "while you're working" }),
-    )
-    .await;
+    let resp = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "while you're working" }),
+        )
+        .await;
     assert_eq!(
         resp.status(),
         StatusCode::OK,
@@ -2039,13 +2069,14 @@ async fn queued_turn_is_admitted_before_next_llm_iteration_after_tool_batch() {
         }),
     )
     .await;
-    let id = create_chat(&r, "mid-turn queue").await;
+    let id = r.create_chat_id("mid-turn queue").await;
 
-    let first = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "start a tool" }),
-    )
-    .await;
+    let first = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "start a tool" }),
+        )
+        .await;
     assert_eq!(first.status(), StatusCode::ACCEPTED);
 
     for _ in 0..100 {
@@ -2056,11 +2087,12 @@ async fn queued_turn_is_admitted_before_next_llm_iteration_after_tool_batch() {
     }
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
-    let queued = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "user follow-up while tool is running" }),
-    )
-    .await;
+    let queued = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "user follow-up while tool is running" }),
+        )
+        .await;
     assert_eq!(queued.status(), StatusCode::OK);
     let queued_body = body_json(queued).await;
     assert_eq!(queued_body["queued"], true);
@@ -2108,27 +2140,29 @@ async fn post_turn_409_only_when_queue_is_full() {
     // Once 16 messages are queued (QUEUE_CAP), further POSTs fall back
     // to 409 with `queue is full` so the SPA can surface backpressure.
     let r = rig().await;
-    let id = create_chat(&r, "queue overflow").await;
+    let id = r.create_chat_id("queue overflow").await;
     test_helpers::set_chat_busy_for_test(r.state.clone(), &id, true)
         .await
         .expect("set busy");
 
     // Fill up to QUEUE_CAP = 16.
     for i in 0..16 {
-        let resp = post_json(
-            &format!("{}/api/conversations/{id}/turn", r.base),
-            &serde_json::json!({ "prompt": format!("msg {i}") }),
-        )
-        .await;
+        let resp = r
+            .post_json(
+                &format!("/api/conversations/{id}/turn"),
+                &serde_json::json!({ "prompt": format!("msg {i}") }),
+            )
+            .await;
         assert_eq!(resp.status(), StatusCode::OK, "fill #{i}");
     }
 
     // 17th POST → 409.
-    let overflow = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "one too many" }),
-    )
-    .await;
+    let overflow = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "one too many" }),
+        )
+        .await;
     assert_eq!(overflow.status(), StatusCode::CONFLICT);
     let body = body_json(overflow).await;
     assert!(
@@ -2143,17 +2177,18 @@ async fn clear_drains_queued_turns_and_removes_persisted_file() {
     // typed during the previous run would resurrect into the fresh
     // chat right after rotation.
     let r = rig().await;
-    let id = create_chat(&r, "clear drains").await;
+    let id = r.create_chat_id("clear drains").await;
     test_helpers::set_chat_busy_for_test(r.state.clone(), &id, true)
         .await
         .expect("set busy");
 
     for i in 0..3 {
-        let resp = post_json(
-            &format!("{}/api/conversations/{id}/turn", r.base),
-            &serde_json::json!({ "prompt": format!("msg {i}") }),
-        )
-        .await;
+        let resp = r
+            .post_json(
+                &format!("/api/conversations/{id}/turn"),
+                &serde_json::json!({ "prompt": format!("msg {i}") }),
+            )
+            .await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
     assert_eq!(
@@ -2173,11 +2208,12 @@ async fn clear_drains_queued_turns_and_removes_persisted_file() {
         .await
         .expect("clear busy");
 
-    let resp = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "/clear" }),
-    )
-    .await;
+    let resp = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "/clear" }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(body_json(resp).await["cleared"], true);
 
@@ -2195,46 +2231,39 @@ async fn clear_drains_queued_turns_and_removes_persisted_file() {
 #[tokio::test]
 async fn post_turn_400_for_invalid_body() {
     let r = rig().await;
-    let id = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "x" }),
-        )
-        .await,
-    )
-    .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = r.create_chat_id("x").await;
     // Missing required `prompt` field — JSON parse fails → 400.
-    let resp = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({}),
-    )
-    .await;
+    let resp = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({}),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn create_conversation_400_for_invalid_body() {
     let r = rig().await;
-    let resp = request(
-        &format!("{}/api/conversations", r.base),
-        Method::POST,
-        Some(b"not json at all".to_vec()),
-    )
-    .await;
+    let resp = r
+        .request(
+            "/api/conversations",
+            Method::POST,
+            Some(b"not json at all".to_vec()),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn post_model_400_for_unknown_provider() {
     let r = rig().await;
-    let resp = post_json(
-        &format!("{}/api/model", r.base),
-        &serde_json::json!({ "provider": "does-not-exist" }),
-    )
-    .await;
+    let resp = r
+        .post_json(
+            "/api/model",
+            &serde_json::json!({ "provider": "does-not-exist" }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -2244,14 +2273,12 @@ async fn post_model_returns_zero_swapped_when_no_agents_loaded() {
     // succeeds; clients use `swapped` to decide whether the change
     // took effect on any in-flight session.
     let r = rig().await;
-    let body = body_json(
-        post_json(
-            &format!("{}/api/model", r.base),
+    let body = r
+        .post_json_body(
+            "/api/model",
             &serde_json::json!({ "provider": "default", "model": "minimax/minimax-m2.5" }),
         )
-        .await,
-    )
-    .await;
+        .await;
     assert_eq!(body["ok"], true);
     assert_eq!(body["model"], "minimax/minimax-m2.5");
     assert_eq!(body["swapped"], 0);
@@ -2267,7 +2294,7 @@ async fn post_model_surfaces_choice_in_providers_listing() {
     let r = rig().await;
 
     // Pick a non-default model from the provider's configured set.
-    let before = body_json(get(&format!("{}/api/providers", r.base)).await).await;
+    let before = r.get_json("/api/providers").await;
     let provider_id = before.as_array().unwrap()[0]["id"]
         .as_str()
         .unwrap()
@@ -2291,21 +2318,19 @@ async fn post_model_surfaces_choice_in_providers_listing() {
         .expect("another model exists")
         .to_string();
 
-    let resp = body_json(
-        post_json(
-            &format!("{}/api/model", r.base),
+    let resp = r
+        .post_json_body(
+            "/api/model",
             &serde_json::json!({ "provider": provider_id, "model": switch_to }),
         )
-        .await,
-    )
-    .await;
+        .await;
     assert_eq!(resp["ok"], true);
     assert_eq!(resp["model"], switch_to);
 
     // Providers listing must now report the switched model as active —
     // this is what the web UI reads on each poll and what new chats
     // get wired to via the runtime override applied in `post_turn`.
-    let after = body_json(get(&format!("{}/api/providers", r.base)).await).await;
+    let after = r.get_json("/api/providers").await;
     let active = &after.as_array().unwrap()[0];
     assert_eq!(active["active"], true);
     assert_eq!(
@@ -2317,14 +2342,15 @@ async fn post_model_surfaces_choice_in_providers_listing() {
 #[tokio::test]
 async fn post_model_targets_specific_chat_404_when_unknown() {
     let r = rig().await;
-    let resp = post_json(
-        &format!("{}/api/model", r.base),
-        &serde_json::json!({
-            "provider": "default",
-            "chat_id": "c-missing",
-        }),
-    )
-    .await;
+    let resp = r
+        .post_json(
+            "/api/model",
+            &serde_json::json!({
+                "provider": "default",
+                "chat_id": "c-missing",
+            }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -2332,29 +2358,25 @@ async fn post_model_targets_specific_chat_404_when_unknown() {
 async fn post_mind_file_400_when_payload_invalid() {
     let r = rig().await;
     // Missing `path` field — serde rejects, controller returns 400.
-    let resp = post_json(
-        &format!("{}/api/mind/file", r.base),
-        &serde_json::json!({ "content": "x" }),
-    )
-    .await;
+    let resp = r
+        .post_json("/api/mind/file", &serde_json::json!({ "content": "x" }))
+        .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn get_mind_file_400_when_path_query_missing() {
     let r = rig().await;
-    let resp = get(&format!("{}/api/mind/file", r.base)).await;
+    let resp = r.get("/api/mind/file").await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn get_mind_file_404_for_unknown_file() {
     let r = rig().await;
-    let resp = get(&format!(
-        "{}/api/mind/file?path=this-file-does-not-exist.md",
-        r.base
-    ))
-    .await;
+    let resp = r
+        .get("/api/mind/file?path=this-file-does-not-exist.md")
+        .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -2364,18 +2386,8 @@ async fn sse_endpoint_serves_event_stream() {
     // bridge.js's EventSource won't auto-reconnect properly without
     // text/event-stream + no-cache.
     let r = rig().await;
-    let id = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "sse" }),
-        )
-        .await,
-    )
-    .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let resp = get(&format!("{}/api/conversations/{id}/events", r.base)).await;
+    let id = r.create_chat_id("sse").await;
+    let resp = r.get(&format!("/api/conversations/{id}/events")).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         resp.headers()
@@ -2416,7 +2428,7 @@ async fn static_path_traversal_is_blocked() {
         "/assets/%5csecret",
         "/assets/%00secret",
     ] {
-        let resp = get(&format!("{}{}", r.base, evil)).await;
+        let resp = r.get(evil).await;
         assert!(
             resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
             "GET {} returned {}",
@@ -2429,7 +2441,7 @@ async fn static_path_traversal_is_blocked() {
 #[tokio::test]
 async fn static_unknown_asset_returns_404() {
     let r = rig().await;
-    let resp = get(&format!("{}/styles/does-not-exist.css", r.base)).await;
+    let resp = r.get("/styles/does-not-exist.css").await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -2439,12 +2451,9 @@ async fn unsupported_method_returns_405() {
     // handler which only serves GET; falls through to the bottom-of-
     // dispatch fallback which returns 405.
     let r = rig().await;
-    let resp = request(
-        &format!("{}/api/conversations", r.base),
-        Method::PUT,
-        Some(b"{}".to_vec()),
-    )
-    .await;
+    let resp = r
+        .request("/api/conversations", Method::PUT, Some(b"{}".to_vec()))
+        .await;
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
@@ -2476,29 +2485,20 @@ async fn feedback_overwrites_existing_rating_for_same_turn() {
     // Same turn rated twice → second wins (latest reaction is the one
     // stored; the FeedbackStore uses upsert).
     let r = rig().await;
-    let id = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "swap" }),
-        )
-        .await,
-    )
-    .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    post_json(
-        &format!("{}/api/conversations/{id}/feedback", r.base),
+    let id = r.create_chat_id("swap").await;
+    r.post_json(
+        &format!("/api/conversations/{id}/feedback"),
         &serde_json::json!({ "turn_index": 1, "emoji": "👍" }),
     )
     .await;
-    post_json(
-        &format!("{}/api/conversations/{id}/feedback", r.base),
+    r.post_json(
+        &format!("/api/conversations/{id}/feedback"),
         &serde_json::json!({ "turn_index": 1, "emoji": "🔥" }),
     )
     .await;
-    let entries =
-        body_json(get(&format!("{}/api/conversations/{id}/feedback", r.base)).await).await;
+    let entries = r
+        .get_json(&format!("/api/conversations/{id}/feedback"))
+        .await;
     let arr = entries.as_array().unwrap();
     assert_eq!(arr.len(), 1, "should have replaced not appended");
     assert_eq!(arr[0]["rating"], "very_good");
@@ -2514,17 +2514,7 @@ async fn post_turn_with_slash_clear_rotates_chat_history() {
     // Telegram controller does via execute_agent_command.
     let r = rig().await;
 
-    let id = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "seed" }),
-        )
-        .await,
-    )
-    .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = r.create_chat_id("seed").await;
 
     // Seed the on-disk transcript so rotation has something real to
     // archive.  (The controller calls save(id, &[]) during create, so
@@ -2546,11 +2536,12 @@ async fn post_turn_with_slash_clear_rotates_chat_history() {
     // POST /clear — must return synchronously (no agent spawn) with a
     // 2xx.  The current file is empty afterwards and exactly one
     // rotated archive holds the original message.
-    let resp = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({ "prompt": "/clear" }),
-    )
-    .await;
+    let resp = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({ "prompt": "/clear" }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(body["cleared"], true);
@@ -2594,31 +2585,22 @@ async fn create_conversation_rotates_previous_chat_when_requested() {
     // before minting the new one.
     let r = rig().await;
 
-    let prev = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "old" }),
-        )
-        .await,
-    )
-    .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let prev = r.create_chat_id("old").await;
 
     let store = DiskChatHistory::new(r.chat_dir.path().to_path_buf()).expect("seed store");
     store
         .save(&prev, &[dyson::message::Message::user("first thought")])
         .expect("seed save");
 
-    let resp = post_json(
-        &format!("{}/api/conversations", r.base),
-        &serde_json::json!({
-            "title": "new",
-            "rotate_previous": prev,
-        }),
-    )
-    .await;
+    let resp = r
+        .post_json(
+            "/api/conversations",
+            &serde_json::json!({
+                "title": "new",
+                "rotate_previous": prev,
+            }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let created = body_json(resp).await;
     assert_ne!(created["id"].as_str().unwrap(), prev);
@@ -2659,14 +2641,15 @@ async fn create_conversation_rejects_traversal_rotate_previous() {
     let outside = r.chat_dir.path().parent().unwrap().join("escape");
     let _ = std::fs::remove_dir_all(&outside);
 
-    let resp = post_json(
-        &format!("{}/api/conversations", r.base),
-        &serde_json::json!({
-            "title": "new",
-            "rotate_previous": "../escape",
-        }),
-    )
-    .await;
+    let resp = r
+        .post_json(
+            "/api/conversations",
+            &serde_json::json!({
+                "title": "new",
+                "rotate_previous": "../escape",
+            }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert!(
         !outside.join("transcript.json").exists(),
@@ -2773,27 +2756,14 @@ async fn delete_empty_chat_removes_file_and_drops_from_list() {
     // a freshly-minted conversation the user immediately removes
     // shouldn't leave a zero-byte `[]` file stranded on disk.
     let r = rig().await;
-    let id = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "trash me" }),
-        )
-        .await,
-    )
-    .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = r.create_chat_id("trash me").await;
     let chat_root = r.chat_dir.path().join(&id);
     let current = chat_root.join("transcript.json");
     assert!(current.exists(), "create should seed an empty current file");
 
-    let resp = request(
-        &format!("{}/api/conversations/{id}", r.base),
-        Method::DELETE,
-        None,
-    )
-    .await;
+    let resp = r
+        .request(&format!("/api/conversations/{id}"), Method::DELETE, None)
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(body["deleted"], true);
@@ -2801,7 +2771,7 @@ async fn delete_empty_chat_removes_file_and_drops_from_list() {
 
     // Cascade delete: the whole chat subdir is gone.
     assert!(!chat_root.exists(), "empty chat's subdir should be gone");
-    let listed = body_json(get(&format!("{}/api/conversations", r.base)).await).await;
+    let listed = r.get_json("/api/conversations").await;
     let ids: Vec<&str> = listed
         .as_array()
         .unwrap()
@@ -2820,29 +2790,16 @@ async fn delete_non_empty_chat_rotates_then_drops_from_list() {
     // archive) but drop the chat from the sidebar.  Same shape
     // `/clear` produces, without the re-seeded current file.
     let r = rig().await;
-    let id = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "keep" }),
-        )
-        .await,
-    )
-    .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = r.create_chat_id("keep").await;
 
     let store = DiskChatHistory::new(r.chat_dir.path().to_path_buf()).expect("seed store");
     store
         .save(&id, &[dyson::message::Message::user("dont lose this")])
         .expect("seed save");
 
-    let resp = request(
-        &format!("{}/api/conversations/{id}", r.base),
-        Method::DELETE,
-        None,
-    )
-    .await;
+    let resp = r
+        .request(&format!("/api/conversations/{id}"), Method::DELETE, None)
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(body["deleted"], true);
@@ -2872,7 +2829,7 @@ async fn delete_non_empty_chat_rotates_then_drops_from_list() {
         "archive still holds the original message"
     );
 
-    let listed = body_json(get(&format!("{}/api/conversations", r.base)).await).await;
+    let listed = r.get_json("/api/conversations").await;
     let ids: Vec<&str> = listed
         .as_array()
         .unwrap()
@@ -2888,12 +2845,9 @@ async fn delete_non_empty_chat_rotates_then_drops_from_list() {
 #[tokio::test]
 async fn delete_unknown_chat_returns_404() {
     let r = rig().await;
-    let resp = request(
-        &format!("{}/api/conversations/c-missing", r.base),
-        Method::DELETE,
-        None,
-    )
-    .await;
+    let resp = r
+        .request("/api/conversations/c-missing", Method::DELETE, None)
+        .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -2904,31 +2858,22 @@ async fn turn_with_attachments_accepts_base64_payload() {
     // would land as 400 before kicking off the agent.
     use base64::Engine;
     let r = rig().await;
-    let id = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "upload" }),
-        )
-        .await,
-    )
-    .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = r.create_chat_id("upload").await;
 
     let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n");
-    let resp = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({
-            "prompt": "what is this?",
-            "attachments": [{
-                "name": "tiny.png",
-                "mime_type": "image/png",
-                "data_base64": png,
-            }],
-        }),
-    )
-    .await;
+    let resp = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({
+                "prompt": "what is this?",
+                "attachments": [{
+                    "name": "tiny.png",
+                    "mime_type": "image/png",
+                    "data_base64": png,
+                }],
+            }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
 }
 
@@ -2938,29 +2883,20 @@ async fn turn_with_invalid_base64_attachment_400s_clean() {
     // otherwise the user gets a 202 + an SSE error a second later
     // (and the agent already started).
     let r = rig().await;
-    let id = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "bad upload" }),
+    let id = r.create_chat_id("bad upload").await;
+    let resp = r
+        .post_json(
+            &format!("/api/conversations/{id}/turn"),
+            &serde_json::json!({
+                "prompt": "x",
+                "attachments": [{
+                    "name": "bad.bin",
+                    "mime_type": "application/octet-stream",
+                    "data_base64": "!!! not base64 !!!",
+                }],
+            }),
         )
-        .await,
-    )
-    .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let resp = post_json(
-        &format!("{}/api/conversations/{id}/turn", r.base),
-        &serde_json::json!({
-            "prompt": "x",
-            "attachments": [{
-                "name": "bad.bin",
-                "mime_type": "application/octet-stream",
-                "data_base64": "!!! not base64 !!!",
-            }],
-        }),
-    )
-    .await;
+        .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -2970,22 +2906,23 @@ async fn files_endpoint_404s_for_unknown_id() {
     // outputs etc.).  Unknown id is a 404 — same shape as missing
     // static asset.
     let r = rig().await;
-    let resp = get(&format!("{}/api/files/does-not-exist", r.base)).await;
+    let resp = r.get("/api/files/does-not-exist").await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn emitted_file_is_only_served_from_owning_chat_scope() {
     let r = rig().await;
-    let owner = create_chat(&r, "file owner").await;
-    let sibling = create_chat(&r, "file sibling").await;
+    let owner = r.create_chat_id("file owner").await;
+    let sibling = r.create_chat_id("file sibling").await;
 
-    let mut sse = request(
-        &format!("{}/api/conversations/{}/events", r.base, owner),
-        Method::GET,
-        None,
-    )
-    .await;
+    let mut sse = r
+        .request(
+            &format!("/api/conversations/{}/events", owner),
+            Method::GET,
+            None,
+        )
+        .await;
     assert_eq!(sse.status(), StatusCode::OK);
     test_helpers::wait_for_sse_subscriber(r.state.clone(), &owner).await;
 
@@ -3008,7 +2945,7 @@ async fn emitted_file_is_only_served_from_owning_chat_scope() {
         .next()
         .expect("file id from scoped URL");
 
-    let owner_resp = get(&format!("{}{}", r.base, scoped_url)).await;
+    let owner_resp = r.get(scoped_url).await;
     assert_eq!(owner_resp.status(), StatusCode::OK);
     let bytes = owner_resp
         .into_body()
@@ -3018,14 +2955,12 @@ async fn emitted_file_is_only_served_from_owning_chat_scope() {
         .to_bytes();
     assert_eq!(&bytes[..], b"scoped file body");
 
-    let global_resp = get(&format!("{}/api/files/{}", r.base, file_id)).await;
+    let global_resp = r.get(&format!("/api/files/{}", file_id)).await;
     assert_eq!(global_resp.status(), StatusCode::NOT_FOUND);
 
-    let sibling_resp = get(&format!(
-        "{}/api/conversations/{}/files/{}",
-        r.base, sibling, file_id
-    ))
-    .await;
+    let sibling_resp = r
+        .get(&format!("/api/conversations/{}/files/{}", sibling, file_id))
+        .await;
     assert_eq!(sibling_resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -3033,7 +2968,7 @@ async fn emitted_file_is_only_served_from_owning_chat_scope() {
 async fn root_path_serves_index_html() {
     // GET / must serve the Vite-built index.html, not redirect or 404.
     let r = rig().await;
-    let resp = get(&format!("{}/", r.base)).await;
+    let resp = r.get("/").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let ct = resp
         .headers()
@@ -3064,7 +2999,7 @@ fn hashed_bearer_for_test(plaintext: &str) -> Arc<HashedBearerAuth> {
 async fn bearer_auth_rejects_unauthenticated_api_request() {
     let auth = hashed_bearer_for_test("s3cret");
     let r = rig_with_auth(auth).await;
-    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    let resp = r.get("/api/conversations").await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     let body = body_json(resp).await;
     assert_eq!(body["error"], "unauthorized");
@@ -3074,7 +3009,7 @@ async fn bearer_auth_rejects_unauthenticated_api_request() {
 async fn bearer_auth_rejects_double_slash_api_request() {
     let auth = hashed_bearer_for_test("s3cret");
     let r = rig_with_auth(auth).await;
-    let resp = get(&format!("{}//api/conversations", r.base)).await;
+    let resp = r.get("//api/conversations").await;
     assert_eq!(
         resp.status(),
         StatusCode::UNAUTHORIZED,
@@ -3086,12 +3021,9 @@ async fn bearer_auth_rejects_double_slash_api_request() {
 async fn bearer_auth_rejects_wrong_token() {
     let auth = hashed_bearer_for_test("correct");
     let r = rig_with_auth(auth).await;
-    let resp = get_with_header(
-        &format!("{}/api/conversations", r.base),
-        "authorization",
-        "Bearer wrong",
-    )
-    .await;
+    let resp = r
+        .get_with_header("/api/conversations", "authorization", "Bearer wrong")
+        .await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -3099,12 +3031,9 @@ async fn bearer_auth_rejects_wrong_token() {
 async fn bearer_auth_accepts_matching_token() {
     let auth = hashed_bearer_for_test("right-token");
     let r = rig_with_auth(auth).await;
-    let resp = get_with_header(
-        &format!("{}/api/conversations", r.base),
-        "authorization",
-        "Bearer right-token",
-    )
-    .await;
+    let resp = r
+        .get_with_header("/api/conversations", "authorization", "Bearer right-token")
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
@@ -3115,14 +3044,14 @@ async fn bearer_auth_still_serves_static_shell_without_token() {
     // 401 on the very first GET /.
     let auth = hashed_bearer_for_test("s3cret");
     let r = rig_with_auth(auth).await;
-    let html_resp = get(&format!("{}/", r.base)).await;
+    let html_resp = r.get("/").await;
     assert_eq!(html_resp.status(), StatusCode::OK, "GET / must be exempt");
     let html = body_string(html_resp).await;
     let js = find_asset_href(&html, ".js").expect("index.html must link a JS chunk");
-    let resp = get(&format!("{}{}", r.base, js)).await;
+    let resp = r.get(&js).await;
     assert_eq!(resp.status(), StatusCode::OK, "GET {js} must be exempt");
     if let Some(css) = find_asset_href(&html, ".css") {
-        let resp = get(&format!("{}{}", r.base, css)).await;
+        let resp = r.get(&css).await;
         assert_eq!(resp.status(), StatusCode::OK, "GET {css} must be exempt");
     }
 }
@@ -3131,7 +3060,7 @@ async fn bearer_auth_still_serves_static_shell_without_token() {
 async fn debug_log_endpoint_requires_api_auth() {
     let auth = hashed_bearer_for_test("s3cret");
     let r = rig_with_auth(auth).await;
-    let resp = get(&format!("{}/api/_debug/log", r.base)).await;
+    let resp = r.get("/api/_debug/log").await;
     assert_eq!(
         resp.status(),
         StatusCode::UNAUTHORIZED,
@@ -3142,13 +3071,14 @@ async fn debug_log_endpoint_requires_api_auth() {
 #[tokio::test]
 async fn debug_log_endpoint_respects_loopback_host_gate() {
     let r = rig_with_auth_and_mode(Arc::new(DangerousNoAuth), test_helpers::AuthMode::None).await;
-    let resp = request_with_headers(
-        &format!("{}/api/_debug/log", r.base),
-        Method::GET,
-        None,
-        &[("host", "evil.example")],
-    )
-    .await;
+    let resp = r
+        .request_with_headers(
+            "/api/_debug/log",
+            Method::GET,
+            None,
+            &[("host", "evil.example")],
+        )
+        .await;
     assert_eq!(
         resp.status(),
         StatusCode::MISDIRECTED_REQUEST,
@@ -3318,24 +3248,18 @@ async fn send_file_inlines_images_and_attaches_everything_else() {
     let r = rig().await;
 
     // Create a chat so there's a broadcast channel to publish on.
-    let created = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "files" }),
-        )
-        .await,
-    )
-    .await;
+    let created = r.create_chat("files").await;
     let id = created["id"].as_str().unwrap().to_string();
 
     // Open the SSE stream BEFORE emitting — broadcast drops events
     // with zero receivers, so we need the subscription to land first.
-    let mut sse = request(
-        &format!("{}/api/conversations/{}/events", r.base, id),
-        Method::GET,
-        None,
-    )
-    .await;
+    let mut sse = r
+        .request(
+            &format!("/api/conversations/{}/events", id),
+            Method::GET,
+            None,
+        )
+        .await;
     assert_eq!(sse.status(), StatusCode::OK);
     assert_eq!(
         sse.headers().get("content-type").unwrap().to_str().unwrap(),
@@ -3373,7 +3297,7 @@ async fn send_file_inlines_images_and_attaches_everything_else() {
     assert_eq!(art["kind"], "image");
     assert_eq!(art["title"], "chart.png");
 
-    let resp = get(&format!("{}{}", r.base, png_url)).await;
+    let resp = r.get(&png_url).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         resp.headers()
@@ -3423,7 +3347,7 @@ async fn send_file_inlines_images_and_attaches_everything_else() {
     assert_eq!(evt["inline_image"], false, "non-images must NOT be inline");
     let pdf_url = evt["url"].as_str().expect("url").to_string();
 
-    let resp = get(&format!("{}{}", r.base, pdf_url)).await;
+    let resp = r.get(&pdf_url).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         resp.headers()
@@ -3471,7 +3395,7 @@ async fn browser_artefact_sink_publishes_telegram_file_as_artefact() {
     // Hydrate a ChatHandle for this chat id — the sink only
     // broadcasts live SSE when one exists.  Listing conversations is
     // the cheap, idempotent way to trigger hydration.
-    let _ = get(&format!("{}/api/conversations", r.base)).await;
+    let _ = r.get("/api/conversations").await;
     // Nothing on disk yet, so prime the map directly by listing from
     // an explicit POST wouldn't work (it would mint `c-NNNN`).  The
     // sink still persists to disk regardless — force a handle to
@@ -3483,14 +3407,15 @@ async fn browser_artefact_sink_publishes_telegram_file_as_artefact() {
         r#"{"version":1,"messages":[]}"#,
     )
     .expect("write transcript");
-    let _ = body_json(get(&format!("{}/api/conversations", r.base)).await).await;
+    let _ = r.get_json("/api/conversations").await;
 
-    let mut sse = request(
-        &format!("{}/api/conversations/{}/events", r.base, chat_id),
-        Method::GET,
-        None,
-    )
-    .await;
+    let mut sse = r
+        .request(
+            &format!("/api/conversations/{}/events", chat_id),
+            Method::GET,
+            None,
+        )
+        .await;
     assert_eq!(sse.status(), StatusCode::OK);
     test_helpers::wait_for_sse_subscriber(r.state.clone(), &chat_id).await;
 
@@ -3524,7 +3449,7 @@ async fn browser_artefact_sink_publishes_telegram_file_as_artefact() {
     );
 
     // The served file endpoint returns the bytes verbatim.
-    let resp = get(&format!("{}{}", r.base, file_url)).await;
+    let resp = r.get(&file_url).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp
         .into_body()
@@ -3535,14 +3460,9 @@ async fn browser_artefact_sink_publishes_telegram_file_as_artefact() {
     assert_eq!(&body[..], pdf_bytes);
 
     // Per-chat artefact listing must include the new entry.
-    let list = body_json(
-        get(&format!(
-            "{}/api/conversations/{}/artefacts",
-            r.base, chat_id,
-        ))
-        .await,
-    )
-    .await;
+    let list = r
+        .get_json(&format!("/api/conversations/{}/artefacts", chat_id))
+        .await;
     let arr = list.as_array().expect("artefact list is array");
     assert!(
         arr.iter().any(|a| a["id"] == art_id.as_str()),
@@ -3568,14 +3488,9 @@ async fn browser_artefact_sink_missing_file_is_noop() {
         "sink must return None when the file is gone"
     );
 
-    let list = body_json(
-        get(&format!(
-            "{}/api/conversations/{}/artefacts",
-            r.base, chat_id,
-        ))
-        .await,
-    )
-    .await;
+    let list = r
+        .get_json(&format!("/api/conversations/{}/artefacts", chat_id))
+        .await;
     let arr = list.as_array().expect("artefact list is array");
     assert!(
         arr.is_empty(),
@@ -3597,22 +3512,16 @@ async fn agent_artefact_round_trips_through_sse_and_disk() {
     // restarts and is reachable from other browser profiles).
     let r = rig().await;
 
-    let created = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "artefacts" }),
-        )
-        .await,
-    )
-    .await;
+    let created = r.create_chat("artefacts").await;
     let id = created["id"].as_str().unwrap().to_string();
 
-    let mut sse = request(
-        &format!("{}/api/conversations/{}/events", r.base, id),
-        Method::GET,
-        None,
-    )
-    .await;
+    let mut sse = r
+        .request(
+            &format!("/api/conversations/{}/events", id),
+            Method::GET,
+            None,
+        )
+        .await;
     assert_eq!(sse.status(), StatusCode::OK);
     test_helpers::wait_for_sse_subscriber(r.state.clone(), &id).await;
 
@@ -3646,11 +3555,9 @@ async fn agent_artefact_round_trips_through_sse_and_disk() {
     let art_id = url.trim_start_matches("/#/artefacts/").to_string();
 
     // GET the body — must come back verbatim with text/markdown.
-    let resp = get(&format!(
-        "{}/api/conversations/{}/artefacts/{}",
-        r.base, id, art_id
-    ))
-    .await;
+    let resp = r
+        .get(&format!("/api/conversations/{}/artefacts/{}", id, art_id))
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
         resp.headers()
@@ -3669,8 +3576,9 @@ async fn agent_artefact_round_trips_through_sse_and_disk() {
     assert_eq!(std::str::from_utf8(&body[..]).unwrap(), markdown);
 
     // Per-chat listing must include the artefact with its metadata.
-    let list =
-        body_json(get(&format!("{}/api/conversations/{}/artefacts", r.base, id,)).await).await;
+    let list = r
+        .get_json(&format!("/api/conversations/{}/artefacts", id))
+        .await;
     let arr = list.as_array().expect("artefact list is array");
     assert_eq!(arr.len(), 1, "one artefact expected, got: {list}");
     assert_eq!(arr[0]["id"], art_id);
@@ -3735,14 +3643,7 @@ async fn chat_reload_rehydrates_user_uploaded_images_as_file_blocks() {
     // block so `FileBlock` renders the image inline with the data URL.
     let r = rig().await;
 
-    let created = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "image recall" }),
-        )
-        .await,
-    )
-    .await;
+    let created = r.create_chat("image recall").await;
     let id = created["id"].as_str().unwrap().to_string();
 
     // Seed a user turn with an Image block directly — simulates what
@@ -3768,7 +3669,7 @@ async fn chat_reload_rehydrates_user_uploaded_images_as_file_blocks() {
         history.save(&id, &msgs).expect("save seeded transcript");
     }
 
-    let convo = body_json(get(&format!("{}/api/conversations/{}", r.base, id)).await).await;
+    let convo = r.get_json(&format!("/api/conversations/{}", id)).await;
     let messages = convo["messages"].as_array().expect("messages");
     let user = messages
         .iter()
@@ -3808,28 +3709,14 @@ async fn export_conversation_returns_sharegpt_json() {
     let r = rig().await;
 
     // Empty chat → 404 (nothing to export yet).
-    let a = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "empty" }),
-        )
-        .await,
-    )
-    .await;
+    let a = r.create_chat("empty").await;
     let a_id = a["id"].as_str().unwrap().to_string();
-    let empty = get(&format!("{}/api/conversations/{}/export", r.base, a_id)).await;
+    let empty = r.get(&format!("/api/conversations/{}/export", a_id)).await;
     assert_eq!(empty.status(), StatusCode::NOT_FOUND);
 
     // Populated chat → 200 with a ShareGPT array and attachment
     // disposition so the browser prompts a save.
-    let b = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "with turns" }),
-        )
-        .await,
-    )
-    .await;
+    let b = r.create_chat("with turns").await;
     let b_id = b["id"].as_str().unwrap().to_string();
     test_helpers::seed_transcript(
         r.state.clone(),
@@ -3839,7 +3726,7 @@ async fn export_conversation_returns_sharegpt_json() {
     .await
     .expect("seed");
 
-    let resp = get(&format!("{}/api/conversations/{}/export", r.base, b_id)).await;
+    let resp = r.get(&format!("/api/conversations/{}/export", b_id)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let cd = resp
         .headers()
@@ -3871,31 +3758,18 @@ async fn list_conversations_flags_chats_with_artefacts() {
     // assert only that one reports `has_artefacts`.
     let r = rig().await;
 
-    let a = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "has reports" }),
-        )
-        .await,
-    )
-    .await;
+    let a = r.create_chat("has reports").await;
     let a_id = a["id"].as_str().unwrap().to_string();
-    let b = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "no reports" }),
-        )
-        .await,
-    )
-    .await;
+    let b = r.create_chat("no reports").await;
     let b_id = b["id"].as_str().unwrap().to_string();
 
-    let mut sse = request(
-        &format!("{}/api/conversations/{}/events", r.base, a_id),
-        Method::GET,
-        None,
-    )
-    .await;
+    let mut sse = r
+        .request(
+            &format!("/api/conversations/{}/events", a_id),
+            Method::GET,
+            None,
+        )
+        .await;
     assert_eq!(sse.status(), StatusCode::OK);
     test_helpers::wait_for_sse_subscriber(r.state.clone(), &a_id).await;
     test_helpers::emit_agent_artefact(
@@ -3911,7 +3785,7 @@ async fn list_conversations_flags_chats_with_artefacts() {
     .expect("emit");
     let _ = read_sse_event(&mut sse).await;
 
-    let listed = body_json(get(&format!("{}/api/conversations", r.base)).await).await;
+    let listed = r.get_json("/api/conversations").await;
     let rows = listed.as_array().unwrap();
     let find = |id: &str| rows.iter().find(|c| c["id"] == id).unwrap().clone();
     assert_eq!(
@@ -3929,15 +3803,16 @@ async fn list_conversations_flags_chats_with_artefacts() {
 #[tokio::test]
 async fn artefact_body_is_only_served_from_owning_chat_scope() {
     let r = rig().await;
-    let owner = create_chat(&r, "artefact owner").await;
-    let sibling = create_chat(&r, "artefact sibling").await;
+    let owner = r.create_chat_id("artefact owner").await;
+    let sibling = r.create_chat_id("artefact sibling").await;
 
-    let mut sse = request(
-        &format!("{}/api/conversations/{}/events", r.base, owner),
-        Method::GET,
-        None,
-    )
-    .await;
+    let mut sse = r
+        .request(
+            &format!("/api/conversations/{}/events", owner),
+            Method::GET,
+            None,
+        )
+        .await;
     assert_eq!(sse.status(), StatusCode::OK);
     test_helpers::wait_for_sse_subscriber(r.state.clone(), &owner).await;
 
@@ -3953,11 +3828,12 @@ async fn artefact_body_is_only_served_from_owning_chat_scope() {
     assert_eq!(evt["type"], "artefact");
     let art_id = evt["id"].as_str().expect("artefact id");
 
-    let owner_resp = get(&format!(
-        "{}/api/conversations/{}/artefacts/{}",
-        r.base, owner, art_id
-    ))
-    .await;
+    let owner_resp = r
+        .get(&format!(
+            "/api/conversations/{}/artefacts/{}",
+            owner, art_id
+        ))
+        .await;
     assert_eq!(owner_resp.status(), StatusCode::OK);
     let bytes = owner_resp
         .into_body()
@@ -3967,14 +3843,15 @@ async fn artefact_body_is_only_served_from_owning_chat_scope() {
         .to_bytes();
     assert_eq!(&bytes[..], b"scoped artefact body");
 
-    let global_resp = get(&format!("{}/api/artefacts/{}", r.base, art_id)).await;
+    let global_resp = r.get(&format!("/api/artefacts/{}", art_id)).await;
     assert_eq!(global_resp.status(), StatusCode::NOT_FOUND);
 
-    let sibling_resp = get(&format!(
-        "{}/api/conversations/{}/artefacts/{}",
-        r.base, sibling, art_id
-    ))
-    .await;
+    let sibling_resp = r
+        .get(&format!(
+            "/api/conversations/{}/artefacts/{}",
+            sibling, art_id
+        ))
+        .await;
     assert_eq!(sibling_resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -3990,22 +3867,16 @@ async fn artefact_deep_link_is_shareable() {
     //      the sidebar without a second round-trip.
     let r = rig().await;
 
-    let created = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "permalinks" }),
-        )
-        .await,
-    )
-    .await;
+    let created = r.create_chat("permalinks").await;
     let id = created["id"].as_str().unwrap().to_string();
 
-    let mut sse = request(
-        &format!("{}/api/conversations/{}/events", r.base, id),
-        Method::GET,
-        None,
-    )
-    .await;
+    let mut sse = r
+        .request(
+            &format!("/api/conversations/{}/events", id),
+            Method::GET,
+            None,
+        )
+        .await;
     assert_eq!(sse.status(), StatusCode::OK);
     test_helpers::wait_for_sse_subscriber(r.state.clone(), &id).await;
 
@@ -4022,17 +3893,15 @@ async fn artefact_deep_link_is_shareable() {
     let art_id = spa_url.trim_start_matches("/#/artefacts/").to_string();
 
     // 1. Naked `/artefacts/<id>` 302s to the SPA deep-link.
-    let redir = get(&format!("{}/artefacts/{}", r.base, art_id)).await;
+    let redir = r.get(&format!("/artefacts/{}", art_id)).await;
     assert_eq!(redir.status(), StatusCode::FOUND);
     let loc = redir.headers().get("location").expect("location header");
     assert_eq!(loc.to_str().unwrap(), format!("/#/artefacts/{art_id}"));
 
     // 2. The scoped raw endpoint carries the chat id.
-    let body = get(&format!(
-        "{}/api/conversations/{}/artefacts/{}",
-        r.base, id, art_id
-    ))
-    .await;
+    let body = r
+        .get(&format!("/api/conversations/{}/artefacts/{}", id, art_id))
+        .await;
     assert_eq!(body.status(), StatusCode::OK);
     let chat_hdr = body
         .headers()
@@ -4058,7 +3927,7 @@ async fn artefact_id_rejects_url_encoded_traversal() {
         "a0%2F..",
         "a0/b1", // raw `/` — structurally bogus for a single id
     ] {
-        let api = get(&format!("{}/api/artefacts/{}", r.base, evil)).await;
+        let api = r.get(&format!("/api/artefacts/{}", evil)).await;
         assert_eq!(
             api.status(),
             StatusCode::NOT_FOUND,
@@ -4066,7 +3935,7 @@ async fn artefact_id_rejects_url_encoded_traversal() {
             evil,
             api.status(),
         );
-        let redir = get(&format!("{}/artefacts/{}", r.base, evil)).await;
+        let redir = r.get(&format!("/artefacts/{}", evil)).await;
         assert_eq!(
             redir.status(),
             StatusCode::NOT_FOUND,
@@ -4076,7 +3945,7 @@ async fn artefact_id_rejects_url_encoded_traversal() {
         );
     }
     for evil in ["..%2Ffoo", "%2e%2e"] {
-        let resp = get(&format!("{}/api/files/{}", r.base, evil)).await;
+        let resp = r.get(&format!("/api/files/{}", evil)).await;
         assert_eq!(
             resp.status(),
             StatusCode::NOT_FOUND,
@@ -4096,23 +3965,17 @@ async fn emitted_images_survive_refresh_via_artefacts() {
     // image ever emitted for this chat, even on a fresh HttpState.
     let r = rig().await;
 
-    let created = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "images-persist" }),
-        )
-        .await,
-    )
-    .await;
+    let created = r.create_chat("images-persist").await;
     let id = created["id"].as_str().unwrap().to_string();
 
     // Subscribe before emission so the broadcast has a receiver.
-    let mut sse = request(
-        &format!("{}/api/conversations/{}/events", r.base, id),
-        Method::GET,
-        None,
-    )
-    .await;
+    let mut sse = r
+        .request(
+            &format!("/api/conversations/{}/events", id),
+            Method::GET,
+            None,
+        )
+        .await;
     assert_eq!(sse.status(), StatusCode::OK);
     test_helpers::wait_for_sse_subscriber(r.state.clone(), &id).await;
 
@@ -4133,8 +3996,9 @@ async fn emitted_images_survive_refresh_via_artefacts() {
 
     // Simulate a refresh: re-fetch the artefact list via the API the
     // frontend uses on chat load.  The image MUST be there.
-    let list =
-        body_json(get(&format!("{}/api/conversations/{}/artefacts", r.base, id,)).await).await;
+    let list = r
+        .get_json(&format!("/api/conversations/{}/artefacts", id))
+        .await;
     let arr = list.as_array().expect("list array");
     assert_eq!(arr.len(), 1, "image artefact missing on refresh: {list}");
     assert_eq!(arr[0]["kind"], "image");
@@ -4203,22 +4067,16 @@ async fn image_artefact_stamps_tool_use_id_for_panel_rehydration() {
     // 1 image(s)..." and the image never reaches the panel.
     let r = rig().await;
 
-    let created = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "tool_use_id" }),
-        )
-        .await,
-    )
-    .await;
+    let created = r.create_chat("tool_use_id").await;
     let id = created["id"].as_str().unwrap().to_string();
 
-    let mut sse = request(
-        &format!("{}/api/conversations/{}/events", r.base, id),
-        Method::GET,
-        None,
-    )
-    .await;
+    let mut sse = r
+        .request(
+            &format!("/api/conversations/{}/events", id),
+            Method::GET,
+            None,
+        )
+        .await;
     assert_eq!(sse.status(), StatusCode::OK);
     test_helpers::wait_for_sse_subscriber(r.state.clone(), &id).await;
 
@@ -4256,7 +4114,7 @@ async fn image_artefact_stamps_tool_use_id_for_panel_rehydration() {
     );
 
     // The chat-load DTO must expose it as well.
-    let convo = body_json(get(&format!("{}/api/conversations/{}", r.base, id)).await).await;
+    let convo = r.get_json(&format!("/api/conversations/{}", id)).await;
     let messages = convo["messages"].as_array().expect("messages");
     let artefact_chip = messages.last().unwrap()["blocks"]
         .as_array()
@@ -4287,22 +4145,16 @@ async fn chat_reload_shows_emitted_images_in_transcript() {
     // must synthesise an artefact-chip turn from the ArtefactStore.
     let r = rig().await;
 
-    let created = body_json(
-        post_json(
-            &format!("{}/api/conversations", r.base),
-            &serde_json::json!({ "title": "chat-reload" }),
-        )
-        .await,
-    )
-    .await;
+    let created = r.create_chat("chat-reload").await;
     let id = created["id"].as_str().unwrap().to_string();
 
-    let mut sse = request(
-        &format!("{}/api/conversations/{}/events", r.base, id),
-        Method::GET,
-        None,
-    )
-    .await;
+    let mut sse = r
+        .request(
+            &format!("/api/conversations/{}/events", id),
+            Method::GET,
+            None,
+        )
+        .await;
     assert_eq!(sse.status(), StatusCode::OK);
     test_helpers::wait_for_sse_subscriber(r.state.clone(), &id).await;
 
@@ -4320,7 +4172,7 @@ async fn chat_reload_shows_emitted_images_in_transcript() {
     // Now simulate a refresh — fetch the conversation fresh.  The last
     // turn of the transcript must carry an artefact chip pointing at
     // the image.
-    let convo = body_json(get(&format!("{}/api/conversations/{}", r.base, id)).await).await;
+    let convo = r.get_json(&format!("/api/conversations/{}", id)).await;
     let messages = convo["messages"].as_array().expect("messages array");
     assert!(
         !messages.is_empty(),
@@ -4345,7 +4197,7 @@ async fn chat_reload_shows_sent_file_download_in_transcript() {
     // in chat history.  A browser refresh must still show a real
     // download chip in the chat, not only an Artefacts-tab entry.
     let r = rig().await;
-    let id = create_chat(&r, "sent file reload").await;
+    let id = r.create_chat_id("sent file reload").await;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let report_path = dir.path().join("reload-report.md");
@@ -4360,7 +4212,7 @@ async fn chat_reload_shows_sent_file_download_in_transcript() {
     .await
     .expect("emit report");
 
-    let convo = body_json(get(&format!("{}/api/conversations/{}", r.base, id)).await).await;
+    let convo = r.get_json(&format!("/api/conversations/{}", id)).await;
     let messages = convo["messages"].as_array().expect("messages array");
     let blocks: Vec<&serde_json::Value> = messages
         .iter()
@@ -4400,7 +4252,7 @@ async fn chat_reload_shows_evicted_persisted_artefacts_in_transcript() {
     // kept the artefacts on disk but lost the older chips from the chat
     // scroll on refresh.
     let r = rig().await;
-    let id = create_chat(&r, "evicted artefacts").await;
+    let id = r.create_chat_id("evicted artefacts").await;
 
     const TOTAL: usize = 36; // MAX_ARTEFACTS is 32; force FIFO eviction.
     for n in 0..TOTAL {
@@ -4414,7 +4266,7 @@ async fn chat_reload_shows_evicted_persisted_artefacts_in_transcript() {
             .expect("emit artefact");
     }
 
-    let convo = body_json(get(&format!("{}/api/conversations/{}", r.base, id)).await).await;
+    let convo = r.get_json(&format!("/api/conversations/{}", id)).await;
     let messages = convo["messages"].as_array().expect("messages array");
     let titles: Vec<&str> = messages
         .iter()
@@ -4455,7 +4307,7 @@ async fn activity_endpoint_returns_running_then_finished_entries() {
     let r = rig().await;
     // Mint a chat so the activity entry has a valid chat_id context
     // (not strictly required by the registry but mirrors live usage).
-    let chat = create_chat(&r, "activity test").await;
+    let chat = r.create_chat_id("activity test").await;
 
     let handle = dyson::controller::http::test_helpers::activity_handle(&r.state, &chat);
 
@@ -4465,7 +4317,7 @@ async fn activity_endpoint_returns_running_then_finished_entries() {
         "security_engineer",
         "review crates/dyson",
     );
-    let running = body_json(get(&format!("{}/api/activity", r.base)).await).await;
+    let running = r.get_json("/api/activity").await;
     let lanes = running["lanes"].as_array().expect("lanes array");
     assert_eq!(lanes.len(), 1, "one entry expected while running");
     assert_eq!(lanes[0]["lane"], "subagent");
@@ -4483,7 +4335,7 @@ async fn activity_endpoint_returns_running_then_finished_entries() {
 
     // 2. Finish Ok — status flips, finished_at populated.
     tok.finish(dyson::controller::ActivityStatus::Ok, Some("42s"));
-    let finished = body_json(get(&format!("{}/api/activity", r.base)).await).await;
+    let finished = r.get_json("/api/activity").await;
     let lanes = finished["lanes"].as_array().expect("lanes array");
     assert_eq!(lanes[0]["status"], "ok");
     assert!(lanes[0]["finished_at"].is_number());
@@ -4497,8 +4349,8 @@ async fn activity_endpoint_returns_running_then_finished_entries() {
 #[tokio::test]
 async fn activity_endpoint_filters_by_chat() {
     let r = rig().await;
-    let chat_a = create_chat(&r, "chat a").await;
-    let chat_b = create_chat(&r, "chat b").await;
+    let chat_a = r.create_chat_id("chat a").await;
+    let chat_b = r.create_chat_id("chat b").await;
 
     let h_a = dyson::controller::http::test_helpers::activity_handle(&r.state, &chat_a);
     let h_b = dyson::controller::http::test_helpers::activity_handle(&r.state, &chat_b);
@@ -4506,10 +4358,10 @@ async fn activity_endpoint_filters_by_chat() {
     let _t2 = h_b.start(dyson::controller::LANE_SUBAGENT, "se", "b1");
     let _t3 = h_b.start(dyson::controller::LANE_SUBAGENT, "se", "b2");
 
-    let all = body_json(get(&format!("{}/api/activity", r.base)).await).await;
+    let all = r.get_json("/api/activity").await;
     assert_eq!(all["lanes"].as_array().unwrap().len(), 3);
 
-    let scoped = body_json(get(&format!("{}/api/activity?chat={}", r.base, chat_b)).await).await;
+    let scoped = r.get_json(&format!("/api/activity?chat={}", chat_b)).await;
     let scoped_lanes = scoped["lanes"].as_array().expect("lanes array");
     assert_eq!(scoped_lanes.len(), 2, "only chat_b entries");
     for lane in scoped_lanes {
@@ -4542,7 +4394,7 @@ async fn activity_entries_survive_controller_restart() {
 
     // --- rig B: fresh HttpState pointing at the same disk ---
     let r = rig_pointing_at(&chat_dir, &workspace_dir).await;
-    let j = body_json(get(&format!("{}/api/activity?chat={}", r.base, chat_id)).await).await;
+    let j = r.get_json(&format!("/api/activity?chat={}", chat_id)).await;
     let lanes = j["lanes"].as_array().expect("lanes array");
     assert_eq!(lanes.len(), 1, "entry should survive restart");
     assert_eq!(lanes[0]["name"], "security_engineer");
@@ -4552,17 +4404,6 @@ async fn activity_entries_survive_controller_restart() {
         "note suffix should round-trip through disk: {:?}",
         lanes[0]["note"],
     );
-}
-
-/// Helper that mints a chat and returns its id.  The `/api/activity`
-/// endpoint doesn't strictly require a chat to exist (the registry
-/// keys by arbitrary string) but the real HTTP flow always has one.
-async fn create_chat(r: &Rig, title: &str) -> String {
-    let body = serde_json::json!({ "title": title });
-    let resp = post_json(&format!("{}/api/conversations", r.base), &body).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let j = body_json(resp).await;
-    j["id"].as_str().expect("chat id").to_string()
 }
 
 /// Build a rig with a custom `AuthMode`.  Lets the OIDC / Bearer
@@ -4679,7 +4520,7 @@ async fn rig_pointing_at(chat_dir: &tempfile::TempDir, workspace_dir: &tempfile:
 #[tokio::test]
 async fn auth_config_returns_none_shape_for_dangerous_no_auth() {
     let r = rig().await;
-    let resp = get(&format!("{}/api/auth/config", r.base)).await;
+    let resp = r.get("/api/auth/config").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp).await;
     assert_eq!(j["mode"], "none");
@@ -4698,7 +4539,7 @@ async fn auth_config_returns_bearer_shape_unauthenticated() {
         test_helpers::AuthMode::Bearer,
     )
     .await;
-    let resp = get(&format!("{}/api/auth/config", r.base)).await;
+    let resp = r.get("/api/auth/config").await;
     assert_eq!(
         resp.status(),
         StatusCode::OK,
@@ -4724,7 +4565,7 @@ async fn auth_config_returns_oidc_shape_with_endpoints_unauthenticated() {
         },
     )
     .await;
-    let resp = get(&format!("{}/api/auth/config", r.base)).await;
+    let resp = r.get("/api/auth/config").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp).await;
     assert_eq!(j["mode"], "oidc");
@@ -4761,7 +4602,7 @@ async fn auth_config_omits_token_endpoint_when_idp_did_not_advertise_one() {
         },
     )
     .await;
-    let resp = get(&format!("{}/api/auth/config", r.base)).await;
+    let resp = r.get("/api/auth/config").await;
     let j = body_json(resp).await;
     assert!(
         j["token_endpoint"].is_null(),
@@ -4778,7 +4619,7 @@ async fn unauthorized_carries_bearer_www_authenticate_header() {
         test_helpers::AuthMode::Bearer,
     )
     .await;
-    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    let resp = r.get("/api/conversations").await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     let www = resp
         .headers()
@@ -4813,7 +4654,7 @@ async fn unauthorized_carries_oidc_www_authenticate_header_with_as_uri_and_iss()
         },
     )
     .await;
-    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    let resp = r.get("/api/conversations").await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     let www = resp
         .headers()
@@ -4844,7 +4685,7 @@ async fn unauthorized_omits_www_authenticate_for_dangerous_no_auth() {
         }
     }
     let r = rig_with_auth_and_mode(Arc::new(AlwaysDeny), test_helpers::AuthMode::None).await;
-    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    let resp = r.get("/api/conversations").await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     assert!(
         resp.headers().get("WWW-Authenticate").is_none(),
@@ -4869,13 +4710,14 @@ async fn get_with_sse_cookie(url: &str, ticket: &str) -> Response<Incoming> {
 async fn create_chat_with_token(r: &Rig, title: &str, token: &str) -> String {
     let body = serde_json::json!({ "title": title });
     let bytes = serde_json::to_vec(&body).expect("serialize");
-    let resp = request_with_headers(
-        &format!("{}/api/conversations", r.base),
-        Method::POST,
-        Some(bytes),
-        &[("authorization", &format!("Bearer {token}"))],
-    )
-    .await;
+    let resp = r
+        .request_with_headers(
+            "/api/conversations",
+            Method::POST,
+            Some(bytes),
+            &[("authorization", &format!("Bearer {token}"))],
+        )
+        .await;
     assert_eq!(
         resp.status(),
         StatusCode::OK,
@@ -5020,13 +4862,14 @@ async fn sse_ticket_round_trips_and_is_single_use() {
     )
     .await;
     let chat_id = create_chat_with_token(&r, "ticketed", "real-token").await;
-    let mint = request_with_headers(
-        &format!("{}/api/auth/sse-ticket", r.base),
-        Method::POST,
-        None,
-        &[("authorization", "Bearer real-token")],
-    )
-    .await;
+    let mint = r
+        .request_with_headers(
+            "/api/auth/sse-ticket",
+            Method::POST,
+            None,
+            &[("authorization", "Bearer real-token")],
+        )
+        .await;
     assert_eq!(mint.status(), StatusCode::OK, "ticket mint must succeed");
     // Cookie comes back via Set-Cookie (HttpOnly), not the JSON body —
     // the body just carries `expires_in` for client observability.
@@ -5080,11 +4923,9 @@ async fn sse_ticket_endpoint_requires_auth() {
         test_helpers::AuthMode::Bearer,
     )
     .await;
-    let resp = post_json(
-        &format!("{}/api/auth/sse-ticket", r.base),
-        &serde_json::json!({}),
-    )
-    .await;
+    let resp = r
+        .post_json("/api/auth/sse-ticket", &serde_json::json!({}))
+        .await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -5121,14 +4962,9 @@ async fn sse_authorization_header_still_authorises_without_a_ticket() {
 async fn dispatch_returns_405_for_known_route_with_wrong_method() {
     let r = rig().await;
     // /api/conversations only takes GET / POST.
-    let resp = request(&format!("{}/api/conversations", r.base), Method::PUT, None).await;
+    let resp = r.request("/api/conversations", Method::PUT, None).await;
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
-    let resp = request(
-        &format!("{}/api/conversations", r.base),
-        Method::PATCH,
-        None,
-    )
-    .await;
+    let resp = r.request("/api/conversations", Method::PATCH, None).await;
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
@@ -5139,19 +4975,16 @@ async fn dispatch_returns_405_for_unknown_api_path() {
     // means non-GET catches it; GET would land in serve_static, which
     // 404s for unknown asset paths but does NOT 405.
     let r = rig().await;
-    let resp = request(
-        &format!("{}/api/no-such-thing", r.base),
-        Method::POST,
-        Some(b"{}".to_vec()),
-    )
-    .await;
+    let resp = r
+        .request("/api/no-such-thing", Method::POST, Some(b"{}".to_vec()))
+        .await;
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[tokio::test]
 async fn dispatch_returns_404_for_unknown_get_path_via_static_fallback() {
     let r = rig().await;
-    let resp = get(&format!("{}/api/no-such-thing", r.base)).await;
+    let resp = r.get("/api/no-such-thing").await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -5210,11 +5043,9 @@ async fn csrf_gate_allows_post_with_x_dyson_csrf() {
     // negative case above.  If this regresses, the auto-stamp logic
     // in the helper has been broken.
     let r = rig().await;
-    let resp = post_json(
-        &format!("{}/api/conversations", r.base),
-        &serde_json::json!({"title": "hi"}),
-    )
-    .await;
+    let resp = r
+        .post_json("/api/conversations", &serde_json::json!({"title": "hi"}))
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
@@ -5246,13 +5077,13 @@ async fn store_endpoints_reject_url_decoded_path_traversal() {
         "%C3%A9",
     ];
     for raw in cases {
-        let resp = get(&format!("{}/api/files/{}", r.base, raw)).await;
+        let resp = r.get(&format!("/api/files/{}", raw)).await;
         assert_eq!(
             resp.status(),
             StatusCode::NOT_FOUND,
             "/api/files/{raw} must 404, not traverse",
         );
-        let resp = get(&format!("{}/api/artefacts/{}", r.base, raw)).await;
+        let resp = r.get(&format!("/api/artefacts/{}", raw)).await;
         assert_eq!(
             resp.status(),
             StatusCode::NOT_FOUND,
@@ -5268,7 +5099,7 @@ async fn shareable_artefact_redirect_rejects_traversal_ids() {
     // — that would let an attacker craft a phishing URL on this
     // host that forwards to an arbitrary fragment.
     let r = rig().await;
-    let resp = get(&format!("{}/artefacts/%2Fevil", r.base)).await;
+    let resp = r.get("/artefacts/%2Fevil").await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -5285,7 +5116,7 @@ async fn hot_reload_propagates_through_post_model_runtime_override() {
     // change racing /api/model would silently discard the override.
     use dyson::config::{LlmProvider, ProviderConfig};
     let r = rig().await;
-    let _id = create_chat(&r, "hot reload model").await;
+    let _id = r.create_chat_id("hot reload model").await;
 
     // Add a second provider via hot-reload.
     let mut next = r.state.settings_snapshot();
@@ -5301,7 +5132,7 @@ async fn hot_reload_propagates_through_post_model_runtime_override() {
     r.state.replace_settings_for_test(next);
 
     // /api/providers must surface the new entry immediately.
-    let resp = get(&format!("{}/api/providers", r.base)).await;
+    let resp = r.get("/api/providers").await;
     let providers = body_json(resp).await;
     let names: Vec<&str> = providers
         .as_array()
@@ -5317,14 +5148,15 @@ async fn hot_reload_propagates_through_post_model_runtime_override() {
     // /api/model on the new provider must succeed.  No persistence
     // (config_path is None in the test rig) but the runtime override
     // is set in-process.
-    let resp = post_json(
-        &format!("{}/api/model", r.base),
-        &serde_json::json!({
-            "provider": "anthropic",
-            "model": "claude-haiku-4-5",
-        }),
-    )
-    .await;
+    let resp = r
+        .post_json(
+            "/api/model",
+            &serde_json::json!({
+                "provider": "anthropic",
+                "model": "claude-haiku-4-5",
+            }),
+        )
+        .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(body["provider"], "anthropic");
@@ -5332,7 +5164,7 @@ async fn hot_reload_propagates_through_post_model_runtime_override() {
 
     // Re-list providers — the active one must now be anthropic
     // (the runtime override wins over settings.agent.provider).
-    let resp = get(&format!("{}/api/providers", r.base)).await;
+    let resp = r.get("/api/providers").await;
     let after = body_json(resp).await;
     let active: Option<&str> = after
         .as_array()
@@ -5361,7 +5193,7 @@ async fn list_artefacts_returns_evicted_entries_via_disk_fallback() {
     // list_artefacts walks the chat's `artefacts/` subdir on disk and
     // merges with whatever's still cached.
     let r = rig().await;
-    let id = create_chat(&r, "many artefacts").await;
+    let id = r.create_chat_id("many artefacts").await;
 
     const MAX_ARTEFACTS: usize = 32;
     const TOTAL: usize = MAX_ARTEFACTS + 4; // 36 — four past the cap
@@ -5377,8 +5209,9 @@ async fn list_artefacts_returns_evicted_entries_via_disk_fallback() {
             .expect("emit");
     }
 
-    let list =
-        body_json(get(&format!("{}/api/conversations/{}/artefacts", r.base, id)).await).await;
+    let list = r
+        .get_json(&format!("/api/conversations/{}/artefacts", id))
+        .await;
     let arr = list.as_array().expect("array");
     assert_eq!(
         arr.len(),
@@ -5419,7 +5252,7 @@ async fn unauthorized_strips_crlf_from_oidc_issuer_in_www_authenticate() {
     )
     .await;
 
-    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    let resp = r.get("/api/conversations").await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     // No injected sibling — only the canonical WWW-Authenticate.
     assert!(
@@ -5450,7 +5283,7 @@ async fn baseline_security_headers_present_on_every_response() {
     let r = rig().await;
 
     // Static shell — index.html.
-    let resp = get(&format!("{}/", r.base)).await;
+    let resp = r.get("/").await;
     let h = resp.headers().clone();
     assert_eq!(
         h.get("X-Content-Type-Options").map(|v| v.to_str().unwrap()),
@@ -5479,7 +5312,7 @@ async fn baseline_security_headers_present_on_every_response() {
     );
 
     // JSON API — /api/conversations.
-    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    let resp = r.get("/api/conversations").await;
     let h = resp.headers().clone();
     assert_eq!(
         h.get("X-Content-Type-Options").map(|v| v.to_str().unwrap()),
@@ -5493,7 +5326,7 @@ async fn baseline_security_headers_present_on_every_response() {
     assert!(h.get("Referrer-Policy").is_some());
 
     // SSE endpoint — must keep text/event-stream and still carry CSP.
-    let id = create_chat(&r, "sse-headers").await;
+    let id = r.create_chat_id("sse-headers").await;
     let url = format!("{}/api/conversations/{}/events", r.base, id);
     // Issue request but only inspect headers; close the body promptly.
     let resp = request(&url, Method::GET, None).await;
@@ -5524,7 +5357,7 @@ async fn write_endpoints_reject_oversized_bodies_with_400() {
     //   /api/model                         16 KiB
     //   /api/mind/file                      4 MiB
     let r = rig().await;
-    let id = create_chat(&r, "size").await;
+    let id = r.create_chat_id("size").await;
 
     // 1) POST /api/conversations — 16 KiB cap.  Build a body whose
     // pad alone is larger than the cap so the encoded JSON is
@@ -5534,12 +5367,9 @@ async fn write_endpoints_reject_oversized_bodies_with_400() {
         "pad": "x".repeat(16 * 1024 + 256),
     }))
     .unwrap();
-    let resp = request(
-        &format!("{}/api/conversations", r.base),
-        Method::POST,
-        Some(just_over),
-    )
-    .await;
+    let resp = r
+        .request("/api/conversations", Method::POST, Some(just_over))
+        .await;
     assert_eq!(
         resp.status(),
         StatusCode::BAD_REQUEST,
@@ -5553,12 +5383,13 @@ async fn write_endpoints_reject_oversized_bodies_with_400() {
         "pad": "y".repeat(16 * 1024),
     }))
     .unwrap();
-    let resp = request(
-        &format!("{}/api/conversations/{id}/feedback", r.base),
-        Method::POST,
-        Some(just_over_fb),
-    )
-    .await;
+    let resp = r
+        .request(
+            &format!("/api/conversations/{id}/feedback"),
+            Method::POST,
+            Some(just_over_fb),
+        )
+        .await;
     assert_eq!(
         resp.status(),
         StatusCode::BAD_REQUEST,
@@ -5572,12 +5403,9 @@ async fn write_endpoints_reject_oversized_bodies_with_400() {
         "pad": "z".repeat(16 * 1024),
     }))
     .unwrap();
-    let resp = request(
-        &format!("{}/api/model", r.base),
-        Method::POST,
-        Some(just_over_model),
-    )
-    .await;
+    let resp = r
+        .request("/api/model", Method::POST, Some(just_over_model))
+        .await;
     assert_eq!(
         resp.status(),
         StatusCode::BAD_REQUEST,
@@ -5592,12 +5420,9 @@ async fn write_endpoints_reject_oversized_bodies_with_400() {
         "content": big_content,
     }))
     .unwrap();
-    let resp = request(
-        &format!("{}/api/mind/file", r.base),
-        Method::POST,
-        Some(just_over_mind),
-    )
-    .await;
+    let resp = r
+        .request("/api/mind/file", Method::POST, Some(just_over_mind))
+        .await;
     assert_eq!(
         resp.status(),
         StatusCode::BAD_REQUEST,
@@ -5610,12 +5435,9 @@ async fn write_endpoints_reject_oversized_bodies_with_400() {
         "pad": "p".repeat(8 * 1024),
     }))
     .unwrap();
-    let resp = request(
-        &format!("{}/api/conversations", r.base),
-        Method::POST,
-        Some(under_create),
-    )
-    .await;
+    let resp = r
+        .request("/api/conversations", Method::POST, Some(under_create))
+        .await;
     assert_eq!(resp.status(), StatusCode::OK, "under-cap create succeeds");
 }
 
@@ -5628,13 +5450,14 @@ async fn loopback_dangerous_no_auth_rejects_foreign_host_header() {
     // the loopback API with `Host: attacker.example.com` and have
     // them accepted.  The controller refuses with 421.
     let r = rig().await;
-    let resp = request_with_headers(
-        &format!("{}/api/conversations", r.base),
-        Method::GET,
-        None,
-        &[("host", "attacker.example.com")],
-    )
-    .await;
+    let resp = r
+        .request_with_headers(
+            "/api/conversations",
+            Method::GET,
+            None,
+            &[("host", "attacker.example.com")],
+        )
+        .await;
     assert_eq!(
         resp.status(),
         StatusCode::MISDIRECTED_REQUEST,
@@ -5645,13 +5468,14 @@ async fn loopback_dangerous_no_auth_rejects_foreign_host_header() {
 #[tokio::test]
 async fn loopback_dangerous_no_auth_rejects_double_slash_api_foreign_host_header() {
     let r = rig().await;
-    let resp = request_with_headers(
-        &format!("{}//api/conversations", r.base),
-        Method::GET,
-        None,
-        &[("host", "attacker.example.com")],
-    )
-    .await;
+    let resp = r
+        .request_with_headers(
+            "//api/conversations",
+            Method::GET,
+            None,
+            &[("host", "attacker.example.com")],
+        )
+        .await;
     assert_eq!(
         resp.status(),
         StatusCode::MISDIRECTED_REQUEST,
@@ -5667,13 +5491,14 @@ async fn loopback_dangerous_no_auth_accepts_loopback_host_header() {
     // address bar.  Must succeed.
     let r = rig().await;
     let port = r.base.rsplit(':').next().unwrap();
-    let resp = request_with_headers(
-        &format!("{}/api/conversations", r.base),
-        Method::GET,
-        None,
-        &[("host", &format!("127.0.0.1:{port}"))],
-    )
-    .await;
+    let resp = r
+        .request_with_headers(
+            "/api/conversations",
+            Method::GET,
+            None,
+            &[("host", &format!("127.0.0.1:{port}"))],
+        )
+        .await;
     assert_eq!(
         resp.status(),
         StatusCode::OK,
@@ -5691,16 +5516,17 @@ async fn bearer_mode_accepts_foreign_host_header() {
     let r = rig_with_auth_and_mode(auth, test_helpers::AuthMode::Bearer).await;
     // Authenticate with the matching bearer token, but send a
     // mismatched Host to verify the host gate doesn't fire here.
-    let resp = request_with_headers(
-        &format!("{}/api/conversations", r.base),
-        Method::GET,
-        None,
-        &[
-            ("host", "dyson.example.com"),
-            ("authorization", "Bearer sekrit"),
-        ],
-    )
-    .await;
+    let resp = r
+        .request_with_headers(
+            "/api/conversations",
+            Method::GET,
+            None,
+            &[
+                ("host", "dyson.example.com"),
+                ("authorization", "Bearer sekrit"),
+            ],
+        )
+        .await;
     // Either 200 (auth ok) or 401 (auth wrong); the *important* thing
     // is that it isn't 421 — the host gate must stay off in this mode.
     assert_ne!(
@@ -5727,11 +5553,12 @@ async fn post_mind_file_rejects_traversal_paths() {
         "a\\b",
     ];
     for p in attack_paths {
-        let resp = post_json(
-            &format!("{}/api/mind/file", r.base),
-            &serde_json::json!({ "path": p, "content": "x" }),
-        )
-        .await;
+        let resp = r
+            .post_json(
+                "/api/mind/file",
+                &serde_json::json!({ "path": p, "content": "x" }),
+            )
+            .await;
         assert_eq!(
             resp.status(),
             StatusCode::BAD_REQUEST,
@@ -5787,7 +5614,7 @@ async fn sse_replay_with_last_event_id_resumes_from_checkpoint() {
     // it was reconnecting — a 30-second-old `tool_result` would never
     // re-arrive on the wire.
     let r = rig().await;
-    let id = create_chat(&r, "replay").await;
+    let id = r.create_chat_id("replay").await;
 
     // Drive a few events into the chat handle directly via the
     // test_helpers artefact emit — same shape the agent uses for
@@ -5862,7 +5689,7 @@ async fn sse_fresh_connect_after_turn_end_does_not_replay_stale_events() {
     use dyson::controller::http::SseEvent;
 
     let r = rig().await;
-    let id = create_chat(&r, "ring-reset").await;
+    let id = r.create_chat_id("ring-reset").await;
 
     // Simulate a turn ending: emit some text + Done, then run the
     // end-of-turn cleanup (the production code path inside turns.rs
@@ -5938,7 +5765,7 @@ async fn unauthorized_drops_www_authenticate_when_value_is_invalid_for_header() 
         },
     )
     .await;
-    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    let resp = r.get("/api/conversations").await;
     assert_eq!(
         resp.status(),
         StatusCode::UNAUTHORIZED,
@@ -5966,7 +5793,7 @@ async fn unauthorized_strips_quote_from_oidc_authorization_endpoint() {
     )
     .await;
 
-    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    let resp = r.get("/api/conversations").await;
     let www = resp
         .headers()
         .get("WWW-Authenticate")
@@ -5993,10 +5820,10 @@ async fn unauthorized_strips_quote_from_oidc_authorization_endpoint() {
 async fn http_turn_journals_and_exposes_operator_recovery() {
     use dyson::agent::protocol::{RunEvent, RunEventKind, RunId, evaluate_run};
     let r = rig().await;
-    let id = create_chat(&r, "harness recovery").await;
+    let id = r.create_chat_id("harness recovery").await;
     assert_eq!(
-        post_json(
-            &format!("{}/api/conversations/{id}/turn", r.base),
+        r.post_json(
+            &format!("/api/conversations/{id}/turn"),
             &serde_json::json!({"prompt":"hello"})
         )
         .await

@@ -128,7 +128,6 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
 
@@ -736,20 +735,8 @@ impl McpHttpServer {
         // the shared state.  The working_dir and env are defaults since
         // workspace tools don't use them (they're for BashTool).
         let ctx = ToolContext {
-            working_dir: std::env::current_dir().unwrap_or_default(),
-            env: HashMap::new(),
-            cancellation: CancellationToken::new(),
             workspace: Some(Arc::clone(&self.workspace)),
-            depth: 0,
-            sandbox_bypass: None,
-            taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            activity: None,
-            tool_use_id: None,
-            subagent_events: None,
-            artefacts: None,
-            current_chat_id: None,
-            harness: crate::agent::task::TaskRuntime::default(),
-            idempotency_key: None,
+            ..ToolContext::new(std::env::current_dir().unwrap_or_default())
         };
 
         // -- Execute the tool and format the response --

@@ -9,6 +9,33 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+fn text_response(text: impl Into<String>) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::TextDelta(text.into()),
+        StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        },
+    ]
+}
+
+/// Standard builtin-agent harness; scenarios provide their LLM stream and settings.
+fn test_agent(llm: impl LlmClient + 'static, settings: &AgentSettings) -> Agent {
+    Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        )),
+        vec![Box::new(BuiltinSkill::new(None, None, None))],
+        settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap()
+}
+
 // -----------------------------------------------------------------------
 // Mock LLM client that returns a fixed response.
 // -----------------------------------------------------------------------
@@ -253,34 +280,14 @@ impl Output for PendingAdmissionOutput {
 
 #[tokio::test]
 async fn simple_text_response() {
-    let llm = MockLlm::new(vec![vec![
-        StreamEvent::TextDelta("Hello!".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ]]);
+    let llm = MockLlm::new(vec![text_response("Hello!")]);
 
     let settings = AgentSettings {
         api_key: "test".into(),
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
-    let mut agent = Agent::new(
-        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        skills,
-        &settings,
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm, &settings);
     let mut output = RecordingOutput::new();
 
     let result = agent.run("hi", &mut output).await.unwrap();
@@ -436,21 +443,7 @@ async fn retries_retryable_error_while_consuming_stream() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
-    let mut agent = Agent::new(
-        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        skills,
-        &settings,
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm, &settings);
     let mut output = RecordingOutput::new();
 
     let result = agent.run("hi", &mut output).await.unwrap();
@@ -515,21 +508,7 @@ async fn retries_stream_error_after_tool_start_before_tool_complete() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
-    let mut agent = Agent::new(
-        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        skills,
-        &settings,
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm, &settings);
     let mut output = RecordingOutput::new();
 
     let result = agent.run("write the report", &mut output).await.unwrap();
@@ -579,21 +558,7 @@ async fn retries_transport_error_after_partial_text_stream() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
-    let mut agent = Agent::new(
-        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        skills,
-        &settings,
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm, &settings);
     let mut output = RecordingOutput::new();
 
     let result = agent.run("hi", &mut output).await.unwrap();
@@ -632,13 +597,7 @@ async fn tool_call_loop() {
             },
         ],
         // Turn 2: LLM responds with text.
-        vec![
-            StreamEvent::TextDelta("Done.".into()),
-            StreamEvent::MessageComplete {
-                stop_reason: StopReason::EndTurn,
-                output_tokens: None,
-            },
-        ],
+        text_response("Done."),
     ]);
 
     let settings = AgentSettings {
@@ -646,21 +605,7 @@ async fn tool_call_loop() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
-    let mut agent = Agent::new(
-        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        skills,
-        &settings,
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm, &settings);
     let mut output = RecordingOutput::new();
 
     let result = agent
@@ -701,21 +646,7 @@ async fn internal_tools_provider_skips_tool_execution() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
-    let mut agent = Agent::new(
-        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        skills,
-        &settings,
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm, &settings);
     let mut output = RecordingOutput::new();
 
     let result = agent.run("list files", &mut output).await.unwrap();
@@ -737,20 +668,8 @@ async fn memory_system_prompt_contains_usage_stats_and_curation_rules() {
 
     let workspace: Box<dyn crate::workspace::Workspace> = Box::new(ws);
     let ctx = crate::tool::ToolContext {
-        working_dir: std::env::temp_dir(),
-        env: HashMap::new(),
-        cancellation: CancellationToken::new(),
         workspace: Some(std::sync::Arc::new(tokio::sync::RwLock::new(workspace))),
-        depth: 0,
-        sandbox_bypass: None,
-        taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: crate::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
+        ..crate::tool::ToolContext::new(std::env::temp_dir())
     };
 
     let prompt = reflection::build_memory_system_prompt(&ctx).await;
@@ -774,22 +693,7 @@ async fn memory_system_prompt_contains_usage_stats_and_curation_rules() {
 
 #[tokio::test]
 async fn reflection_system_prompt_lists_tools() {
-    let ctx = crate::tool::ToolContext {
-        working_dir: std::env::temp_dir(),
-        env: HashMap::new(),
-        cancellation: CancellationToken::new(),
-        workspace: None,
-        depth: 0,
-        sandbox_bypass: None,
-        taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: crate::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
-    };
+    let ctx = crate::tool::ToolContext::new(std::env::temp_dir());
     let prompt = reflection::build_reflection_system_prompt(&ctx).await;
     assert!(prompt.contains("skill_create"));
     assert!(!prompt.contains("export_conversation"));
@@ -926,13 +830,7 @@ async fn synthesize_to_workspace_updates_memory() {
     let workspace: crate::workspace::WorkspaceHandle =
         Arc::new(tokio::sync::RwLock::new(Box::new(ws)));
 
-    let llm = MockLlm::new(vec![vec![
-        StreamEvent::TextDelta("Updated memory with new learnings.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ]]);
+    let llm = MockLlm::new(vec![text_response("Updated memory with new learnings.")]);
 
     let config = CompletionConfig {
         model: "test".to_string(),
@@ -1084,21 +982,7 @@ async fn token_budget_stops_agent_loop() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
-    let mut agent = Agent::new(
-        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        skills,
-        &settings,
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm, &settings);
     agent.conversation.token_budget.max_output_tokens = Some(150);
     let mut output = RecordingOutput::new();
 
@@ -1213,13 +1097,7 @@ async fn tool_output_files_dispatched_via_send_file() {
                 output_tokens: None,
             },
         ],
-        vec![
-            StreamEvent::TextDelta("Files sent.".into()),
-            StreamEvent::MessageComplete {
-                stop_reason: StopReason::EndTurn,
-                output_tokens: None,
-            },
-        ],
+        text_response("Files sent."),
     ]);
 
     let settings = AgentSettings {
@@ -1274,13 +1152,7 @@ async fn admits_pending_user_message_after_tool_results_before_next_llm_call() {
                     output_tokens: None,
                 },
             ],
-            vec![
-                StreamEvent::TextDelta("I saw the follow-up.".into()),
-                StreamEvent::MessageComplete {
-                    stop_reason: StopReason::EndTurn,
-                    output_tokens: None,
-                },
-            ],
+            text_response("I saw the follow-up."),
         ],
         Arc::clone(&seen),
     );
@@ -1371,13 +1243,7 @@ async fn tool_output_no_files_means_no_send_file() {
                 output_tokens: None,
             },
         ],
-        vec![
-            StreamEvent::TextDelta("Done.".into()),
-            StreamEvent::MessageComplete {
-                stop_reason: StopReason::EndTurn,
-                output_tokens: None,
-            },
-        ],
+        text_response("Done."),
     ]);
 
     let settings = AgentSettings {
@@ -1385,21 +1251,7 @@ async fn tool_output_no_files_means_no_send_file() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
-    let mut agent = Agent::new(
-        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        skills,
-        &settings,
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm, &settings);
     let mut output = RecordingOutput::new();
 
     agent.run("echo hello", &mut output).await.unwrap();
@@ -1469,21 +1321,7 @@ fn make_agent_with_history(
         compaction,
         ..Default::default()
     };
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
-    let mut agent = Agent::new(
-        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        skills,
-        &settings,
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm, &settings);
     agent.conversation.messages = messages;
     (agent, RecordingOutput::new())
 }
@@ -1543,15 +1381,8 @@ async fn compact_preserves_head_and_tail() {
         ..CompactionConfig::default()
     };
 
-    let summary_response = vec![
-        StreamEvent::TextDelta(
-            "## Goal\nTest conversation\n## Progress\nMessages exchanged.".into(),
-        ),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ];
+    let summary_response =
+        text_response("## Goal\nTest conversation\n## Progress\nMessages exchanged.");
 
     let (mut agent, mut output) =
         make_agent_with_history(messages.clone(), vec![summary_response], config);
@@ -1634,13 +1465,7 @@ async fn compact_prunes_tool_outputs_in_middle() {
         ..CompactionConfig::default()
     };
 
-    let summary_response = vec![
-        StreamEvent::TextDelta("## Goal\nFile listing\n## Progress\nListed directories.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ];
+    let summary_response = text_response("## Goal\nFile listing\n## Progress\nListed directories.");
 
     let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
@@ -1702,13 +1527,7 @@ async fn compact_fixes_orphaned_tool_pairs() {
         ..CompactionConfig::default()
     };
 
-    let summary_response = vec![
-        StreamEvent::TextDelta("## Goal\nTesting\n## Progress\nRan commands.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ];
+    let summary_response = text_response("## Goal\nTesting\n## Progress\nRan commands.");
 
     let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
@@ -1765,13 +1584,9 @@ async fn compact_structured_summary_prompt() {
         ..CompactionConfig::default()
     };
 
-    let summary_response = vec![
-        StreamEvent::TextDelta("## Goal\nUser was testing.\n## Progress\nMultiple exchanges.\n## Key Decisions\nNone.\n## Files Modified\nNone.\n## Next Steps\nContinue.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ];
+    let summary_response = text_response(
+        "## Goal\nUser was testing.\n## Progress\nMultiple exchanges.\n## Key Decisions\nNone.\n## Files Modified\nNone.\n## Next Steps\nContinue.",
+    );
 
     let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
@@ -1868,15 +1683,9 @@ async fn compact_iterative_merges_with_previous_summary() {
         ..CompactionConfig::default()
     };
 
-    let summary_response = vec![
-        StreamEvent::TextDelta(
-            "## Goal\nOriginal goal.\n## Progress\nSteps 1-3 done.\n## Next Steps\nStep 4.".into(),
-        ),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ];
+    let summary_response = text_response(
+        "## Goal\nOriginal goal.\n## Progress\nSteps 1-3 done.\n## Next Steps\nStep 4.",
+    );
 
     let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
@@ -1968,13 +1777,7 @@ async fn compact_tail_protection_by_token_budget() {
         ..CompactionConfig::default()
     };
 
-    let summary_response = vec![
-        StreamEvent::TextDelta("Middle section summary.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ];
+    let summary_response = text_response("Middle section summary.");
 
     let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
@@ -2037,21 +1840,7 @@ async fn auto_compaction_triggers_on_threshold() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
-    let mut agent = Agent::new(
-        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        skills,
-        &settings,
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm, &settings);
     let mut output = RecordingOutput::new();
 
     // First turn.
@@ -2084,13 +1873,7 @@ async fn compact_rotates_pre_compaction_history() {
         }]),
     ];
 
-    let summary_response = vec![
-        StreamEvent::TextDelta("Summary of conversation.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ];
+    let summary_response = text_response("Summary of conversation.");
 
     let config = CompactionConfig {
         protect_head: 2,
@@ -2154,13 +1937,7 @@ async fn compact_without_chat_history_does_not_rotate() {
         }]),
     ];
 
-    let summary_response = vec![
-        StreamEvent::TextDelta("Summary.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ];
+    let summary_response = text_response("Summary.");
 
     let config = CompactionConfig {
         protect_head: 1,
@@ -2183,13 +1960,7 @@ async fn compact_without_chat_history_does_not_rotate() {
 
 #[tokio::test]
 async fn quick_response_returns_text_without_tools() {
-    let llm = MockLlm::new(vec![vec![
-        StreamEvent::TextDelta("Quick answer.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ]]);
+    let llm = MockLlm::new(vec![text_response("Quick answer.")]);
 
     let history = vec![
         Message::user("What is 2+2?"),
@@ -2240,13 +2011,7 @@ async fn quick_response_caps_max_tokens() {
             config: &CompletionConfig,
         ) -> Result<crate::llm::StreamResponse> {
             *self.captured_max_tokens.lock().unwrap() = Some(config.max_tokens);
-            let events = vec![
-                StreamEvent::TextDelta("ok".into()),
-                StreamEvent::MessageComplete {
-                    stop_reason: StopReason::EndTurn,
-                    output_tokens: None,
-                },
-            ];
+            let events = text_response("ok");
             Ok(crate::llm::StreamResponse {
                 stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
                 tool_mode: crate::llm::ToolMode::Execute,
@@ -2296,13 +2061,7 @@ async fn quick_response_sends_no_tools() {
             _config: &CompletionConfig,
         ) -> Result<crate::llm::StreamResponse> {
             *self.captured_tools.lock().unwrap() = Some(tools.len());
-            let events = vec![
-                StreamEvent::TextDelta("ok".into()),
-                StreamEvent::MessageComplete {
-                    stop_reason: StopReason::EndTurn,
-                    output_tokens: None,
-                },
-            ];
+            let events = text_response("ok");
             Ok(crate::llm::StreamResponse {
                 stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
                 tool_mode: crate::llm::ToolMode::Execute,
@@ -3107,13 +2866,7 @@ async fn spoofed_context_summary_from_user_is_not_treated_as_prior_summary() {
         protect_tail_tokens: 10,
         ..CompactionConfig::default()
     };
-    let summary_response = vec![
-        StreamEvent::TextDelta("## Goal\nSummarised middle.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ];
+    let summary_response = text_response("## Goal\nSummarised middle.");
     let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
     // Not recognised as a prior summary…
@@ -3141,13 +2894,7 @@ async fn spoofed_context_summary_from_user_is_not_treated_as_prior_summary() {
 
 #[tokio::test]
 async fn self_imposed_rate_limit_waits_for_window_instead_of_failing_turn() {
-    let llm = MockLlm::new(vec![vec![
-        StreamEvent::TextDelta("after the wait".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ]]);
+    let llm = MockLlm::new(vec![text_response("after the wait")]);
     let limited = rate_limiter::RateLimited::new(
         Box::new(llm) as Box<dyn LlmClient>,
         1,
@@ -3282,13 +3029,7 @@ async fn token_estimate_stays_correct_through_compaction() {
         protect_tail_tokens: 15,
         ..CompactionConfig::default()
     };
-    let summary_response = vec![
-        StreamEvent::TextDelta("## Goal\nCompacted.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ];
+    let summary_response = text_response("## Goal\nCompacted.");
     let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
     let sys = "sys";

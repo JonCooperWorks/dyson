@@ -788,24 +788,7 @@ async fn list_files_rejects_path_traversal() {
     use dyson::tool::{Tool, ToolContext};
 
     let tmp = tempfile::tempdir().unwrap();
-    let ctx = ToolContext {
-        working_dir: tmp.path().to_path_buf(),
-        env: std::collections::HashMap::new(),
-        cancellation: tokio_util::sync::CancellationToken::new(),
-        workspace: None,
-        depth: 0,
-        sandbox_bypass: None,
-        taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashMap::new(),
-        )),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: dyson::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
-    };
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
 
     let tool = dyson::tool::list_files::ListFilesTool;
     let input = serde_json::json!({"pattern": "*", "path": "../../../etc"});
@@ -821,24 +804,7 @@ async fn search_files_rejects_path_traversal() {
     use dyson::tool::{Tool, ToolContext};
 
     let tmp = tempfile::tempdir().unwrap();
-    let ctx = ToolContext {
-        working_dir: tmp.path().to_path_buf(),
-        env: std::collections::HashMap::new(),
-        cancellation: tokio_util::sync::CancellationToken::new(),
-        workspace: None,
-        depth: 0,
-        sandbox_bypass: None,
-        taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashMap::new(),
-        )),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: dyson::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
-    };
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
 
     let tool = dyson::tool::search_files::SearchFilesTool;
     let input = serde_json::json!({"pattern": ".*", "path": "../../../etc"});

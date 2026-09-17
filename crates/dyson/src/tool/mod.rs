@@ -345,6 +345,7 @@ pub const MAX_SUBAGENT_DEPTH: u8 = 3;
 /// Tools should use this instead of querying the environment directly.
 /// This makes tools testable (inject a fake working dir, mock env) and
 /// ensures consistent behavior across the agent session.
+#[derive(Clone)]
 pub struct ToolContext {
     /// The working directory for this agent session.
     ///
@@ -455,35 +456,11 @@ pub struct ToolContext {
     pub idempotency_key: Option<String>,
 }
 
-impl Clone for ToolContext {
-    fn clone(&self) -> Self {
-        Self {
-            working_dir: self.working_dir.clone(),
-            env: self.env.clone(),
-            cancellation: self.cancellation.clone(),
-            workspace: self.workspace.as_ref().map(Arc::clone),
-            depth: self.depth,
-            sandbox_bypass: self.sandbox_bypass.clone(),
-            taint_indexes: Arc::clone(&self.taint_indexes),
-            activity: self.activity.clone(),
-            tool_use_id: self.tool_use_id.clone(),
-            subagent_events: self.subagent_events.clone(),
-            artefacts: self.artefacts.as_ref().map(Arc::clone),
-            current_chat_id: self.current_chat_id.clone(),
-            harness: self.harness.clone(),
-            idempotency_key: self.idempotency_key.clone(),
-        }
-    }
-}
-
 impl ToolContext {
-    /// Create a context with the current working directory and no extra env.
-    ///
-    /// Useful for testing and simple setups where you don't need custom
-    /// environment variables.
-    pub fn from_cwd() -> Result<Self> {
-        Ok(Self {
-            working_dir: std::env::current_dir()?,
+    /// Create a context rooted at the given directory with fresh session state.
+    pub fn new(working_dir: PathBuf) -> Self {
+        Self {
+            working_dir,
             env: HashMap::new(),
             cancellation: CancellationToken::new(),
             workspace: None,
@@ -497,7 +474,12 @@ impl ToolContext {
             current_chat_id: None,
             harness: crate::agent::task::TaskRuntime::default(),
             idempotency_key: None,
-        })
+        }
+    }
+
+    /// Create a context with the current working directory and no extra env.
+    pub fn from_cwd() -> Result<Self> {
+        Ok(Self::new(std::env::current_dir()?))
     }
 
     /// Create a context rooted at the given directory with no env or workspace.
@@ -506,22 +488,7 @@ impl ToolContext {
     /// in every tool's test module.
     #[cfg(test)]
     pub fn for_test(dir: &std::path::Path) -> Self {
-        Self {
-            working_dir: dir.to_path_buf(),
-            env: HashMap::new(),
-            cancellation: CancellationToken::new(),
-            workspace: None,
-            depth: 0,
-            sandbox_bypass: None,
-            taint_indexes: Arc::new(RwLock::new(HashMap::new())),
-            activity: None,
-            tool_use_id: None,
-            subagent_events: None,
-            artefacts: None,
-            current_chat_id: None,
-            harness: crate::agent::task::TaskRuntime::default(),
-            idempotency_key: None,
-        }
+        Self::new(dir.to_path_buf())
     }
 
     /// Create a test context with a workspace attached.
@@ -532,20 +499,8 @@ impl ToolContext {
     pub fn for_test_with_workspace(ws: impl crate::workspace::Workspace + 'static) -> Self {
         let workspace: Box<dyn crate::workspace::Workspace> = Box::new(ws);
         Self {
-            working_dir: std::env::temp_dir(),
-            env: HashMap::new(),
-            cancellation: CancellationToken::new(),
             workspace: Some(Arc::new(RwLock::new(workspace))),
-            depth: 0,
-            sandbox_bypass: None,
-            taint_indexes: Arc::new(RwLock::new(HashMap::new())),
-            activity: None,
-            tool_use_id: None,
-            subagent_events: None,
-            artefacts: None,
-            current_chat_id: None,
-            harness: crate::agent::task::TaskRuntime::default(),
-            idempotency_key: None,
+            ..Self::new(std::env::temp_dir())
         }
     }
 
@@ -847,13 +802,8 @@ impl ToolOutput {
     /// Create an error output.
     pub fn error(content: impl Into<String>) -> Self {
         Self {
-            content: content.into(),
             is_error: true,
-            view: None,
-            metadata: None,
-            files: Vec::new(),
-            checkpoints: Vec::new(),
-            artefacts: Vec::new(),
+            ..Self::success(content)
         }
     }
 

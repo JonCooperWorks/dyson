@@ -1,6 +1,26 @@
 use super::*;
 use crate::llm::stream::{StopReason, StreamEvent};
 
+fn test_sandbox() -> Arc<crate::sandbox::no_sandbox::DangerousNoSandbox> {
+    Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ))
+}
+
+fn test_orchestrator_config() -> OrchestratorConfig {
+    OrchestratorConfig {
+        name: "test_orchestrator",
+        description: "test",
+        system_prompt: "test",
+        direct_tool_names: &[],
+        max_iterations: 5,
+        max_tokens: 1024,
+        injects_protocol: None,
+        emit_artefact: None,
+        harness: None,
+    }
+}
+
 // -----------------------------------------------------------------------
 // CaptureOutput tests
 // -----------------------------------------------------------------------
@@ -224,9 +244,7 @@ fn subagent_tool_name_and_description() {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         vec![],
     );
@@ -258,9 +276,7 @@ fn subagent_tool_input_schema_has_required_task() {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         vec![],
     );
@@ -368,13 +384,7 @@ impl crate::llm::LlmClient for MockLlm {
 #[tokio::test]
 async fn subagent_runs_child_and_returns_result() {
     // Build a mock child agent that returns "Research complete."
-    let llm = MockLlm::new(vec![vec![
-        StreamEvent::TextDelta("Research complete.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ]]);
+    let llm = MockLlm::new(vec![mock_text_response("Research complete.")]);
 
     let settings = AgentSettings {
         api_key: "test".into(),
@@ -383,9 +393,7 @@ async fn subagent_runs_child_and_returns_result() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(FilteredSkill { tools: vec![] })];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
+    let sandbox: Arc<dyn Sandbox> = test_sandbox();
     let mut agent = crate::agent::Agent::new(
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -426,13 +434,7 @@ async fn subagent_concatenates_text_across_max_tokens_continuation() {
                 output_tokens: None,
             },
         ],
-        vec![
-            StreamEvent::TextDelta("second-chunk".into()),
-            StreamEvent::MessageComplete {
-                stop_reason: StopReason::EndTurn,
-                output_tokens: None,
-            },
-        ],
+        mock_text_response("second-chunk"),
     ]);
 
     let config = SubagentAgentConfig {
@@ -452,9 +454,7 @@ async fn subagent_concatenates_text_across_max_tokens_continuation() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         vec![],
     );
@@ -500,29 +500,15 @@ async fn subagent_depth_limit_prevents_recursion() {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         vec![],
     );
 
     // Create a context at max depth.
     let ctx = ToolContext {
-        working_dir: std::env::current_dir().unwrap(),
-        env: std::collections::HashMap::new(),
-        cancellation: tokio_util::sync::CancellationToken::new(),
-        workspace: None,
         depth: MAX_SUBAGENT_DEPTH,
-        sandbox_bypass: None,
-        taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: crate::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
+        ..ToolContext::new(std::env::current_dir().unwrap())
     };
 
     let input = serde_json::json!({"task": "should fail"});
@@ -555,9 +541,7 @@ async fn subagent_missing_task_returns_error() {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         vec![],
     );
@@ -618,9 +602,7 @@ fn subagent_skill_system_prompt_lists_agents() {
         injects_protocol: None,
     }];
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
+    let sandbox: Arc<dyn Sandbox> = test_sandbox();
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
@@ -657,9 +639,7 @@ fn subagent_skill_skips_unknown_provider() {
         injects_protocol: None,
     }];
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
+    let sandbox: Arc<dyn Sandbox> = test_sandbox();
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
@@ -708,9 +688,7 @@ fn name_allowlist_drops_coder_and_orchestrators_when_excluded() {
         injects_protocol: None,
     }];
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
+    let sandbox: Arc<dyn Sandbox> = test_sandbox();
     let registry = crate::controller::ClientRegistry::new(&settings, None);
 
     // Allowlist contains only the user-defined subagent and a couple
@@ -758,9 +736,7 @@ fn name_allowlist_keeps_only_listed_orchestrators() {
     // Allowlist includes coder but not security_engineer — coder
     // survives, the orchestrator gets dropped.
     let settings = crate::config::Settings::default();
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
+    let sandbox: Arc<dyn Sandbox> = test_sandbox();
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let allow: std::collections::HashSet<String> = ["coder".to_string()].into_iter().collect();
     let skill = SubagentSkill::new(&[], &settings, sandbox, None, &[], &registry, Some(&allow));
@@ -773,9 +749,7 @@ fn name_allowlist_none_preserves_default_registration() {
     // Sanity: passing None (no allowlist) keeps the pre-existing
     // behaviour — coder + every orchestrator register unconditionally.
     let settings = crate::config::Settings::default();
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
+    let sandbox: Arc<dyn Sandbox> = test_sandbox();
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&[], &settings, sandbox, None, &[], &registry, None);
     let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
@@ -915,9 +889,7 @@ fn injects_protocol_fragment_appended_to_system_prompt() {
         injects_protocol: Some("\n\n## Usage Protocol\nAlways invoke me first.".into()),
     }];
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
+    let sandbox: Arc<dyn Sandbox> = test_sandbox();
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
@@ -949,9 +921,7 @@ fn verification_protocol_absent_without_verifier() {
         injects_protocol: None,
     }];
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
+    let sandbox: Arc<dyn Sandbox> = test_sandbox();
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
@@ -984,9 +954,7 @@ fn default_provider_resolves_to_agent_settings() {
         injects_protocol: None,
     }];
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-        crate::sandbox::SandboxBypassGuard::for_test(),
-    ));
+    let sandbox: Arc<dyn Sandbox> = test_sandbox();
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
@@ -1004,13 +972,7 @@ fn default_provider_resolves_to_agent_settings() {
 /// model they never configured.
 #[tokio::test]
 async fn subagent_uses_parent_model_when_config_model_unset() {
-    let llm = MockLlm::new(vec![vec![
-        StreamEvent::TextDelta("done".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ]]);
+    let llm = MockLlm::new(vec![mock_text_response("done")]);
     let seen = llm.models_seen_handle();
 
     let config = SubagentAgentConfig {
@@ -1030,9 +992,7 @@ async fn subagent_uses_parent_model_when_config_model_unset() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(), // parent's model
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         vec![],
     );
@@ -1049,13 +1009,7 @@ async fn subagent_uses_parent_model_when_config_model_unset() {
 /// Regression: `CoderTool` must bill the parent's model, not a registry default.
 #[tokio::test]
 async fn coder_uses_parent_model() {
-    let llm = MockLlm::new(vec![vec![
-        StreamEvent::TextDelta("done".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ]]);
+    let llm = MockLlm::new(vec![mock_text_response("done")]);
     let seen = llm.models_seen_handle();
 
     let tmp = tempfile::tempdir().unwrap();
@@ -1063,9 +1017,7 @@ async fn coder_uses_parent_model() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &[],
     );
@@ -1082,34 +1034,16 @@ async fn coder_uses_parent_model() {
 /// Regression: `OrchestratorTool` must bill the parent's model, not a registry default.
 #[tokio::test]
 async fn orchestrator_uses_parent_model() {
-    let llm = MockLlm::new(vec![vec![
-        StreamEvent::TextDelta("done".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ]]);
+    let llm = MockLlm::new(vec![mock_text_response("done")]);
     let seen = llm.models_seen_handle();
 
-    let config = OrchestratorConfig {
-        name: "test_orchestrator",
-        description: "test",
-        system_prompt: "test",
-        direct_tool_names: &[],
-        max_iterations: 5,
-        max_tokens: 1024,
-        injects_protocol: None,
-        emit_artefact: None,
-        harness: None,
-    };
+    let config = test_orchestrator_config();
     let tool = OrchestratorTool::new(
         config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &[],
         vec![],
@@ -1138,9 +1072,7 @@ fn make_coder_tool() -> CoderTool {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &[],
     )
@@ -1171,20 +1103,8 @@ async fn coder_depth_limit_prevents_recursion() {
     let tool = make_coder_tool();
 
     let ctx = ToolContext {
-        working_dir: std::env::current_dir().unwrap(),
-        env: std::collections::HashMap::new(),
-        cancellation: tokio_util::sync::CancellationToken::new(),
-        workspace: None,
         depth: MAX_SUBAGENT_DEPTH,
-        sandbox_bypass: None,
-        taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: crate::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
+        ..ToolContext::new(std::env::current_dir().unwrap())
     };
 
     let input = serde_json::json!({"path": ".", "task": "should fail"});
@@ -1265,9 +1185,7 @@ fn coder_filters_to_correct_tools() {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &parent_tools,
     );
@@ -1288,13 +1206,7 @@ fn coder_filters_to_correct_tools() {
 #[tokio::test]
 async fn coder_runs_child_and_returns_result() {
     // Build a mock LLM that returns "Changes complete." without calling tools.
-    let llm = MockLlm::new(vec![vec![
-        StreamEvent::TextDelta("Changes complete.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ]]);
+    let llm = MockLlm::new(vec![mock_text_response("Changes complete.")]);
 
     let tmp = tempfile::tempdir().unwrap();
     let sub_dir = tmp.path().join("src");
@@ -1304,9 +1216,7 @@ async fn coder_runs_child_and_returns_result() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &[],
     );
@@ -1329,15 +1239,12 @@ async fn coder_runs_child_and_returns_result() {
 #[test]
 fn orchestrator_tool_uses_config_name_and_description() {
     let config = OrchestratorConfig {
-        name: "test_orchestrator",
         description: "A test orchestrator",
         system_prompt: "You are a test.",
         direct_tool_names: &["bash"],
         max_iterations: 10,
         max_tokens: 4096,
-        injects_protocol: None,
-        emit_artefact: None,
-        harness: None,
+        ..test_orchestrator_config()
     };
     let tool = OrchestratorTool::new(
         config,
@@ -1348,9 +1255,7 @@ fn orchestrator_tool_uses_config_name_and_description() {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &[],
         vec![],
@@ -1411,9 +1316,7 @@ fn pentester_schema_defers_scope_and_authorization_to_preflight() {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &[],
         vec![],
@@ -1445,9 +1348,7 @@ fn pentest_orchestrator_extends_execution_deadline() {
                 None,
                 None,
             )),
-            Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-                crate::sandbox::SandboxBypassGuard::for_test(),
-            )),
+            test_sandbox(),
             None,
             &[],
             vec![],
@@ -1560,9 +1461,7 @@ async fn pentester_rejects_missing_authorization_before_running_child() {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &[],
         vec![],
@@ -1596,9 +1495,7 @@ fn security_engineer_resume_schema_does_not_require_task() {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &[],
         vec![],
@@ -2087,9 +1984,7 @@ async fn security_engineer_writes_checkpoint_after_recon() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -2179,9 +2074,7 @@ async fn security_engineer_recon_proceeds_when_subagent_returns_prose() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -2242,9 +2135,7 @@ async fn security_engineer_recon_generates_taxonomy_driven_tasks() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -2378,9 +2269,7 @@ async fn security_engineer_resumes_checkpoint_and_does_not_rerun_completed_tasks
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(first_llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -2444,9 +2333,7 @@ async fn security_engineer_resumes_checkpoint_and_does_not_rerun_completed_tasks
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(resume_llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -2560,9 +2447,7 @@ async fn security_engineer_resumes_json_checkpoint_after_filesystem_workspace_re
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(first_llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -2654,9 +2539,7 @@ async fn security_engineer_resumes_json_checkpoint_after_filesystem_workspace_re
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(resume_llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&reloaded_workspace)),
         &[],
         vec![],
@@ -2792,9 +2675,7 @@ async fn security_engineer_trace_parse_failure_records_gap_and_reports() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -2857,9 +2738,7 @@ async fn security_engineer_old_checkpoint_fails_safely() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -2912,9 +2791,7 @@ fn orchestrator_filters_to_config_tool_names() {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &parent_tools,
         inner_subagents,
@@ -2940,17 +2817,7 @@ fn orchestrator_filters_to_config_tool_names() {
 
 #[tokio::test]
 async fn orchestrator_depth_limit_prevents_recursion() {
-    let config = OrchestratorConfig {
-        name: "test_orchestrator",
-        description: "test",
-        system_prompt: "test",
-        direct_tool_names: &[],
-        max_iterations: 5,
-        max_tokens: 1024,
-        injects_protocol: None,
-        emit_artefact: None,
-        harness: None,
-    };
+    let config = test_orchestrator_config();
     let tool = OrchestratorTool::new(
         config,
         LlmProvider::Anthropic,
@@ -2960,29 +2827,15 @@ async fn orchestrator_depth_limit_prevents_recursion() {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &[],
         vec![],
     );
 
     let ctx = ToolContext {
-        working_dir: std::env::current_dir().unwrap(),
-        env: std::collections::HashMap::new(),
-        cancellation: tokio_util::sync::CancellationToken::new(),
-        workspace: None,
         depth: MAX_SUBAGENT_DEPTH,
-        sandbox_bypass: None,
-        taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: crate::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
+        ..ToolContext::new(std::env::current_dir().unwrap())
     };
 
     let input = serde_json::json!({"task": "should fail"});
@@ -2993,33 +2846,17 @@ async fn orchestrator_depth_limit_prevents_recursion() {
 
 #[tokio::test]
 async fn orchestrator_runs_child_and_returns_result() {
-    let llm = MockLlm::new(vec![vec![
-        StreamEvent::TextDelta("Security review complete. No critical issues found.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ]]);
+    let llm = MockLlm::new(vec![mock_text_response(
+        "Security review complete. No critical issues found.",
+    )]);
 
-    let config = OrchestratorConfig {
-        name: "test_orchestrator",
-        description: "test",
-        system_prompt: "test",
-        direct_tool_names: &[],
-        max_iterations: 5,
-        max_tokens: 1024,
-        injects_protocol: None,
-        emit_artefact: None,
-        harness: None,
-    };
+    let config = test_orchestrator_config();
     let tool = OrchestratorTool::new(
         config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &[],
         vec![],
@@ -3050,33 +2887,21 @@ async fn orchestrator_runs_child_and_returns_result() {
 async fn orchestrator_emits_artefact_for_non_report_shaped_output() {
     // Short, non-markdown reply — would have failed the old heuristic
     // (48 chars, no leading `#`).  Still must produce an artefact.
-    let llm = MockLlm::new(vec![vec![
-        StreamEvent::TextDelta("Security review complete. No critical issues found.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ]]);
+    let llm = MockLlm::new(vec![mock_text_response(
+        "Security review complete. No critical issues found.",
+    )]);
 
     let config = OrchestratorConfig {
         name: "security_engineer",
-        description: "test",
-        system_prompt: "test",
-        direct_tool_names: &[],
-        max_iterations: 5,
-        max_tokens: 1024,
-        injects_protocol: None,
         emit_artefact: Some(crate::message::ArtefactKind::SecurityReview),
-        harness: None,
+        ..test_orchestrator_config()
     };
     let tool = OrchestratorTool::new(
         config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &[],
         vec![],
@@ -3110,33 +2935,19 @@ async fn orchestrator_emits_artefact_for_non_report_shaped_output() {
 // reports in the Artefacts tab when a model returns a pad-only reply.
 #[tokio::test]
 async fn orchestrator_suppresses_artefact_when_output_is_whitespace_only() {
-    let llm = MockLlm::new(vec![vec![
-        StreamEvent::TextDelta("   \n  \t  \n".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ]]);
+    let llm = MockLlm::new(vec![mock_text_response("   \n  \t  \n")]);
 
     let config = OrchestratorConfig {
         name: "security_engineer",
-        description: "test",
-        system_prompt: "test",
-        direct_tool_names: &[],
-        max_iterations: 5,
-        max_tokens: 1024,
-        injects_protocol: None,
         emit_artefact: Some(crate::message::ArtefactKind::SecurityReview),
-        harness: None,
+        ..test_orchestrator_config()
     };
     let tool = OrchestratorTool::new(
         config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &[],
         vec![],
@@ -3162,8 +2973,7 @@ fn orchestrator_with_custom_config() {
         max_iterations: 20,
         max_tokens: 4096,
         injects_protocol: Some("\n## DevOps Protocol\nUse for infra changes."),
-        emit_artefact: None,
-        harness: None,
+        ..test_orchestrator_config()
     };
 
     let parent_tools: Vec<Arc<dyn Tool>> = vec![
@@ -3181,9 +2991,7 @@ fn orchestrator_with_custom_config() {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &parent_tools,
         vec![],
@@ -3228,9 +3036,7 @@ async fn orchestrator_rejects_nonexistent_path() {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &[],
         vec![],
@@ -3264,9 +3070,7 @@ async fn orchestrator_rejects_path_pointing_to_file() {
             None,
             None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         &[],
         vec![],
@@ -3333,13 +3137,7 @@ async fn orchestrator_propagates_path_to_child_working_dir() {
                 output_tokens: None,
             },
         ],
-        vec![
-            StreamEvent::TextDelta("done".into()),
-            StreamEvent::MessageComplete {
-                stop_reason: StopReason::EndTurn,
-                output_tokens: None,
-            },
-        ],
+        mock_text_response("done"),
     ]);
 
     let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -3351,14 +3149,8 @@ async fn orchestrator_propagates_path_to_child_working_dir() {
     // has exactly one tool available.
     let config = OrchestratorConfig {
         name: "scope_test",
-        description: "test",
-        system_prompt: "test",
         direct_tool_names: &["working_dir_spy"],
-        max_iterations: 5,
-        max_tokens: 1024,
-        injects_protocol: None,
-        emit_artefact: None,
-        harness: None,
+        ..test_orchestrator_config()
     };
 
     let tool = OrchestratorTool::new(
@@ -3366,9 +3158,7 @@ async fn orchestrator_propagates_path_to_child_working_dir() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         std::slice::from_ref(&spy),
         vec![],
@@ -3434,13 +3224,7 @@ async fn subagent_inherits_parents_working_dir() {
                 output_tokens: None,
             },
         ],
-        vec![
-            StreamEvent::TextDelta("done".into()),
-            StreamEvent::MessageComplete {
-                stop_reason: StopReason::EndTurn,
-                output_tokens: None,
-            },
-        ],
+        mock_text_response("done"),
     ]);
 
     let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -3464,9 +3248,7 @@ async fn subagent_inherits_parents_working_dir() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         vec![spy],
     );
@@ -3474,20 +3256,8 @@ async fn subagent_inherits_parents_working_dir() {
     // Context mirrors what an OrchestratorTool child would pass when it
     // dispatched an inner subagent: its own scoped working_dir.
     let ctx = ToolContext {
-        working_dir: scoped.clone(),
-        env: std::collections::HashMap::new(),
-        cancellation: tokio_util::sync::CancellationToken::new(),
-        workspace: None,
         depth: 1,
-        sandbox_bypass: None,
-        taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: crate::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
+        ..ToolContext::new(scoped.clone())
     };
 
     let input = serde_json::json!({ "task": "call the spy" });
@@ -3529,13 +3299,7 @@ async fn orchestrator_without_path_keeps_process_cwd() {
                 output_tokens: None,
             },
         ],
-        vec![
-            StreamEvent::TextDelta("done".into()),
-            StreamEvent::MessageComplete {
-                stop_reason: StopReason::EndTurn,
-                output_tokens: None,
-            },
-        ],
+        mock_text_response("done"),
     ]);
 
     let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -3545,23 +3309,15 @@ async fn orchestrator_without_path_keeps_process_cwd() {
 
     let config = OrchestratorConfig {
         name: "scope_test",
-        description: "test",
-        system_prompt: "test",
         direct_tool_names: &["working_dir_spy"],
-        max_iterations: 5,
-        max_tokens: 1024,
-        injects_protocol: None,
-        emit_artefact: None,
-        harness: None,
+        ..test_orchestrator_config()
     };
     let tool = OrchestratorTool::new(
         config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         None,
         std::slice::from_ref(&spy),
         vec![],
@@ -3766,9 +3522,7 @@ async fn run_stage(
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(workspace)),
         &[],
         vec![],
@@ -3875,9 +3629,7 @@ async fn security_engineer_e2e_happy_path_one_finding() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(report_llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -3975,9 +3727,7 @@ async fn security_engineer_e2e_recon_prose_still_produces_report() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(report_llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -4051,9 +3801,7 @@ async fn security_engineer_e2e_hunt_finding_then_rejected_by_validator() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(report_llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -4189,9 +3937,7 @@ async fn security_engineer_e2e_report_repair_path() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -4319,9 +4065,7 @@ async fn security_engineer_e2e_resume_at_validate() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -4458,9 +4202,7 @@ async fn security_engineer_e2e_resume_at_report() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
-            crate::sandbox::SandboxBypassGuard::for_test(),
-        )),
+        test_sandbox(),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
