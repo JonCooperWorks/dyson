@@ -2428,7 +2428,7 @@ async fn static_path_traversal_is_blocked() {
         "/assets/%5csecret",
         "/assets/%00secret",
     ] {
-        let resp = r.get(&evil).await;
+        let resp = r.get(evil).await;
         assert!(
             resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
             "GET {} returned {}",
@@ -2945,7 +2945,7 @@ async fn emitted_file_is_only_served_from_owning_chat_scope() {
         .next()
         .expect("file id from scoped URL");
 
-    let owner_resp = r.get(&scoped_url).await;
+    let owner_resp = r.get(scoped_url).await;
     assert_eq!(owner_resp.status(), StatusCode::OK);
     let bytes = owner_resp
         .into_body()
