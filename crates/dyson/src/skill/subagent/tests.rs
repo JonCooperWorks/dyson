@@ -507,20 +507,8 @@ async fn subagent_depth_limit_prevents_recursion() {
 
     // Create a context at max depth.
     let ctx = ToolContext {
-        working_dir: std::env::current_dir().unwrap(),
-        env: std::collections::HashMap::new(),
-        cancellation: tokio_util::sync::CancellationToken::new(),
-        workspace: None,
         depth: MAX_SUBAGENT_DEPTH,
-        sandbox_bypass: None,
-        taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: crate::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
+        ..ToolContext::new(std::env::current_dir().unwrap())
     };
 
     let input = serde_json::json!({"task": "should fail"});
@@ -1115,20 +1103,8 @@ async fn coder_depth_limit_prevents_recursion() {
     let tool = make_coder_tool();
 
     let ctx = ToolContext {
-        working_dir: std::env::current_dir().unwrap(),
-        env: std::collections::HashMap::new(),
-        cancellation: tokio_util::sync::CancellationToken::new(),
-        workspace: None,
         depth: MAX_SUBAGENT_DEPTH,
-        sandbox_bypass: None,
-        taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: crate::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
+        ..ToolContext::new(std::env::current_dir().unwrap())
     };
 
     let input = serde_json::json!({"path": ".", "task": "should fail"});
@@ -2858,20 +2834,8 @@ async fn orchestrator_depth_limit_prevents_recursion() {
     );
 
     let ctx = ToolContext {
-        working_dir: std::env::current_dir().unwrap(),
-        env: std::collections::HashMap::new(),
-        cancellation: tokio_util::sync::CancellationToken::new(),
-        workspace: None,
         depth: MAX_SUBAGENT_DEPTH,
-        sandbox_bypass: None,
-        taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: crate::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
+        ..ToolContext::new(std::env::current_dir().unwrap())
     };
 
     let input = serde_json::json!({"task": "should fail"});
@@ -3292,20 +3256,8 @@ async fn subagent_inherits_parents_working_dir() {
     // Context mirrors what an OrchestratorTool child would pass when it
     // dispatched an inner subagent: its own scoped working_dir.
     let ctx = ToolContext {
-        working_dir: scoped.clone(),
-        env: std::collections::HashMap::new(),
-        cancellation: tokio_util::sync::CancellationToken::new(),
-        workspace: None,
         depth: 1,
-        sandbox_bypass: None,
-        taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: crate::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
+        ..ToolContext::new(scoped.clone())
     };
 
     let input = serde_json::json!({ "task": "call the spy" });

@@ -101,7 +101,6 @@ mod tool_limiter;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Arc;
 
@@ -505,29 +504,16 @@ impl Agent {
             })
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-        let mut tool_context = ToolContext {
-            working_dir,
-            env: HashMap::new(),
-            cancellation: CancellationToken::new(),
-            workspace: None,
-            depth: 0,
+        ToolContext {
+            workspace,
             // Inherit the bypass from the parent sandbox, if any.  This is
             // the only out-of-CLI mint: a subagent runs against the parent
             // sandbox's posture, which is already validated at startup.
             sandbox_bypass: sandbox
                 .sandbox_bypass()
                 .map(|_| crate::sandbox::SandboxBypassGuard::inherited_from_parent()),
-            taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            activity: None,
-            tool_use_id: None,
-            subagent_events: None,
-            artefacts: None,
-            current_chat_id: None,
-            harness: crate::agent::task::TaskRuntime::default(),
-            idempotency_key: None,
-        };
-        tool_context.workspace = workspace;
-        tool_context
+            ..ToolContext::new(working_dir)
+        }
     }
 
     /// Build the persistent dream thread from workspace configuration.

@@ -668,20 +668,8 @@ async fn memory_system_prompt_contains_usage_stats_and_curation_rules() {
 
     let workspace: Box<dyn crate::workspace::Workspace> = Box::new(ws);
     let ctx = crate::tool::ToolContext {
-        working_dir: std::env::temp_dir(),
-        env: HashMap::new(),
-        cancellation: CancellationToken::new(),
         workspace: Some(std::sync::Arc::new(tokio::sync::RwLock::new(workspace))),
-        depth: 0,
-        sandbox_bypass: None,
-        taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: crate::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
+        ..crate::tool::ToolContext::new(std::env::temp_dir())
     };
 
     let prompt = reflection::build_memory_system_prompt(&ctx).await;
@@ -705,22 +693,7 @@ async fn memory_system_prompt_contains_usage_stats_and_curation_rules() {
 
 #[tokio::test]
 async fn reflection_system_prompt_lists_tools() {
-    let ctx = crate::tool::ToolContext {
-        working_dir: std::env::temp_dir(),
-        env: HashMap::new(),
-        cancellation: CancellationToken::new(),
-        workspace: None,
-        depth: 0,
-        sandbox_bypass: None,
-        taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: crate::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
-    };
+    let ctx = crate::tool::ToolContext::new(std::env::temp_dir());
     let prompt = reflection::build_reflection_system_prompt(&ctx).await;
     assert!(prompt.contains("skill_create"));
     assert!(!prompt.contains("export_conversation"));

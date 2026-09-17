@@ -15,14 +15,11 @@
 //! registration of the `<server>_resources` / `<server>_prompts` tools.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use dyson::config::{McpConfig, McpTransportConfig};
 use dyson::skill::Skill;
 use dyson::skill::mcp::McpSkill;
 use dyson::tool::ToolContext;
-use tokio::sync::RwLock;
-use tokio_util::sync::CancellationToken;
 
 fn everything_config() -> McpConfig {
     McpConfig {
@@ -74,22 +71,7 @@ async fn everything_server_handshake_registers_capability_gated_tools() {
 /// Minimal ToolContext for invoking a discovered MCP tool — the MCP tools
 /// don't read any of these fields, but `run()` requires the struct.
 fn bare_ctx() -> ToolContext {
-    ToolContext {
-        working_dir: std::env::current_dir().unwrap(),
-        env: HashMap::new(),
-        cancellation: CancellationToken::new(),
-        workspace: None,
-        depth: 0,
-        sandbox_bypass: None,
-        taint_indexes: Arc::new(RwLock::new(HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: dyson::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
-    }
+    ToolContext::new(std::env::current_dir().unwrap())
 }
 
 /// When the client advertises `elicitation` (prod does, via the HTTP

@@ -2,7 +2,6 @@
 // against real repos.  Each test is a regression guard for a real-world
 // failure mode the isolated unit tests missed.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -12,22 +11,7 @@ use dyson::tool::{Tool, ToolContext, ToolOutput};
 use serde_json::json;
 
 fn test_ctx(dir: &Path) -> ToolContext {
-    ToolContext {
-        working_dir: dir.to_path_buf(),
-        env: HashMap::new(),
-        cancellation: tokio_util::sync::CancellationToken::new(),
-        workspace: None,
-        depth: 0,
-        sandbox_bypass: None,
-        taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
-        artefacts: None,
-        current_chat_id: None,
-        harness: dyson::agent::task::TaskRuntime::default(),
-        idempotency_key: None,
-    }
+    ToolContext::new(dir.to_path_buf())
 }
 
 async fn trace(
