@@ -242,10 +242,8 @@ async fn existing_requested_chat(
     Some(json_ok(&serde_json::json!({ "id": id, "title": title })))
 }
 
-async fn rotate_previous_chat(state: &HttpState, id: &str) -> Result<(), Resp> {
-    if let Err(error) = validate_existing_chat_id(id) {
-        return Err(bad_request(error));
-    }
+async fn rotate_previous_chat(state: &HttpState, id: &str) -> Result<(), &'static str> {
+    validate_existing_chat_id(id)?;
     if let Some(handle) = state.chats.lock().await.get(id).cloned() {
         if let Some(agent) = handle.agent.lock().await.as_mut() {
             agent.clear();
@@ -334,9 +332,9 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
     // cleared so a future turn on that id doesn't resurrect stale
     // context from the agent cache.
     if let Some(prev) = body.rotate_previous.as_deref()
-        && let Err(response) = rotate_previous_chat(state, prev).await
+        && let Err(error) = rotate_previous_chat(state, prev).await
     {
-        return response;
+        return bad_request(error);
     }
     let id = match requested_id {
         Some(id) => id,
