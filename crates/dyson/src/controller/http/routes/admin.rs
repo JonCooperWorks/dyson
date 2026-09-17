@@ -1,62 +1,30 @@
-// ===========================================================================
-// /api/admin/configure — runtime reconfigure of name / task / models.
-//
-// Why this exists: Cube takes the cube-template snapshot during the
-// dyson-swarm warmup boot, when SWARM_MODEL / SWARM_TASK / etc are
-// unset.  On instance create, Cube restores the snapshot — preserving
-// the running dyson process's frozen `/proc/self/environ`, so the env
-// envelope swarm injects on cube.create_sandbox never reaches the
-// agent.  Result without this endpoint: every dyson instance shows
-// "warmup-placeholder" as its model and no IDENTITY.md / mission.
-//
-// dyson-orchestrator's instance.create() POSTs here right after the
-// sandbox flips Live with the real env (model list, task, name,
-// instance id).  This handler:
-//   1. Writes IDENTITY.md to the workspace — picked up by the
-//      `HotReloader` on the next agent turn (no process restart).
-//   2. Patches dyson.json's named Swarm provider (normally `openrouter`) —
-//      also `HotReloader`-watched, so
-//      the next agent build uses the new model list.
-//
-// Auth: same as every `/api/*` route — `state.auth` validates the
-// inbound bearer.  When dyson booted in dangerous-no-auth (warmup),
-// any caller is accepted, which is how swarm gets the very first
-// configure call through after the snapshot restore (the dyson
-// process still thinks it's in warmup mode).  The sandbox is
-// network-isolated except via cubeproxy, so "any caller" is in
-// practice "swarm via dyson_proxy".
+//! Runtime configuration after a Cube snapshot restore.
+//!
+//! Snapshot processes retain their warmup environment. Swarm supplies the live
+//! identity, providers, model selection, and service credentials here instead.
+//! The handler updates IDENTITY.md and commits one atomic configuration patch,
+//! then reloads settings for subsequent turns.
+//!
+//! `auth` owns the per-instance configure secret; `config` owns document patches.
+//! State replay, skill management, lifecycle, and cost backfill have separate
+//! endpoint modules. The outer HTTP router retains bearer and CSRF enforcement.
 
-use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as B64;
-use hyper::body::Bytes;
-use hyper::{Request, Response, StatusCode};
+use hyper::Request;
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::RwLock;
 
 use crate::config::Settings;
 
 use super::super::responses::{
-    Resp, bad_request, boxed, json_ok, json_status, open_workspace, read_json_capped, unauthorized,
+    Resp, bad_request, json_ok, json_status, open_workspace, read_json_capped, unauthorized,
 };
 use super::super::state::HttpState;
 
 /// Cap for the configure body.  Generous for very long task prompts
 /// but small enough to swat away accidental large payloads.
 const MAX_CONFIGURE_BODY: usize = 64 * 1024;
-
-/// State replay carries base64 file bodies.  The sync worker caps source
-/// files at 5 MiB, so 8 MiB leaves JSON/base64 headroom without turning
-/// the admin surface into a bulk upload endpoint.
-const MAX_STATE_FILE_BODY: usize = 8 * 1024 * 1024;
-
-/// Package install payload is a validated SKILL.md body plus metadata.
-/// Keep it above the swarm-side skill body cap to leave JSON overhead.
-const MAX_SKILL_INSTALL_BODY: usize = 96 * 1024;
-const MAX_COST_BACKFILL_BODY: usize = 1024;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ConfigureBody {
@@ -213,27 +181,6 @@ struct TelegramProxyConfigure {
 
 fn default_true() -> bool {
     true
-}
-
-#[derive(Debug, Deserialize)]
-struct RestoreStateFileBody {
-    namespace: String,
-    path: String,
-    #[serde(default)]
-    mime: Option<String>,
-    #[serde(default)]
-    deleted: bool,
-    #[serde(default)]
-    body_b64: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct InstallSkillAdminBody {
-    marketplace: String,
-    skill: String,
-    #[serde(default)]
-    force: bool,
-    package: crate::tool::skill_marketplace::SkillBody,
 }
 
 fn update_identity(snapshot: &Settings, body: &ConfigureBody) -> Result<bool, Box<Resp>> {
@@ -664,440 +611,6 @@ fn swarm_runtime_patch<'a>(
     }
 }
 
-pub(super) async fn post_state_file(
-    req: Request<hyper::body::Incoming>,
-    state: &HttpState,
-) -> Resp {
-    if let Some(resp) = authorize_configure(req.headers(), state).await {
-        return resp;
-    }
-    let body: RestoreStateFileBody = match read_json_capped(req, MAX_STATE_FILE_BODY).await {
-        Ok(b) => b,
-        Err(e) => return bad_request(&e),
-    };
-    let snapshot = state.settings_snapshot();
-    let root = match state_root(&snapshot, &body.namespace) {
-        Ok(root) => root,
-        Err(e) => return bad_request(&e),
-    };
-    let rel = match clean_relative_path(&body.path) {
-        Ok(path) => path,
-        Err(e) => return bad_request(&e),
-    };
-    let rel_path = rel
-        .components()
-        .filter_map(|c| match c {
-            Component::Normal(s) => s.to_str(),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/");
-    if !crate::swarm_state_sync::is_durable_state_file_path(&body.namespace, &rel_path) {
-        return bad_request("state file path is not durable state");
-    }
-    let abs = root.join(&rel);
-
-    if body.deleted {
-        match tokio::fs::remove_file(&abs).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return bad_request(&format!("remove {}: {e}", abs.display())),
-        }
-        return json_ok(&serde_json::json!({
-            "ok": true,
-            "namespace": body.namespace,
-            "path": body.path,
-            "deleted": true,
-        }));
-    }
-
-    let Some(encoded) = body.body_b64.as_deref() else {
-        return bad_request("body_b64 is required unless deleted=true");
-    };
-    let bytes = match B64.decode(encoded) {
-        Ok(bytes) => bytes,
-        Err(e) => return bad_request(&format!("body_b64 decode: {e}")),
-    };
-    if bytes.len() > 5 * 1024 * 1024 {
-        return bad_request("state file exceeds 5 MiB");
-    }
-    if crate::swarm_state_sync::is_zero_byte_chat_transcript(
-        &body.namespace,
-        &rel_path,
-        bytes.len() as u64,
-    ) {
-        return bad_request("zero-byte chat transcripts are not durable state");
-    }
-    if let Some(parent) = abs.parent()
-        && let Err(e) = tokio::fs::create_dir_all(parent).await
-    {
-        return bad_request(&format!("mkdir {}: {e}", parent.display()));
-    }
-    let tmp = abs.with_extension("dyson-state-restore.tmp");
-    if let Err(e) = tokio::fs::write(&tmp, &bytes).await {
-        return bad_request(&format!("write {}: {e}", tmp.display()));
-    }
-    if let Err(e) = tokio::fs::rename(&tmp, &abs).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return bad_request(&format!(
-            "rename {} -> {}: {e}",
-            tmp.display(),
-            abs.display()
-        ));
-    }
-    state.observe_replayed_state_file(&body.namespace, &rel_path);
-    json_ok(&serde_json::json!({
-        "ok": true,
-        "namespace": body.namespace,
-        "path": body.path,
-        "mime": body.mime,
-        "bytes": bytes.len(),
-        "deleted": false,
-    }))
-}
-
-pub(super) async fn post_skill_install(
-    req: Request<hyper::body::Incoming>,
-    state: &HttpState,
-) -> Resp {
-    if let Some(resp) = authorize_configure(req.headers(), state).await {
-        return resp;
-    }
-    let body: InstallSkillAdminBody = match read_json_capped(req, MAX_SKILL_INSTALL_BODY).await {
-        Ok(b) => b,
-        Err(e) => return bad_request(&e),
-    };
-    let snapshot = state.settings_snapshot();
-    let workspace = match open_workspace(&snapshot) {
-        Ok(w) => Arc::new(RwLock::new(w)),
-        Err(resp) => return *resp,
-    };
-    match crate::tool::skill_marketplace::install_skill_package_to_workspace(
-        &workspace,
-        body.marketplace.trim(),
-        body.skill.trim(),
-        body.package,
-        body.force,
-    )
-    .await
-    {
-        Ok(outcome) => json_ok(&outcome),
-        Err(crate::tool::skill_marketplace::SkillInstallError::AlreadyInstalled {
-            current_version,
-        }) => json_status(
-            StatusCode::CONFLICT,
-            &serde_json::json!({
-                "error": "already_installed",
-                "current_version": current_version,
-            }),
-        ),
-        Err(crate::tool::skill_marketplace::SkillInstallError::Invalid(msg)) => bad_request(&msg),
-        Err(crate::tool::skill_marketplace::SkillInstallError::Workspace(err)) => {
-            bad_request(&format!("workspace install failed: {err}"))
-        }
-    }
-}
-
-pub(super) async fn delete_skill(
-    req: Request<hyper::body::Incoming>,
-    state: &HttpState,
-    skill: &str,
-) -> Resp {
-    if let Some(resp) = authorize_configure(req.headers(), state).await {
-        return resp;
-    }
-    let snapshot = state.settings_snapshot();
-    let workspace = match open_workspace(&snapshot) {
-        Ok(w) => Arc::new(RwLock::new(w)),
-        Err(resp) => return *resp,
-    };
-    match crate::tool::skill_marketplace::remove_skill_from_workspace(&workspace, skill.trim())
-        .await
-    {
-        Ok(outcome) => json_ok(&outcome),
-        Err(crate::tool::skill_marketplace::SkillRemoveError::Invalid(msg)) => bad_request(&msg),
-        Err(crate::tool::skill_marketplace::SkillRemoveError::NotInstalled) => json_status(
-            StatusCode::NOT_FOUND,
-            &serde_json::json!({
-                "error": "skill_not_installed",
-                "skill": skill,
-            }),
-        ),
-        Err(crate::tool::skill_marketplace::SkillRemoveError::Workspace(err)) => {
-            bad_request(&format!("workspace uninstall failed: {err}"))
-        }
-    }
-}
-
-pub(super) async fn get_idle(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
-    if let Some(resp) = authorize_configure(req.headers(), state).await {
-        return resp;
-    }
-    let in_flight = state.in_flight_chats().await;
-    json_ok(&serde_json::json!({
-        "ok": true,
-        "idle": in_flight == 0,
-        "in_flight_chats": in_flight,
-        "quiesced": state.is_quiesced(),
-    }))
-}
-
-pub(super) async fn post_quiesce(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
-    if let Some(resp) = authorize_configure(req.headers(), state).await {
-        return resp;
-    }
-    let in_flight = state.try_quiesce().await;
-    if in_flight != 0 {
-        let body = serde_json::json!({
-            "ok": false,
-            "idle": false,
-            "in_flight_chats": in_flight,
-            "quiesced": false,
-        })
-        .to_string();
-        return Response::builder()
-            .status(StatusCode::CONFLICT)
-            .header("Content-Type", "application/json")
-            .body(boxed(Bytes::from(body)))
-            .unwrap();
-    }
-    json_ok(&serde_json::json!({
-        "ok": true,
-        "idle": true,
-        "in_flight_chats": 0,
-        "quiesced": true,
-    }))
-}
-
-pub(super) async fn post_unquiesce(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
-    if let Some(resp) = authorize_configure(req.headers(), state).await {
-        return resp;
-    }
-    state.unquiesce();
-    json_ok(&serde_json::json!({
-        "ok": true,
-        "quiesced": false,
-    }))
-}
-
-fn state_root(
-    settings: &crate::config::Settings,
-    namespace: &str,
-) -> std::result::Result<PathBuf, String> {
-    match namespace {
-        "workspace" => Ok(crate::util::resolve_tilde(
-            settings.workspace.connection_string.expose(),
-        )),
-        "chats" => Ok(crate::util::resolve_tilde(
-            settings.chat_history.connection_string.expose(),
-        )),
-        _ => Err(format!("unsupported namespace {namespace:?}")),
-    }
-}
-
-fn clean_relative_path(path: &str) -> std::result::Result<PathBuf, String> {
-    if path.is_empty() || path.len() > 2048 || path.contains('\0') {
-        return Err("bad path length or nul byte".into());
-    }
-    if path.starts_with('/') || path.contains('\\') {
-        return Err("paths must be relative and slash-separated".into());
-    }
-    let p = Path::new(path);
-    let mut out = PathBuf::new();
-    for component in p.components() {
-        match component {
-            Component::Normal(part) if !part.is_empty() => out.push(part),
-            _ => return Err("paths must be clean relative paths".into()),
-        }
-    }
-    if out.as_os_str().is_empty() {
-        return Err("path is empty".into());
-    }
-    Ok(out)
-}
-
-/// Diagnostic: return the live skill / tool inventory so an operator
-/// can confirm which MCP servers actually loaded after a configure
-/// push.  Same configure-secret auth as `post()` (the only auth
-/// surface on `/api/admin/*`).  Builds a throwaway agent off the
-/// current settings so we report the actual `on_load` outcome — a
-/// live `state.registry` only caches LLM clients, not skills.
-pub(super) async fn get_skills(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
-    use crate::skill::Skill;
-
-    if let Some(resp) = authorize_configure(req.headers(), state).await {
-        return resp;
-    }
-
-    // Re-load settings fresh from disk — this is the same path
-    // build_agent uses, so the result reflects what an actual chat
-    // turn would build with.
-    let path = match state.config_path() {
-        Some(p) => p.to_path_buf(),
-        None => return bad_request("config_path is not set"),
-    };
-    let settings = match crate::config::loader::load_settings(Some(&path)) {
-        Ok(s) => s,
-        Err(e) => return bad_request(&format!("load_settings: {e}")),
-    };
-
-    let mut by_kind: Vec<serde_json::Value> = Vec::new();
-    let mut mcp_listed: Vec<serde_json::Value> = Vec::new();
-    for sk in &settings.skills {
-        match sk {
-            crate::config::SkillConfig::Builtin(b) => {
-                by_kind.push(serde_json::json!({
-                    "kind": "builtin",
-                    "tools_filter": b.tools.len(),
-                }));
-            }
-            crate::config::SkillConfig::Local(l) => {
-                by_kind.push(serde_json::json!({
-                    "kind": "local",
-                    "name": l.name,
-                    "path": l.path,
-                }));
-            }
-            crate::config::SkillConfig::Subagent(sa) => {
-                by_kind.push(serde_json::json!({
-                    "kind": "subagent",
-                    "agents": sa.agents.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
-                }));
-            }
-            crate::config::SkillConfig::Mcp(m) => {
-                let transport = match &m.transport {
-                    crate::config::McpTransportConfig::Http { url, headers, auth } => {
-                        serde_json::json!({
-                            "type": "http",
-                            "url": url,
-                            "header_keys": headers.keys().collect::<Vec<_>>(),
-                            "oauth": auth.is_some(),
-                        })
-                    }
-                    crate::config::McpTransportConfig::Stdio { command, .. } => {
-                        serde_json::json!({ "type": "stdio", "command": command })
-                    }
-                };
-                mcp_listed.push(serde_json::json!({
-                    "name": m.name,
-                    "transport": transport,
-                }));
-            }
-        }
-    }
-
-    // Try to actually load each MCP skill so we can report the
-    // on_load outcome — handshake errors (the silent-skip path in
-    // skill::build_skills) surface here as `loaded: false` with the
-    // captured error string.  Doesn't share state with running
-    // chats; just a probe.
-    let mut mcp_probes: Vec<serde_json::Value> = Vec::new();
-    for sk in &settings.skills {
-        if let crate::config::SkillConfig::Mcp(cfg) = sk {
-            let mut skill = crate::skill::mcp::McpSkill::new(*cfg.clone());
-            let result = skill.on_load().await;
-            mcp_probes.push(match result {
-                Ok(()) => serde_json::json!({
-                    "name": cfg.name,
-                    "loaded": true,
-                    "tools": skill.tools().len(),
-                    "tool_names": skill.tools().iter().map(|t| t.name().to_string()).collect::<Vec<_>>(),
-                    // Server-advertised identity + guidance from
-                    // initialize.  `title` falls back to serverInfo.name
-                    // when the server didn't supply a friendly title.
-                    // Omitted when the server didn't advertise them so
-                    // the UI can fall back to the operator alias.
-                    "title": skill.server_display_name(),
-                    "version": skill.server_version(),
-                    "instructions": skill.server_instructions(),
-                }),
-                Err(e) => serde_json::json!({
-                    "name": cfg.name,
-                    "loaded": false,
-                    "error": e.to_string(),
-                }),
-            });
-        }
-    }
-
-    json_ok(&serde_json::json!({
-        "ok": true,
-        "skills": by_kind,
-        "mcp_servers": mcp_listed,
-        "mcp_probes": mcp_probes,
-    }))
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub(super) struct CostBackfillBody {
-    #[serde(default)]
-    dry_run: bool,
-}
-
-/// Fleet operation hook used by swarmctl after Dyson rollouts.
-///
-/// This route is still protected by the controller's normal `/api/*` bearer
-/// gate and CSRF header. It intentionally does not require the configure
-/// secret because swarmctl discovers live instances from Swarm's DB and calls
-/// them with their per-instance bearer token.
-pub(super) async fn post_cost_backfill(
-    req: Request<hyper::body::Incoming>,
-    state: &HttpState,
-) -> Resp {
-    let body: CostBackfillBody = match read_json_capped(req, MAX_COST_BACKFILL_BODY).await {
-        Ok(body) => body,
-        Err(err) => return bad_request(&err),
-    };
-    let Some(history) = state.history.as_ref() else {
-        return bad_request("chat history backend is not configured");
-    };
-    let Some(costs) = crate::swarm_cost::config_snapshot_or_env() else {
-        return Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .header("Content-Type", "application/json")
-            .body(boxed(Bytes::from(
-                serde_json::json!({
-                    "ok": false,
-                    "error": "Swarm cost lookup is not configured"
-                })
-                .to_string(),
-            )))
-            .unwrap();
-    };
-    match crate::message_cost_backfill::backfill_history(
-        history.as_ref(),
-        &costs,
-        crate::message_cost_backfill::CostBackfillOptions {
-            dry_run: body.dry_run,
-        },
-    )
-    .await
-    {
-        Ok(report) => json_ok(&serde_json::json!({
-            "ok": true,
-            "dry_run": body.dry_run,
-            "messages_scanned": report.messages_scanned,
-            "messages_linked": report.messages_linked,
-            "messages_priced": report.messages_priced,
-            "messages_skipped": report.messages_skipped,
-            "skip_reasons": report.skip_reasons,
-        })),
-        Err(err) => {
-            tracing::warn!(error = %err, "cost backfill failed");
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header("Content-Type", "application/json")
-                .body(boxed(Bytes::from(
-                    serde_json::json!({
-                        "ok": false,
-                        "error": "cost backfill failed"
-                    })
-                    .to_string(),
-                )))
-                .unwrap()
-        }
-    }
-}
 /// Render the IDENTITY.md body in the same shape `dyson swarm` writes
 /// at boot.  `Workspace::system_prompt()` injects the file under the
 /// `## IDENTITY` section of the agent's system prompt, so the format
@@ -1173,3 +686,15 @@ use config::{AppliedConfigPatch, ConfigureConfigPatch, patch_config_once};
 
 #[cfg(test)]
 mod tests;
+
+mod state_files;
+pub(super) use state_files::post_state_file;
+
+mod skills;
+pub(super) use skills::{delete_skill, get_skills, post_skill_install};
+
+mod lifecycle;
+pub(super) use lifecycle::{get_idle, post_quiesce, post_unquiesce};
+
+mod costs;
+pub(super) use costs::post_cost_backfill;

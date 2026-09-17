@@ -1,6 +1,8 @@
 use super::auth::CONFIGURE_HASH_FILENAME;
 use super::config::*;
+use super::state_files::clean_relative_path;
 use super::*;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn configure_body_accepts_full_swarm_wire_contract() {
