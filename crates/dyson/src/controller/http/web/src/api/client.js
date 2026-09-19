@@ -413,6 +413,7 @@ export class DysonClient {
   }
 
   async cancel(id) {
-    await this._authedFetch(`/api/conversations/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+    const r = await this._authedFetch(`/api/conversations/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+    if (!r.ok) throw new Error(`Cancellation rejected: ${r.status}`);
   }
 }

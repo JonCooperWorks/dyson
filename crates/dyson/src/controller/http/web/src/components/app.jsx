@@ -634,11 +634,17 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     );
   };
 
-  const onCancel = () => {
-    if (conv) client.cancel(conv).catch(() => {});
-    const r = getResources(conv);
-    if (r.es) { try { r.es.close(); } catch { /* already closed */ } r.es = null; }
-    mutate(s => settleRun(s, { done: false }));
+  const onCancel = async () => {
+    if (!conv) return;
+    setRunControlError('');
+    try {
+      await client.cancel(conv);
+      const r = getResources(conv);
+      if (r.es) { r.es.close(); r.es = null; }
+      mutate(s => settleRun(s, { done: false }));
+    } catch (error) {
+      setRunControlError(`Could not cancel the run. ${error.message}`);
+    }
   };
 
   const onRate = (turnIndex, emoji) => {

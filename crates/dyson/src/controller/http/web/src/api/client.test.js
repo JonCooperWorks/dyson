@@ -24,6 +24,10 @@ function args(fetchSpy, call = 0) {
 }
 
 describe('DysonClient — constructor', () => {
+  it('surfaces rejected cancellation instead of reporting a stopped run', async () => {
+    const client = new DysonClient({ fetch: mockFetch(() => ({ override: { ok: false, status: 503 } })) });
+    await expect(client.cancel('c1')).rejects.toThrow(/503/);
+  });
   it('throws when no fetch is available', () => {
     expect(() => new DysonClient({ fetch: null })).toThrow(/fetch/);
   });
