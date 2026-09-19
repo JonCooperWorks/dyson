@@ -418,7 +418,7 @@ impl Agent {
     ///
     /// Returns the tool output paired with the wall-clock execution duration
     /// so the caller can thread it to the result formatter.
-    #[tracing::instrument(target = "dyson_otel", name = "tool.execute", skip_all, fields(gen_ai.tool.name = %call.name, gen_ai.tool.call.id = %call.id, otel.status_code = tracing::field::Empty))]
+    #[tracing::instrument(target = "dyson_otel", name = "tool.execute", skip_all, fields(langfuse.observation.type = "tool", session.id = self.tool_context.current_chat_id.as_deref(), gen_ai.tool.name = %call.name, gen_ai.tool.call.id = %call.id, otel.status_code = tracing::field::Empty))]
     async fn execute_tool_call_timed(
         &self,
         call: &ToolCall,
@@ -479,8 +479,15 @@ impl Agent {
             call
         };
 
+        crate::telemetry::record_content("langfuse.observation.input", &call.input);
         let tool_start = std::time::Instant::now();
         let result = self.execute_tool_call(call, &scheduled_plan).await;
+        if let Ok(output) = &result {
+            crate::telemetry::record_content(
+                "langfuse.observation.output",
+                &serde_json::Value::String(output.content.clone()),
+            );
+        }
         if result.as_ref().map_or(true, |output| output.is_error) {
             tracing::Span::current().record("otel.status_code", "ERROR");
         }

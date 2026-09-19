@@ -174,7 +174,7 @@ impl Agent {
         target = "dyson_otel",
         name = "model.request",
         skip_all,
-        fields(iteration, attempt)
+        fields(iteration, attempt, session.id = self.tool_context.current_chat_id.as_deref())
     )]
     async fn start_stream_attempt(
         &mut self,
@@ -313,7 +313,7 @@ impl Agent {
         target = "dyson_otel",
         name = "agent.iteration",
         skip_all,
-        fields(iteration)
+        fields(iteration, langfuse.observation.type = "span", session.id = self.tool_context.current_chat_id.as_deref())
     )]
     async fn stream_iteration(
         &mut self,
@@ -566,8 +566,29 @@ impl Agent {
     ///
     /// Assumes the caller has already pushed the user message to
     /// `self.conversation.messages`.
-    #[tracing::instrument(target = "dyson_otel", name = "agent.turn", skip_all, fields(session.id = self.tool_context.current_chat_id.as_deref(), gen_ai.request.model = %self.config.model, otel.status_code = tracing::field::Empty))]
+    #[tracing::instrument(target = "dyson_otel", name = "agent.turn", skip_all, fields(langfuse.observation.type = "agent", session.id = self.tool_context.current_chat_id.as_deref(), gen_ai.request.model = %self.config.model, otel.status_code = tracing::field::Empty))]
     pub(super) async fn run_inner(&mut self, output: &mut dyn Output) -> Result<String> {
+        if let Some(message) = self
+            .conversation
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, crate::message::Role::User))
+        {
+            let text = message
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    crate::message::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            crate::telemetry::record_content(
+                "langfuse.observation.input",
+                &serde_json::Value::String(text),
+            );
+        }
         let deadline = self
             .tool_context
             .harness
@@ -595,6 +616,12 @@ impl Agent {
         .await;
         if !matches!(&result, Ok(Ok(_))) {
             tracing::Span::current().record("otel.status_code", "ERROR");
+        }
+        if let Ok(Ok(text)) = &result {
+            crate::telemetry::record_content(
+                "langfuse.observation.output",
+                &serde_json::Value::String(text.clone()),
+            );
         }
         match result {
             Ok(value) => value,

@@ -295,7 +295,7 @@ pub(crate) struct ChildSpawn<'a> {
 /// Depth overflow is returned as `ToolOutput::error` (recoverable) rather
 /// than `Err`, matching the codebase's split between bad input and
 /// runtime failure.
-#[tracing::instrument(target = "dyson_otel", name = "agent.subagent", skip_all)]
+#[tracing::instrument(target = "dyson_otel", name = "agent.subagent", skip_all, fields(langfuse.observation.type = "agent", otel.name = %spec.name, session.id = crate::telemetry::CONVERSATION_ID.try_with(Clone::clone).ok().flatten().as_deref()))]
 pub(crate) async fn spawn_child(spec: ChildSpawn<'_>) -> Result<ToolOutput> {
     if spec.parent_depth >= MAX_SUBAGENT_DEPTH {
         return Ok(ToolOutput::error(format!(
