@@ -121,7 +121,7 @@ describe('LeftRail — filter conversations', () => {
     const input = container.querySelector('.search input');
     fireEvent.change(input, { target: { value: 'zzz-no-match' } });
     expect(rowTitles(container)).toEqual([]);
-    // Empty-state copy reuses the existing "no conversations yet" branch.
-    expect(container.textContent).toMatch(/No conversations/i);
+    // Search failures offer a way back to the full conversation list.
+    expect(container.textContent).toMatch(/No matching conversations/i);
   });
 });

@@ -58,7 +58,7 @@ describe('/clear', () => {
       </ApiProvider>
     );
 
-    const textarea = screen.getByPlaceholderText(/Reply to/i);
+    const textarea = screen.getByRole('textbox', { name: /^Message / });
     fireEvent.change(textarea, { target: { value: '/clear' } });
     // First Enter picks the highlighted slash command (closes the menu);
     // the second Enter actually submits.

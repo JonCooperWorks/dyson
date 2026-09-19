@@ -61,7 +61,7 @@ describe('App render', () => {
   it('passes dynamic slash commands into the conversation composer', () => {
     expect(() => renderApp()).not.toThrow();
 
-    const textarea = screen.getByPlaceholderText(/Reply to/i);
+    const textarea = screen.getByRole('textbox', { name: /^Message / });
     fireEvent.change(textarea, { target: { value: '/skill-echo hello' } });
 
     const preview = screen.getByTestId('slash-preview');

@@ -12,6 +12,7 @@
 import React, { useState, useEffect, useRef, useCallback, useLayoutEffect, Suspense, lazy } from 'react';
 import { Icon } from './icons.jsx';
 import { Turn, Composer, RunStatusStrip, EmptyState } from './turns.jsx';
+import { RunControls } from './run-controls.jsx';
 import { TopBar, LeftRail } from './views.jsx';
 import { CommandPalette } from './command-palette.jsx';
 import { useApi } from '../hooks/useApi.js';
@@ -402,6 +403,8 @@ function ConversationView({ conv, toolRef, setToolRef }) {
   const pinnedToBottomRef = useRef(true);
   const [savedRun, setSavedRun] = useState(null);
   const [runControlError, setRunControlError] = useState('');
+  const [pendingControl, setPendingControl] = useState('');
+  const [showLatest, setShowLatest] = useState(false);
 
   useEffect(() => {
     if (!conv || !client.getRun) return;
@@ -410,6 +413,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     const refresh = () => client.getRun(conv).then(async run => {
       if (!active) return;
       setSavedRun(run);
+      if (run.state?.state !== 'running') setPendingControl('');
       const stateKey = `${run.run_id}:${run.state?.state}:${run.answer_received}`;
       const changed = previousState !== stateKey;
       previousState = stateKey;
@@ -430,12 +434,17 @@ function ConversationView({ conv, toolRef, setToolRef }) {
       }
     }).catch(() => { if (active) setSavedRun(null); });
     setSavedRun(null);
+    setRunControlError('');
+    setPendingControl('');
+    setShowLatest(false);
     refresh();
     const timer = setInterval(refresh, 2000);
     return () => { active = false; clearInterval(timer); };
   }, [conv, client]);
 
   const controlRun = async (action) => {
+    if (pendingControl) return;
+    setPendingControl(action);
     setRunControlError('');
     try {
       if (action === 'pause') await client.pauseRun(conv, savedRun.run_id);
@@ -446,7 +455,9 @@ function ConversationView({ conv, toolRef, setToolRef }) {
         await client.resumeRun(conv, savedRun.run_id);
       }
       setSavedRun(await client.getRun(conv));
+      if (action !== 'pause') setPendingControl('');
     } catch (error) {
+      setPendingControl('');
       setRunControlError(error.message);
       if (action === 'resume') {
         getResources(conv).es?.close();
@@ -459,6 +470,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
   const handleTranscriptScroll = useCallback((event) => {
     const el = event.currentTarget;
     pinnedToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 32;
+    setShowLatest(!pinnedToBottomRef.current);
   }, []);
 
   // URL → state: when the hash points at a specific tool ref (deep-
@@ -519,6 +531,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     if (shouldForceScroll || pinnedToBottomRef.current) {
       el.scrollTop = el.scrollHeight;
       pinnedToBottomRef.current = true;
+      setShowLatest(false);
     }
     if (shouldForceScroll) {
       updateSession(conv, s => s.justScrollOnNextRender ? { ...s, justScrollOnNextRender: false } : s);
@@ -660,7 +673,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     <div className={`centre${empty ? ' empty' : ''}`}>
       <div className="aurora-sweep" aria-hidden="true"/>
       <div className="context">
-        <div className="crumbs"><span className="c-leaf">{headTitle}</span></div>
+        <div className="crumbs"><span className="context-label">Conversation</span><span className="c-leaf" title={headTitle}>{convTitle || 'New conversation'}</span></div>
         <div className="right">
           <McpSummary servers={mcpServers}/>
           <button className="btn sm ghost" title="Download ShareGPT export" aria-label="Download ShareGPT export"
@@ -671,7 +684,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
       </div>
       <div className="transcript" ref={scrollRef} onScroll={handleTranscriptScroll}>
         <div className="inner">
-          {empty ? <EmptyState/> : session.liveTurns.map((t, i) => (
+          {empty ? <EmptyState onSelectPrompt={text => { mutate(s => setComposerDraft(s, { text })); scrollRef.current?.closest('.centre')?.querySelector('.composer-input')?.focus(); }}/> : session.liveTurns.map((t, i) => (
             <Turn key={i} turn={t} tools={tools}
                   onOpenTool={handleOpenTool} expandedTools={session.panels}
                   chatId={conv}
@@ -681,16 +694,14 @@ function ConversationView({ conv, toolRef, setToolRef }) {
           ))}
         </div>
       </div>
-      {savedRun && savedRun.state?.state !== 'finished' && (
-        <div role="status" style={{display:'flex', gap:12, alignItems:'center', padding:'8px 16px'}}>
-          <span>{savedRun.state?.state === 'waiting_for_input' ? (savedRun.answer_received ? 'Answer saved. Ready to resume.' : 'Waiting for your answer') : (session.running ? 'Agent running' : 'Run saved')}</span>
-          {session.running && <button type="button" onClick={() => controlRun('pause')}>Pause</button>}
-          {!session.running && (savedRun.state?.state !== 'waiting_for_input' || savedRun.answer_received) && <button type="button" onClick={() => controlRun('resume')}>Resume</button>}
-          {!session.running && <button type="button" onClick={() => controlRun('cancel')}>Cancel run</button>}
-        </div>
-      )}
-      {runControlError && <div role="alert" style={{padding:'8px 16px'}}>{runControlError}</div>}
-      <ComposerDock running={session.running} phase={session.phase} tname={session.tname}
+      {showLatest && !empty && <div className="latest-wrap"><button className="btn latest-button" onClick={() => {
+        const el = scrollRef.current;
+        if (el) { el.scrollTop = el.scrollHeight; pinnedToBottomRef.current = true; setShowLatest(false); }
+      }}><Icon name="arr-down" size={14}/> Back to latest</button></div>}
+      <ComposerDock running={session.running}
+                    blocked={!!savedRun && savedRun.state?.state !== 'finished' && !session.running}
+                    controls={<><RunControls run={savedRun} running={session.running} pending={pendingControl} onAction={controlRun}/>
+                      {runControlError && <div className="run-control-error" role="alert">{runControlError}</div>}</>} phase={session.phase} tname={session.tname}
                     runStartedAt={session.runStartedAt}
                     draftText={session.draftText}
                     draftAttachments={session.draftAttachments}
@@ -783,6 +794,8 @@ function ConversationShell({ onSend, onCancel, children }) {
 
 function ComposerDock({
   running,
+  blocked = false,
+  controls,
   phase,
   tname,
   runStartedAt,
@@ -801,7 +814,8 @@ function ComposerDock({
 }) {
   return (
     <div className="composer-dock">
-      <div style={{width:'100%',maxWidth:820,display:'flex',flexDirection:'column',alignItems:'stretch'}}>
+      <div className="composer-dock-inner">
+        {controls}
         {running && (
           <RunStatusStrip
             phase={phase}
@@ -815,6 +829,7 @@ function ComposerDock({
           onSend={onSend}
           onCancel={onCancel}
           running={!!running}
+          blocked={blocked}
           autoFocusKey={autoFocusKey}
           draftText={draftText}
           draftAttachments={draftAttachments}
@@ -823,6 +838,7 @@ function ComposerDock({
           nextRunModel={nextRunModel}
           onQueueModeChange={onQueueModeChange}
           slashCommands={slashCommands}/>
+        <div className="composer-hint">{blocked ? 'Resume or cancel the saved run before sending a new message.' : running ? 'Follow-ups are queued. Your agent will see them as it works.' : <>Enter to send <span>·</span> Shift + Enter for a new line</>}</div>
       </div>
     </div>
   );

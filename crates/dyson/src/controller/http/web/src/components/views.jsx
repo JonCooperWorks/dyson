@@ -218,7 +218,7 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
         </button>
       )}
       <div className="brand"><DysonMark className="brand-logo" size={22} aria-hidden="true"/><div className="name">{brandLabel(agentName)}</div></div>
-      <nav>
+      <nav aria-label="Workspace">
         {NAVS.map(n => (
           <button key={n.id} className={view === n.id ? 'active' : ''} onClick={() => setView(n.id)}
                   aria-label={n.name} aria-current={view === n.id ? 'page' : undefined}>
@@ -383,6 +383,7 @@ function LeftRail({ active, setActive, filter, emptyLabel, onNew }) {
   const client = useApi();
   const all = useAppState(s => s.conversations);
   const [query, setQuery] = useState('');
+  const [error, setError] = useState('');
   const q = query.trim().toLowerCase();
   const matchesQuery = (c) => !q
     || (c.title || '').toLowerCase().includes(q)
@@ -404,6 +405,7 @@ function LeftRail({ active, setActive, filter, emptyLabel, onNew }) {
 
   const deleteConv = (id, e) => {
     e.stopPropagation();
+    setError('');
     client.deleteChat(id).then(() => {
       removeConversation(id);
       deleteSession(id);
@@ -411,11 +413,11 @@ function LeftRail({ active, setActive, filter, emptyLabel, onNew }) {
         const next = all.find(c => c.id !== id);
         setActive(next ? next.id : null);
       }
-    }).catch(() => {});
+    }).catch(() => setError('Could not remove this conversation. Try again.'));
   };
 
   return (
-    <aside className="left">
+    <aside className="left" aria-label="Conversation history">
       <div className="newc">
         <button className="btn primary" onClick={newConv}>
           <span><Icon name="plus" size={12}/> New conversation</span>
@@ -423,18 +425,21 @@ function LeftRail({ active, setActive, filter, emptyLabel, onNew }) {
         </button>
       </div>
       <div className="search">
+        <Icon name="search" size={15}/>
         <input placeholder="Filter conversations"
+               aria-label="Search conversations"
                value={query}
                onChange={e => setQuery(e.target.value)}/>
       </div>
+      {error && <div className="rail-error" role="alert">{error}</div>}
       <div className="scroll">
         {items.length === 0 ? (
-          <div style={{padding:'18px 14px', color:'var(--mute)', fontSize:12, lineHeight:1.5}}>
-            {emptyLabel || <>No conversations yet. <span className="mono" style={{color:'var(--fg-dim)'}}>⌘K</span> to start one.</>}
+          <div className="rail-empty">
+            {q ? <><strong>No matching conversations</strong><span>Try a different title or clear your search.</span><button className="btn sm ghost" onClick={() => setQuery('')}>Clear search</button></> : (emptyLabel || <>Your next idea starts here. Create a conversation to get going.</>)}
           </div>
         ) : (
           <div className="group">
-            <h4>Conversations <span className="n">· {items.length}</span></h4>
+            <h4>{q ? 'Search results' : 'Conversations'} <span className="n">{items.length}</span></h4>
             {items.map(c => (
               <ConvRow key={c.id} c={c} active={active === c.id}
                        onOpen={() => setActive(c.id)}
@@ -443,15 +448,16 @@ function LeftRail({ active, setActive, filter, emptyLabel, onNew }) {
           </div>
         )}
       </div>
+      <div className="rail-footer"><Icon name="chat" size={14}/><span>A space for your work</span></div>
     </aside>
   );
 }
 
 function ConvRow({ c, active, onOpen, onDelete }) {
   return (
-    <div className={`conv ${c.live ? 'live' : ''} ${active ? 'active' : ''} src-${c.source || 'http'}`}
-         onClick={onOpen}>
-      <div className="row1">
+    <div className={`conv ${c.live ? 'live' : ''} ${active ? 'active' : ''} src-${c.source || 'http'}`}>
+      <button className="conv-open" aria-label={`Open conversation: ${c.title || c.id}`} onClick={onOpen} aria-current={active ? 'page' : undefined} title={c.title || c.id}>
+      <span className="row1">
         <span className="title">{c.title || c.id}</span>
         {c.source === 'telegram' && (
           <span className="chip tg" title="Telegram-originated chat"
@@ -461,13 +467,14 @@ function ConvRow({ c, active, onOpen, onDelete }) {
             TG
           </span>
         )}
-        <button className="conv-del" title="Delete conversation" onClick={onDelete}>
-          <Icon name="x" size={11}/>
-        </button>
-      </div>
-      <div className="row2">
-        <span className="last mono" style={{fontSize:10.5, opacity:0.6}}>{c.id}</span>
-      </div>
+      </span>
+      <span className="row2">
+        <span className="last">{c.live ? 'Working' : c.source === 'telegram' ? 'From Telegram' : c.hasArtefacts ? 'Includes artifacts' : 'Conversation'}</span>
+      </span>
+      </button>
+      <button className="conv-del" title="Delete conversation" aria-label={`Delete ${c.title || 'conversation'}`} onClick={onDelete}>
+        <Icon name="x" size={13}/>
+      </button>
     </div>
   );
 }
