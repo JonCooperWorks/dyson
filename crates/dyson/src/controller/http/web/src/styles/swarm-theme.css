@@ -2554,22 +2554,7 @@ textarea {
 
 /* Workspace redesign: restrained chrome, readable work, controls in flow. */
 :root {
-  --bg: #191c1a; --bg-1: #141715; --bg-2: #232824;
-  --fg: #eef1eb; --fg-muted: #a8b2a8; --fg-faint: #869287;
-  --border: #343d35; --accent: #bdd9b1; --accent-fg: #203221;
   --radius: 9px; --sans: "Geist", ui-sans-serif, system-ui, sans-serif;
-}
-:root[data-theme="light"] {
-  --bg: #fdfdfb; --bg-1: #f2f3ef; --bg-2: #e9ece5;
-  --fg: #232c25; --fg-muted: #606d61; --fg-faint: #6f7c70;
-  --border: #dce2d8; --accent: #3c6845; --accent-fg: #fff;
-}
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme]) {
-    --bg: #fdfdfb; --bg-1: #f2f3ef; --bg-2: #e9ece5;
-    --fg: #232c25; --fg-muted: #606d61; --fg-faint: #6f7c70;
-    --border: #dce2d8; --accent: #3c6845; --accent-fg: #fff;
-  }
 }
 html, body { -webkit-font-smoothing: antialiased; }
 button, input, textarea { font-family: var(--sans); }
