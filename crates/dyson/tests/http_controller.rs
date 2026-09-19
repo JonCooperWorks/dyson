@@ -6060,3 +6060,222 @@ async fn http_turn_journals_and_exposes_operator_recovery() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn managed_configure_closes_warmup_anonymous_api_access() {
+    let r = rig().await;
+    let _configure_root = isolate_configure_workspace(&r);
+    let response = post_json_with_headers(
+        &format!("{}/api/admin/configure", r.base),
+        &serde_json::json!({"http_bearer": "instance-private-bearer"}),
+        &[("x-swarm-configure", "trusted-configure-secret")],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for path in [
+        "/api/conversations",
+        "//api//conversations",
+        "/api/settings",
+    ] {
+        assert_eq!(
+            get(&format!("{}{path}", r.base)).await.status(),
+            StatusCode::UNAUTHORIZED,
+            "configured warmup must reject anonymous access to {path}"
+        );
+    }
+    assert_eq!(
+        get_with_header(
+            &format!("{}/api/conversations", r.base),
+            "authorization",
+            "Bearer wrong"
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        get_with_header(
+            &format!("{}/api/conversations", r.base),
+            "authorization",
+            "Bearer instance-private-bearer"
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        get(&format!("{}/healthz", r.base)).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn managed_bootstrap_and_admin_routes_require_trusted_credentials() {
+    let bootstrap = "trusted-operator-bootstrap";
+    let auth = HashedBearerAuth::from_phc(HashedBearerAuth::hash(bootstrap).unwrap()).unwrap();
+    let r = rig_with_auth_and_mode(Arc::new(auth), test_helpers::AuthMode::SwarmBearer).await;
+    let root = isolate_configure_workspace(&r);
+    let configure = format!("{}/api/admin/configure", r.base);
+    for path in ["/api/conversations", "/api/admin/skills", "/api/admin/idle"] {
+        let response = get_with_header(
+            &format!("{}{path}", r.base),
+            "x-swarm-configure",
+            "attacker-secret",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let rejected = post_json_with_headers(
+        &configure,
+        &serde_json::json!({"http_bearer":"attacker-instance-bearer"}),
+        &[
+            ("x-swarm-configure", "attacker-secret"),
+            ("authorization", "Bearer wrong-bootstrap"),
+        ],
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+    assert!(!root.path().join("configure_secret_hash").exists());
+    let body = serde_json::json!({"http_bearer":"instance-private-bearer"});
+    let configured = post_json_with_headers(
+        &configure,
+        &body,
+        &[
+            ("x-swarm-configure", "instance-configure-secret"),
+            ("authorization", "Bearer trusted-operator-bootstrap"),
+        ],
+    )
+    .await;
+    assert_eq!(configured.status(), StatusCode::OK);
+    for path in ["/api/conversations", "//api/conversations", "/api/settings"] {
+        assert_eq!(
+            get(&format!("{}{path}", r.base)).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get_with_header(
+                &format!("{}{path}", r.base),
+                "authorization",
+                "Bearer trusted-operator-bootstrap"
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        get_with_header(
+            &format!("{}/api/conversations", r.base),
+            "authorization",
+            "Bearer instance-private-bearer"
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        get_with_header(
+            &format!("{}/api/admin/idle", r.base),
+            "x-swarm-configure",
+            "instance-configure-secret"
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        post_json_with_headers(
+            &format!("{}/api/admin/cost-backfill", r.base),
+            &serde_json::json!({}),
+            &[("x-swarm-configure", "instance-configure-secret")]
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post_json(
+            &format!("{}/api/auth/sse-ticket", r.base),
+            &serde_json::json!({})
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post_json(
+            &format!("{}/webhook/telegram", r.base),
+            &serde_json::json!({})
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let takeover = post_json_with_headers(
+        &configure,
+        &body,
+        &[
+            ("x-swarm-configure", "attacker-secret"),
+            ("authorization", "Bearer trusted-operator-bootstrap"),
+        ],
+    )
+    .await;
+    assert_eq!(takeover.status(), StatusCode::UNAUTHORIZED);
+    let invalid = post_json_with_headers(
+        &configure,
+        &serde_json::json!({"http_bearer":""}),
+        &[("x-swarm-configure", "instance-configure-secret")],
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        get(&format!("{}/api/conversations", r.base)).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn managed_configure_persists_only_http_bearer_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dyson.json");
+    std::fs::write(&path, serde_json::json!({"controllers":[{"type":"http","bind":"0.0.0.0:80","dangerous_no_tls":true,"auth":{"type":"dangerous_no_auth"}}]}).to_string()).unwrap();
+    let r = rig_with_config_path(path.clone()).await;
+    let _root = isolate_configure_workspace(&r);
+    let configured = post_json_with_headers(
+        &format!("{}/api/admin/configure", r.base),
+        &serde_json::json!({"http_bearer":"instance-private-bearer"}),
+        &[("x-swarm-configure", "instance-configure-secret")],
+    )
+    .await;
+    assert_eq!(configured.status(), StatusCode::OK);
+    let persisted = std::fs::read_to_string(path).unwrap();
+    assert!(!persisted.contains("instance-private-bearer"));
+    let doc: serde_json::Value = serde_json::from_str(&persisted).unwrap();
+    assert_eq!(doc["controllers"][0]["auth"]["type"], "swarm");
+    let auth = HashedBearerAuth::from_phc(
+        doc["controllers"][0]["auth"]["hash"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    )
+    .unwrap();
+    let restarted =
+        rig_with_auth_and_mode(Arc::new(auth), test_helpers::AuthMode::SwarmBearer).await;
+    assert_eq!(
+        get(&format!("{}/api/conversations", restarted.base))
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        get_with_header(
+            &format!("{}/api/conversations", restarted.base),
+            "authorization",
+            "Bearer instance-private-bearer"
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+}

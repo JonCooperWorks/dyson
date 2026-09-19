@@ -276,6 +276,9 @@ ENV http_proxy=http://169.254.68.5:3128
 ENV NO_PROXY=169.254.68.5,169.254.254.53,127.0.0.1,localhost
 ENV no_proxy=169.254.68.5,169.254.254.53,127.0.0.1,localhost
 
+# Operator bootstrap trust contains only an Argon2 hash, never the bearer.
+COPY dyson-bootstrap-auth.hash /etc/dyson/bootstrap-auth.hash
+
 EXPOSE 80
 
 # tini reaps zombies and forwards signals to dyson.

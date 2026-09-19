@@ -65,12 +65,15 @@ pub(super) async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<Htt
 }
 
 async fn mint_sse_ticket(headers: &hyper::HeaderMap, state: &HttpState) -> Resp {
-    let info = match state.auth.validate_request(headers).await {
+    let auth = state.auth_snapshot();
+    let info = match auth.validate_request(headers).await {
         Ok(info) => info,
         Err(_) => return unauthorized(state),
     };
     let identity = info.metadata.get("sub").cloned().unwrap_or(info.identity);
-    let ticket = state.mint_sse_ticket(&identity);
+    let Some(ticket) = state.mint_current_auth_ticket(&auth, &identity) else {
+        return unauthorized(state);
+    };
     let mut response = super::responses::json_ok(&serde_json::json!({ "expires_in": 30 }));
     let cookie = build_sse_ticket_cookie(&ticket, state.tls_enabled, 30);
     if let Ok(value) = hyper::header::HeaderValue::from_str(&cookie) {
@@ -129,8 +132,35 @@ async fn authorize_route(
     if state.loopback_only_host_check && !loopback_host_allowed(req.headers()) {
         return Some(misdirected_request());
     }
+    // Only these handlers independently validate X-Swarm-Configure. Never
+    // exempt cost-backfill or arbitrary /api/admin paths from bearer auth.
+    let configure_admin = matches!(
+        state.effective_auth_mode(),
+        super::wire::AuthMode::SwarmBearer
+    ) && matches!(
+        (method, segs),
+        (
+            &Method::POST,
+            ["api", "admin", "configure" | "quiesce" | "unquiesce"]
+        ) | (&Method::POST, ["api", "admin", "state", "file"])
+            | (&Method::POST, ["api", "admin", "skills", "install"])
+            | (&Method::DELETE, ["api", "admin", "skills", _])
+            | (&Method::GET, ["api", "admin", "skills" | "idle"])
+    );
+    if configure_admin {
+        if let Some(response) = admin::authorize_configure(req.headers(), state).await {
+            return Some(response);
+        }
+    }
     let ticket_authorized = consume_sse_ticket(req, state, method, segs);
-    if !ticket_authorized && state.auth.validate_request(req.headers()).await.is_err() {
+    if !configure_admin
+        && !ticket_authorized
+        && state
+            .auth_snapshot()
+            .validate_request(req.headers())
+            .await
+            .is_err()
+    {
         return Some(unauthorized(state));
     }
     let state_changing = matches!(
@@ -208,7 +238,12 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         (&method, segs.as_slice()),
         (&Method::POST, ["webhook", "telegram"])
     ) {
-        if state.auth.validate_request(req.headers()).await.is_err() {
+        if state
+            .auth_snapshot()
+            .validate_request(req.headers())
+            .await
+            .is_err()
+        {
             return unauthorized(&state);
         }
         return post_telegram_webhook(req).await;

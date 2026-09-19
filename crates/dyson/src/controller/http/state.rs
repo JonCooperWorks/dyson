@@ -816,6 +816,8 @@ pub struct HttpState {
     /// Inbound auth guard.  Every `/api/*` request is validated against
     /// this before `dispatch` routes it.  See `HttpAuthConfig`.
     pub(crate) auth: Arc<dyn Auth>,
+    // Runtime configure must replace snapshot-era bootstrap authentication.
+    pub(crate) runtime_http_auth: std::sync::RwLock<Option<Arc<dyn Auth>>>,
     /// Persistent ChatHistory if configured in `dyson.json`.  `None`
     /// means in-memory only.
     pub(crate) history: Option<Arc<dyn ChatHistory>>,
@@ -1033,6 +1035,56 @@ fn advance_counter(counter: &std::sync::atomic::AtomicU64, next: u64) {
 }
 
 impl HttpState {
+    pub(crate) fn auth_snapshot(&self) -> Arc<dyn Auth> {
+        self.runtime_http_auth
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| self.auth.clone())
+    }
+
+    pub(crate) fn effective_auth_mode(&self) -> AuthMode {
+        if self
+            .runtime_http_auth
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            AuthMode::SwarmBearer
+        } else {
+            self.auth_mode.clone()
+        }
+    }
+
+    pub(crate) fn install_http_auth(&self, auth: Arc<dyn Auth>) {
+        let mut current = self
+            .runtime_http_auth
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *current = Some(auth);
+        self.sse_tickets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    pub(crate) fn mint_current_auth_ticket(
+        &self,
+        auth: &Arc<dyn Auth>,
+        identity: &str,
+    ) -> Option<String> {
+        let current = self
+            .runtime_http_auth
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !Arc::ptr_eq(auth, current.as_ref().unwrap_or(&self.auth)) {
+            return None;
+        }
+        // Hold the auth read guard through mint: installation takes auth then
+        // tickets in the same order, so old-auth tickets cannot survive a swap.
+        Some(self.mint_sse_ticket(identity))
+    }
+
     // Constructor shape mirrors the controller's startup pipeline 1:1 —
     // every arg is a distinct lifetime-bound dependency.  A builder would
     // hide that, not simplify it.
@@ -1077,6 +1129,7 @@ impl HttpState {
             settings: std::sync::RwLock::new(settings),
             registry,
             auth,
+            runtime_http_auth: std::sync::RwLock::new(None),
             history,
             feedback,
             files: Arc::new(std::sync::Mutex::new(files)),

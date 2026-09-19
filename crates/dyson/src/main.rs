@@ -121,7 +121,11 @@ enum Commands {
     /// keeps the plaintext to type into their browser.
     HashBearer {
         /// Plaintext bearer token to hash.
-        plaintext: String,
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        plaintext: Option<String>,
+        /// Read the bearer from stdin instead of exposing it in process arguments.
+        #[arg(long)]
+        stdin: bool,
     },
 
     /// Backfill assistant-message display costs from Swarm audit rows.
@@ -255,7 +259,22 @@ async fn main() -> dyson::error::Result<()> {
             let sandbox_bypass = dyson::sandbox::sandbox_bypass_from_cli_flag(dangerous_no_sandbox);
             command::listen::run(config, sandbox_bypass, provider, base_url, workspace).await
         }
-        Commands::HashBearer { plaintext } => command::hash_bearer::run(plaintext),
+        Commands::HashBearer { plaintext, stdin } => {
+            let plaintext = if stdin {
+                use std::io::Read;
+                let mut value = String::new();
+                std::io::stdin().take(4097).read_to_string(&mut value)?;
+                if value.len() > 4096 {
+                    return Err(dyson::error::DysonError::Config(
+                        "hash-bearer input exceeds 4096 bytes".into(),
+                    ));
+                }
+                value.trim_end_matches(['\r', '\n']).to_owned()
+            } else {
+                plaintext.unwrap_or_default()
+            };
+            command::hash_bearer::run(plaintext)
+        }
         Commands::CostBackfill {
             config,
             swarm_url,

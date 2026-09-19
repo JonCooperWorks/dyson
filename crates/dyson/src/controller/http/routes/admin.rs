@@ -18,13 +18,10 @@
 //      also `HotReloader`-watched, so
 //      the next agent build uses the new model list.
 //
-// Auth: same as every `/api/*` route — `state.auth` validates the
-// inbound bearer.  When dyson booted in dangerous-no-auth (warmup),
-// any caller is accepted, which is how swarm gets the very first
-// configure call through after the snapshot restore (the dyson
-// process still thinks it's in warmup mode).  The sandbox is
-// network-isolated except via cubeproxy, so "any caller" is in
-// practice "swarm via dyson_proxy".
+// Managed snapshots boot with operator bootstrap bearer authentication.
+// Configure pins a per-instance secret, installs the instance HTTP bearer,
+// and persists only its hash. Native lifecycle routes independently require
+// the pinned configure secret; ordinary APIs always require the HTTP bearer.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -92,8 +89,18 @@ static CONFIGURE_VERIFY_CACHE: std::sync::OnceLock<
     std::sync::Mutex<HashMap<ConfigureVerifyCacheKey, Instant>>,
 > = std::sync::OnceLock::new();
 
+fn deserialize_http_bearer<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<crate::auth::Credential>, D::Error> {
+    Option::<String>::deserialize(d).map(|value| value.map(crate::auth::Credential::new))
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct ConfigureBody {
+    /// Inbound instance bearer, delivered only by authenticated Swarm configure.
+    /// Credential's Debug is redacted; only its Argon2 hash is persisted.
+    #[serde(default, deserialize_with = "deserialize_http_bearer")]
+    http_bearer: Option<crate::auth::Credential>,
     /// New employee name (e.g. "PR reviewer for foo/bar").
     /// Folded into IDENTITY.md as `Name: <value>`.
     #[serde(default)]
@@ -270,7 +277,10 @@ struct InstallSkillAdminBody {
     package: crate::tool::skill_marketplace::SkillBody,
 }
 
-async fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> Option<Resp> {
+pub(super) async fn authorize_configure(
+    headers: &hyper::HeaderMap,
+    state: &HttpState,
+) -> Option<Resp> {
     let secret = match headers
         .get(DYSON_CONFIGURE_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -309,7 +319,19 @@ async fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> O
                     }
                     true
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // No trusted per-instance preseed/pin: managed warmup must
+                    // authenticate the operator bootstrap bearer before TOFU.
+                    if state
+                        .auth_snapshot()
+                        .validate_request(headers)
+                        .await
+                        .is_err()
+                    {
+                        return Some(unauthorized(state));
+                    }
+                    false
+                }
                 Err(e) => {
                     return Some(bad_request(&format!(
                         "read {}: {e}",
@@ -549,6 +571,35 @@ async fn reload_patched_config(
     }
 }
 
+async fn prepare_http_auth(
+    body: &ConfigureBody,
+    state: &HttpState,
+) -> Result<Option<(String, Arc<dyn crate::auth::Auth>)>, Resp> {
+    if matches!(state.auth_mode, super::super::wire::AuthMode::SwarmBearer)
+        && body.http_bearer.is_none()
+    {
+        return Err(bad_request("managed configure requires http_bearer"));
+    }
+    let Some(bearer) = body.http_bearer.as_ref() else {
+        return Ok(None);
+    };
+    let bearer = bearer.expose().to_owned();
+    if bearer.len() < 16 || bearer.len() > 1024 || bearer.trim() != bearer {
+        return Err(bad_request(
+            "http_bearer must be an instance credential (16-1024 bytes)",
+        ));
+    }
+    let hash = match hash_configure_secret(bearer).await {
+        ConfigureHashOutcome::Hashed(hash) => hash,
+        ConfigureHashOutcome::Failed(_) => {
+            return Err(bad_request("HTTP credential hashing failed"));
+        }
+    };
+    let auth = crate::auth::HashedBearerAuth::from_phc(hash.clone())
+        .map_err(|_| bad_request("invalid HTTP credential hash"))?;
+    Ok(Some((hash, Arc::new(auth))))
+}
+
 pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
     // Pull the configure secret BEFORE consuming the body — the
     // header check runs first so an unauthenticated caller can't
@@ -568,6 +619,10 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     {
         return bad_request("task must be mission text; use identity_doc for full IDENTITY.md");
     }
+    let http_auth = match prepare_http_auth(&body, state).await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     let snapshot = state.settings_snapshot();
 
     // 1. Workspace: rewrite IDENTITY.md from the new fields.  Empty
@@ -645,6 +700,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         match patch_config_once(
             path,
             ConfigureConfigPatch {
+                http_auth_hash: http_auth.as_ref().map(|(hash, _)| hash.as_str()),
                 provider_name: body.provider_name.as_deref(),
                 models: if want_models {
                     Some(body.models.as_slice())
@@ -696,6 +752,10 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     } else {
         AppliedConfigPatch::default()
     };
+    // Persist first; do not acknowledge an auth change that a restart loses.
+    if let Some((_, auth)) = http_auth {
+        state.install_http_auth(auth);
+    }
     let provider_changed = config_patch.provider_changed;
     let model_selection_changed = config_patch.model_selection_changed;
     let models_changed = provider_changed && want_models;
@@ -704,7 +764,8 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     let mcp_changed = config_patch.mcp_changed;
     let telegram_changed = config_patch.telegram_changed;
 
-    let any_config_changed = provider_changed
+    let any_config_changed = config_patch.http_auth_changed
+        || provider_changed
         || model_selection_changed
         || image_changed
         || skills_changed
@@ -827,6 +888,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     };
     json_ok(&serde_json::json!({
         "ok": true,
+        "http_auth_applied": body.http_bearer.is_some(),
         "identity_updated": identity_changed,
         "models_updated": models_changed,
         "models_applied": models_applied,
@@ -1491,6 +1553,7 @@ fn extract_section(body: &str, name: &str) -> Option<String> {
 }
 
 struct ConfigureConfigPatch<'a> {
+    http_auth_hash: Option<&'a str>,
     provider_name: Option<&'a str>,
     models: Option<&'a [String]>,
     api_key: Option<&'a str>,
@@ -1508,6 +1571,7 @@ struct ConfigureConfigPatch<'a> {
 
 #[derive(Default)]
 struct AppliedConfigPatch {
+    http_auth_changed: bool,
     provider_changed: bool,
     model_selection_changed: bool,
     image_changed: bool,
@@ -1518,7 +1582,8 @@ struct AppliedConfigPatch {
 
 impl AppliedConfigPatch {
     fn any(&self) -> bool {
-        self.provider_changed
+        self.http_auth_changed
+            || self.provider_changed
             || self.model_selection_changed
             || self.image_changed
             || self.skills_changed
@@ -1529,6 +1594,8 @@ impl AppliedConfigPatch {
 
 #[derive(Debug, thiserror::Error)]
 enum ConfigureConfigPatchError {
+    #[error("HTTP controller missing from config")]
+    HttpControllerMissing,
     #[error("read {path}: {source}")]
     Read {
         path: PathBuf,
@@ -1579,6 +1646,23 @@ async fn patch_config_once(
             source,
         })?;
     let mut applied = AppliedConfigPatch::default();
+    if let Some(hash) = patch.http_auth_hash {
+        let controllers = doc
+            .get_mut("controllers")
+            .and_then(Value::as_array_mut)
+            .ok_or(ConfigureConfigPatchError::HttpControllerMissing)?;
+        let mut found = false;
+        for controller in controllers {
+            if controller.get("type").and_then(Value::as_str) == Some("http") {
+                controller["auth"] = serde_json::json!({"type":"swarm", "hash":hash});
+                found = true;
+            }
+        }
+        if !found {
+            return Err(ConfigureConfigPatchError::HttpControllerMissing);
+        }
+        applied.http_auth_changed = true;
+    }
 
     if patch.refresh_subscription_models {
         applied.provider_changed = patch_subscription_models_doc(&mut doc)?;

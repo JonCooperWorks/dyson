@@ -41,6 +41,36 @@ use serde_json::json;
 use dyson::auth::HashedBearerAuth;
 use dyson::error::{DysonError, Result};
 
+fn swarm_http_auth(home: &Path, bearer: &str) -> Result<serde_json::Value> {
+    if !bearer.is_empty() {
+        return Ok(json!({"type":"swarm", "hash":HashedBearerAuth::hash(bearer)?}));
+    }
+    // A normal restart must not replace the configured instance's auth with
+    // fleet bootstrap auth. A pinned instance with missing/corrupt auth fails.
+    if home.join("configure_secret_hash").exists() {
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("dyson.json")).map_err(|_| {
+                DysonError::Config("configured instance HTTP auth is missing".into())
+            })?)
+            .map_err(|_| DysonError::Config("configured instance HTTP auth is invalid".into()))?;
+        let hash = doc
+            .get("controllers")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|controllers| controllers.iter().find(|c| c["type"] == "http"))
+            .and_then(|c| c["auth"]["hash"].as_str())
+            .ok_or_else(|| {
+                DysonError::Config("configured instance HTTP auth hash is missing".into())
+            })?;
+        HashedBearerAuth::from_phc(hash.to_owned())?;
+        return Ok(json!({"type":"swarm", "hash":hash}));
+    }
+    let hash = std::fs::read_to_string("/etc/dyson/bootstrap-auth.hash")
+        .map_err(|_| DysonError::Config("Swarm bootstrap auth hash is missing".into()))?;
+    let hash = hash.trim();
+    HashedBearerAuth::from_phc(hash.to_owned())?;
+    Ok(json!({"type":"swarm", "hash":hash}))
+}
+
 const DEFAULT_BIND: &str = "0.0.0.0:80";
 const DEFAULT_DYSON_HOME: &str = "/var/lib/dyson";
 
@@ -61,23 +91,7 @@ const CHATGPT_SUBSCRIPTION_PROVIDER: &str = "chatgpt-subscription";
 const CLAUDE_SUBSCRIPTION_PROVIDER: &str = "claude-subscription";
 
 pub async fn run() -> Result<()> {
-    // SWARM_BEARER_TOKEN is the per-instance auth secret swarm injects on
-    // create. It's NOT set during template build — Cube boots the rootfs
-    // once to probe /healthz and snapshot; only post-snapshot restores
-    // (instance creates) carry the env envelope. So treat the unset case
-    // as "warmup" mode: bind with no inbound auth, serve /healthz, get
-    // snapshotted. When swarm later restarts us with the env set, the
-    // bearer takes effect.
     let bearer = std::env::var("SWARM_BEARER_TOKEN").unwrap_or_default();
-    let warmup = bearer.is_empty();
-    if warmup {
-        tracing::warn!(
-            "SWARM_BEARER_TOKEN unset — running in template-warmup mode with \
-             dangerous_no_auth on the HTTP controller. Expected during cube \
-             template build; swarm injects the bearer on instance create."
-        );
-    }
-
     let bind = std::env::var("DYSON_BIND").unwrap_or_else(|_| DEFAULT_BIND.into());
     let home = std::env::var("DYSON_HOME").unwrap_or_else(|_| DEFAULT_DYSON_HOME.into());
     let proxy_url = std::env::var(ENV_PROXY_URL).unwrap_or_default();
@@ -128,12 +142,7 @@ pub async fn run() -> Result<()> {
         tracing::warn!(error = %e, "swarm: failed to seed ~/.ssh from SWARM_SSH_*");
     }
 
-    let auth_block = if warmup {
-        json!({ "type": "dangerous_no_auth" })
-    } else {
-        let bearer_hash = HashedBearerAuth::hash(&bearer)?;
-        json!({ "type": "bearer", "hash": bearer_hash })
-    };
+    let auth_block = swarm_http_auth(&home_path, &bearer)?;
 
     // Provider config — swarm's /llm proxy fronts the upstream LLM APIs.
     // For the smoke test the agent is never invoked; the provider just
