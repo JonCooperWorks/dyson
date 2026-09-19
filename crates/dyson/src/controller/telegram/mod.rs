@@ -1312,12 +1312,12 @@ async fn run_telegram_turn(
                 agent
                     .run_detailed(text, output)
                     .await
-                    .and_then(super::completed_text)
+                    .and_then(super::interactive_text)
             } else {
                 agent
                     .run_with_attachments_detailed(text, attachments, output)
                     .await
-                    .and_then(super::completed_text)
+                    .and_then(super::interactive_text)
             }
         }
     }

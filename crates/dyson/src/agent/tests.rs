@@ -2980,8 +2980,8 @@ fn generic_advisor_inherits_parent_tools() {
     // The agent should have all the original tools PLUS the advisor tool.
     assert_eq!(
         agent.tool_registry.tools.len(),
-        skill_tool_count + 2,
-        "advisor and task_control tools should be registered alongside skill tools"
+        skill_tool_count + 3,
+        "advisor, task_control and human input tools should be registered alongside skill tools"
     );
     assert!(
         agent.tool_registry.tools.contains_key("advisor"),
@@ -3067,8 +3067,8 @@ fn native_anthropic_advisor_injects_api_tool() {
     // No extra Dyson-side tools — native advisor is API-level.
     assert_eq!(
         agent.tool_registry.tools.len(),
-        skill_tool_count + 1,
-        "task_control is registered; native advisor should not add Dyson-side tools"
+        skill_tool_count + 2,
+        "task_control and human input are registered; native advisor should not add Dyson-side tools"
     );
 
     // Should have one API tool injection.
@@ -3315,3 +3315,6 @@ async fn token_estimate_stays_correct_through_compaction() {
 
 #[path = "audit_tests.rs"]
 mod audit_regressions;
+
+#[path = "continuation_tests.rs"]
+mod continuation_regressions;

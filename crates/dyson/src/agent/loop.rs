@@ -155,8 +155,8 @@ enum StreamAttempt {
     Cancelled,
 }
 
-#[derive(Default)]
-struct TurnProgress {
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct TurnProgress {
     final_text: String,
     hit_max_iterations: bool,
     any_text_streamed: bool,
@@ -536,7 +536,19 @@ impl Agent {
             return Ok(LoopControl::Break);
         }
         self.conversation.messages.push(assistant_msg);
+        if let Some(record) = &mut self.continuation {
+            record.progress = progress.clone();
+        }
+        self.transition(super::continuation::Transition::Selected(
+            tool_calls.clone(),
+        ))?;
+        if self.pause_at_boundary()? {
+            return Ok(LoopControl::Break);
+        }
         self.execute_tool_calls(&tool_calls, output).await?;
+        if self.pause_at_boundary()? {
+            return Ok(LoopControl::Break);
+        }
         self.admit_pending_user_messages(output).await?;
         self.maybe_inject_budget_warning(iteration, output);
         if iteration == self.max_iterations - 1 {
@@ -597,10 +609,30 @@ impl Agent {
     }
 
     async fn run_inner_impl(&mut self, output: &mut dyn Output) -> Result<String> {
-        self.conversation.turn_count += 1;
+        if !self.resuming {
+            self.conversation.turn_count += 1;
+        }
         self.conversation.budget_warning_fired = false;
 
-        let mut progress = TurnProgress::default();
+        let mut progress = self
+            .continuation
+            .as_ref()
+            .map(|r| r.progress.clone())
+            .unwrap_or_default();
+        self.checkpoint_run()?;
+        if self.resuming {
+            let pending = self
+                .continuation
+                .as_ref()
+                .map(|r| r.cursor.pending.clone())
+                .unwrap_or_default();
+            if !pending.is_empty() {
+                self.execute_tool_calls(&pending, output).await?;
+            }
+        }
+        if self.pause_at_boundary()? {
+            return Ok(progress.final_text);
+        }
 
         let skill_fragments = format!(
             "{}\nTask checkpoint: {}",
@@ -621,7 +653,12 @@ impl Agent {
         let mut recovered_this_turn = false;
 
         let mut progress_nudged = false;
-        'iter: for iteration in 0..self.max_iterations {
+        let start_iteration = self.continuation.as_ref().map_or(0, |r| r.cursor.iteration);
+        'iter: for iteration in start_iteration..self.max_iterations {
+            if self.pause_at_boundary()? {
+                break;
+            }
+            self.checkpoint_run()?;
             if self
                 .tool_context
                 .harness
@@ -680,6 +717,10 @@ impl Agent {
             {
                 IterationFlow::Ready(response) => response,
                 IterationFlow::RetryOuter => {
+                    if let Some(record) = &mut self.continuation {
+                        record.cursor.iteration = iteration + 1;
+                    }
+                    self.checkpoint_run()?;
                     if iteration + 1 == self.max_iterations {
                         progress.hit_max_iterations = true;
                     }
@@ -694,12 +735,28 @@ impl Agent {
             ) {
                 break;
             }
+            if let Some(record) = &mut self.continuation {
+                record.cursor.iteration = iteration + 1;
+                record.progress = progress.clone();
+            }
+            self.checkpoint_run()?;
             if iteration + 1 == self.max_iterations {
                 progress.hit_max_iterations = true;
             }
         }
 
-        if self.max_iterations == 0 {
+        // A completed response wins over a late pause request. All boundaries
+        // that can still dispatch work already check the persisted signal.
+        if matches!(
+            self.continuation.as_ref().map(|r| &r.cursor.state),
+            Some(
+                super::continuation::RunState::Paused
+                    | super::continuation::RunState::WaitingForInput { .. }
+            )
+        ) {
+            return Ok(progress.final_text);
+        }
+        if self.max_iterations == 0 || start_iteration >= self.max_iterations {
             progress.hit_max_iterations = true;
         }
         if progress.hit_max_iterations {

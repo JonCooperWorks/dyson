@@ -28,6 +28,9 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
+#[path = "http_run_controls/mod.rs"]
+mod run_controls;
+
 // ---------------------------------------------------------------------------
 // Test rig
 // ---------------------------------------------------------------------------

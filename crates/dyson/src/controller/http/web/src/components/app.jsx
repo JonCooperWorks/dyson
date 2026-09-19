@@ -400,6 +400,61 @@ function ConversationView({ conv, toolRef, setToolRef }) {
   const slashCommands = useAppState(s => s.commands);
   const scrollRef = useRef(null);
   const pinnedToBottomRef = useRef(true);
+  const [savedRun, setSavedRun] = useState(null);
+  const [runControlError, setRunControlError] = useState('');
+
+  useEffect(() => {
+    if (!conv || !client.getRun) return;
+    let active = true;
+    let previousState = null;
+    const refresh = () => client.getRun(conv).then(async run => {
+      if (!active) return;
+      setSavedRun(run);
+      const stateKey = `${run.run_id}:${run.state?.state}:${run.answer_received}`;
+      const changed = previousState !== stateKey;
+      previousState = stateKey;
+      // Answers can arrive from another surface. Reattach or hydrate even if
+      // the resumed run finished before this tab could open an SSE stream.
+      if (changed || (run.state?.state === 'running' && !getSession(conv)?.running)) {
+        const data = await client.load(conv);
+        if (!active) return;
+        if (data.live && !getSession(conv)?.running) {
+          hydrateTranscript(conv, data);
+          getResources(conv).es = attachLiveStream(conv, client);
+        } else if (!data.live) {
+          getResources(conv).es?.close();
+          getResources(conv).es = null;
+          hydrateTranscript(conv, data);
+          updateSession(conv, s => settleRun(s, { done: true }));
+        }
+      }
+    }).catch(() => { if (active) setSavedRun(null); });
+    setSavedRun(null);
+    refresh();
+    const timer = setInterval(refresh, 2000);
+    return () => { active = false; clearInterval(timer); };
+  }, [conv, client]);
+
+  const controlRun = async (action) => {
+    setRunControlError('');
+    try {
+      if (action === 'pause') await client.pauseRun(conv, savedRun.run_id);
+      else if (action === 'cancel') await client.cancel(conv);
+      else {
+        getResources(conv).es?.close();
+        getResources(conv).es = attachLiveStream(conv, client);
+        await client.resumeRun(conv, savedRun.run_id);
+      }
+      setSavedRun(await client.getRun(conv));
+    } catch (error) {
+      setRunControlError(error.message);
+      if (action === 'resume') {
+        getResources(conv).es?.close();
+        getResources(conv).es = null;
+        mutate(s => settleRun(s, { done: false }));
+      }
+    }
+  };
 
   const handleTranscriptScroll = useCallback((event) => {
     const el = event.currentTarget;
@@ -626,6 +681,15 @@ function ConversationView({ conv, toolRef, setToolRef }) {
           ))}
         </div>
       </div>
+      {savedRun && savedRun.state?.state !== 'finished' && (
+        <div role="status" style={{display:'flex', gap:12, alignItems:'center', padding:'8px 16px'}}>
+          <span>{savedRun.state?.state === 'waiting_for_input' ? (savedRun.answer_received ? 'Answer saved. Ready to resume.' : 'Waiting for your answer') : (session.running ? 'Agent running' : 'Run saved')}</span>
+          {session.running && <button type="button" onClick={() => controlRun('pause')}>Pause</button>}
+          {!session.running && (savedRun.state?.state !== 'waiting_for_input' || savedRun.answer_received) && <button type="button" onClick={() => controlRun('resume')}>Resume</button>}
+          {!session.running && <button type="button" onClick={() => controlRun('cancel')}>Cancel run</button>}
+        </div>
+      )}
+      {runControlError && <div role="alert" style={{padding:'8px 16px'}}>{runControlError}</div>}
       <ComposerDock running={session.running} phase={session.phase} tname={session.tname}
                     runStartedAt={session.runStartedAt}
                     draftText={session.draftText}

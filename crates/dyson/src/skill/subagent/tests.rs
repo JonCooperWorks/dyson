@@ -478,6 +478,47 @@ async fn subagent_concatenates_text_across_max_tokens_continuation() {
 }
 
 #[tokio::test]
+async fn subagent_iteration_limit_is_an_incomplete_handoff() {
+    let config = SubagentAgentConfig {
+        name: "bounded".into(),
+        description: "Test".into(),
+        system_prompt: "Test".into(),
+        provider: "anthropic".into(),
+        model: None,
+        max_iterations: Some(0),
+        max_tokens: Some(1024),
+        tools: None,
+        injects_protocol: None,
+    };
+    let tool = SubagentTool::new(
+        config,
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(MockLlm::new(vec![
+            mock_text_response("Remaining work"),
+        ]))),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        )),
+        None,
+        vec![],
+    );
+    let result = tool
+        .run(
+            &serde_json::json!({"task":"work"}),
+            &ToolContext::from_cwd().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(result.is_error);
+    assert_eq!(result.content, "Remaining work");
+    assert_eq!(
+        result.metadata.as_ref().unwrap()["run_outcome"]["status"],
+        "iteration_limit"
+    );
+}
+
+#[tokio::test]
 async fn subagent_depth_limit_prevents_recursion() {
     let config = SubagentAgentConfig {
         name: "deep_agent".into(),
@@ -3295,6 +3336,13 @@ struct WorkingDirSpy {
 
 #[async_trait]
 impl Tool for WorkingDirSpy {
+    fn execution_plan(
+        &self,
+        _: &serde_json::Value,
+        _: &ToolContext,
+    ) -> crate::tool::ToolExecutionPlan {
+        crate::tool::ToolExecutionPlan::read("test:working-dir")
+    }
     fn name(&self) -> &str {
         "working_dir_spy"
     }

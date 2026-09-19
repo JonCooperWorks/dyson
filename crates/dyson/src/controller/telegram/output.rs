@@ -192,6 +192,15 @@ impl TelegramOutput {
 }
 
 impl Output for TelegramOutput {
+    fn human_input_requested(
+        &mut self,
+        request: &dyson_harness::continuation::HumanInputRequest,
+    ) -> Result<(), DysonError> {
+        self.text_delta(&format!(
+            "{}\nReply with /answer <JSON object> or /decline. Answer schema: {}\n",
+            request.question, request.schema
+        ))
+    }
     fn text_delta(&mut self, text: &str) -> Result<(), DysonError> {
         self.text_buffer.push_str(text);
         self.maybe_flush_text()?;

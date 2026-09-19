@@ -140,6 +140,17 @@ export class DysonClient {
   // MCP elicitation: open prompts a connected MCP server has asked the
   // user to answer, and the answer submission.
   listElicitations() { return this._json('/api/mcp/elicitations'); }
+  getRun(id) { return this._json(`/api/conversations/${encodeURIComponent(id)}/run`); }
+  pauseRun(id, runId) {
+    return this._json(`/api/conversations/${encodeURIComponent(id)}/pause`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: runId }),
+    });
+  }
+  resumeRun(id, runId) {
+    return this._json(`/api/conversations/${encodeURIComponent(id)}/resume`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: runId }),
+    });
+  }
   respondElicitation(id, result) {
     return this._json(`/api/mcp/elicitations/${encodeURIComponent(id)}`, {
       method: 'POST',

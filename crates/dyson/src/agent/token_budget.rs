@@ -16,7 +16,7 @@ use crate::error::{DysonError, Result};
 /// let mut budget = TokenBudget::default();
 /// budget.max_output_tokens = Some(100_000); // cap at 100k output tokens
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TokenBudget {
     /// Maximum cumulative output tokens before the agent refuses to continue.
     /// `None` = unlimited (default).

@@ -54,6 +54,7 @@ pub mod bulk_edit;
 pub mod dependency_scan;
 pub mod edit_file;
 pub mod export_conversation;
+pub mod human_input;
 pub mod image_generate;
 pub mod kb_search;
 pub mod kb_status;
@@ -257,6 +258,35 @@ pub(crate) fn validate_tool_input(
     input: &serde_json::Value,
 ) -> std::result::Result<(), String> {
     fn check(schema: &serde_json::Value, value: &serde_json::Value, path: &str) -> Option<String> {
+        if let Some(text) = value.as_str() {
+            let len = text.chars().count() as u64;
+            if schema
+                .get("minLength")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|min| len < min)
+                || schema
+                    .get("maxLength")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|max| len > max)
+            {
+                return Some(format!(
+                    "{path}: string length is outside the allowed range"
+                ));
+            }
+        }
+        if let Some(number) = value.as_f64() {
+            if schema
+                .get("minimum")
+                .and_then(serde_json::Value::as_f64)
+                .is_some_and(|min| number < min)
+                || schema
+                    .get("maximum")
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some_and(|max| number > max)
+            {
+                return Some(format!("{path}: number is outside the allowed range"));
+            }
+        }
         if let Some(expected) = schema.get("type").and_then(serde_json::Value::as_str) {
             let valid = match expected {
                 "object" => value.is_object(),
@@ -586,7 +616,11 @@ impl ToolContext {
 /// `ToolOutput { content: "command not found", is_error: true }`.
 /// A bash command that exits 0 returns `is_error: false`.
 /// A bash command that can't even be spawned returns `Err(DysonError::Io(...))`.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ToolOutput {
+    /// A durable yield to the caller, rather than a completed tool result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_input: Option<dyson_harness::continuation::HumanInputRequest>,
     /// The text content to send back to the LLM.
     pub content: String,
 
@@ -642,7 +676,7 @@ pub struct ToolOutput {
 /// A single progress/checkpoint event emitted by a tool during its run.
 ///
 /// Used only as a side-channel — not serialized into the LLM conversation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CheckpointEvent {
     /// Human-readable progress message.
     pub message: String,
@@ -834,6 +868,7 @@ impl ToolOutput {
     /// Create a successful (non-error) output.
     pub fn success(content: impl Into<String>) -> Self {
         Self {
+            human_input: None,
             content: content.into(),
             is_error: false,
             view: None,
@@ -847,6 +882,7 @@ impl ToolOutput {
     /// Create an error output.
     pub fn error(content: impl Into<String>) -> Self {
         Self {
+            human_input: None,
             content: content.into(),
             is_error: true,
             view: None,

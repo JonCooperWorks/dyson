@@ -41,6 +41,7 @@ mod models;
 mod provider_auth;
 mod providers;
 mod recovery;
+mod runs;
 mod sse;
 mod static_assets;
 mod turns;
@@ -245,8 +246,10 @@ async fn dispatch_route(
         // ─── providers / model / mind / activity ───────────────────────
         // MCP elicitation: the SPA short-polls for open prompts and
         // answers them.  Both inherit the central /api/* auth + CSRF gate.
-        (&Method::GET, ["api", "mcp", "elicitations"]) => elicitation::list().await,
-        (&Method::POST, ["api", "mcp", "elicitations", id]) => elicitation::respond(req, id).await,
+        (&Method::GET, ["api", "mcp", "elicitations"]) => elicitation::list(&state).await,
+        (&Method::POST, ["api", "mcp", "elicitations", id]) => {
+            elicitation::respond(req, state, id).await
+        }
         // Live probe of every configured MCP server — surfaces the
         // server-advertised title + instructions so the SPA can
         // render meaningful chip tooltips and a description panel.
@@ -332,6 +335,11 @@ async fn dispatch_conversations(
         (&Method::GET, [id]) => conversations::get(&state, id).await,
         (&Method::DELETE, [id]) => conversations::delete(&state, id).await,
         (&Method::POST, [id, "turn"]) => turns::post(req, state, id).await,
+        (&Method::GET, [id, "run"]) => runs::get(&state, id).await,
+        (&Method::POST, [id, "pause"]) => runs::pause(req, &state, id).await,
+        (&Method::POST, [id, "resume"]) | (&Method::POST, [id, "signal"]) => {
+            runs::resume(req, state, id).await
+        }
         (&Method::POST, [id, "cancel"]) => conversations::cancel(&state, id).await,
         (&Method::GET, [id, "recovery"]) => recovery::get(&state, id).await,
         (&Method::POST, [id, "recovery"]) => recovery::post(req, &state, id).await,

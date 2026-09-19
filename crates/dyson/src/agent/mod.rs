@@ -89,6 +89,7 @@ mod retry;
 mod silent_output;
 pub mod task;
 pub use silent_output::SilentOutput;
+pub mod continuation;
 mod r#loop;
 mod persistence;
 pub mod protocol;
@@ -138,6 +139,8 @@ use self::token_budget::TokenBudget;
 /// Conversation history (`conversation.messages`) persists across calls for
 /// multi-turn conversations.
 pub struct Agent {
+    continuation: Option<continuation::RunCheckpoint>,
+    resuming: bool,
     pending_task_budget: Option<task::budget::Reservation>,
     /// LLM client for streaming completions, gated by rate limiting.
     ///
@@ -374,6 +377,7 @@ impl Agent {
     ) -> Result<Self> {
         let mut tool_registry = ToolRegistry::from_skills(&skills);
         tool_registry.register_extra_tool(Arc::new(task::TaskTool));
+        tool_registry.register_extra_tool(Arc::new(crate::tool::human_input::HumanInputTool));
 
         // Bind the advisor to the parent's resources, then register its tools
         // and collect API injections.
@@ -456,6 +460,8 @@ impl Agent {
             transcriber,
             advisor_prompt,
             persist_hook: None,
+            continuation: None,
+            resuming: false,
             active_run_id: protocol::RunId::new(),
             event_sequence: std::sync::Mutex::new(0),
             last_run_status: protocol::RunStatus::Completed,
@@ -694,6 +700,14 @@ impl Agent {
     /// Messages are cleared immediately so the caller can continue.  Dreams
     /// run in the background with no way to block the caller.
     pub fn clear(&mut self) {
+        if let Some(backend) = &self.history_backend {
+            if let Err(error) =
+                continuation::RunCheckpoint::cancel(backend.store.as_ref(), &backend.chat_id)
+            {
+                tracing::warn!(%error, "failed to cancel saved run on clear");
+            }
+        }
+        self.continuation = None;
         self.fire_dreams(DreamEvent::SessionEnd);
         self.conversation.messages.clear();
         self.conversation.invalidate_token_estimates();
@@ -926,6 +940,7 @@ impl Agent {
     /// assistant message without tool calls), or an error if something
     /// went wrong.
     pub async fn run(&mut self, user_input: &str, output: &mut dyn Output) -> Result<String> {
+        self.ensure_startable()?;
         tracing::info!(
             input_len = user_input.len(),
             input_preview = &user_input[..user_input.len().min(200)],
@@ -955,6 +970,7 @@ impl Agent {
         blocks: Vec<crate::message::ContentBlock>,
         output: &mut dyn Output,
     ) -> Result<String> {
+        self.ensure_startable()?;
         tracing::info!(
             block_count = blocks.len(),
             "user multimodal message received"
@@ -989,6 +1005,7 @@ impl Agent {
         attachments: Vec<crate::media::Attachment>,
         output: &mut dyn Output,
     ) -> Result<String> {
+        self.ensure_startable()?;
         tracing::info!(
             text_len = text.len(),
             attachment_count = attachments.len(),
@@ -1037,6 +1054,7 @@ impl Agent {
         attachments: Vec<crate::media::Attachment>,
         output: &mut dyn Output,
     ) -> Result<protocol::RunOutcome> {
+        self.ensure_startable()?;
         let before = self.conversation.token_budget.clone();
         let final_text = self
             .run_with_attachments(text, attachments, output)
@@ -1083,6 +1101,14 @@ impl Agent {
         user_input: &str,
         output: &mut dyn Output,
     ) -> Result<protocol::RunOutcome> {
+        if let Some(backend) = &self.history_backend {
+            if let Some((run, answer)) =
+                continuation::resume_command(backend.store.as_ref(), &backend.chat_id, user_input)?
+            {
+                return self.resume_detailed(&run, answer, output).await;
+            }
+        }
+        self.ensure_startable()?;
         let before = self.conversation.token_budget.clone();
         let final_text = self.run(user_input, output).await.unwrap_or_default();
         Ok(self.detailed_outcome(&before, final_text))

@@ -51,6 +51,13 @@ impl Default for ToolLimiter {
 }
 
 impl ToolLimiter {
+    pub(super) fn counts(&self) -> HashMap<String, usize> {
+        self.turn_counts.clone()
+    }
+
+    pub(super) fn restore_counts(&mut self, counts: HashMap<String, usize>) {
+        self.turn_counts = counts;
+    }
     /// Create a limiter suitable for batch execution (no cooldown).
     ///
     /// Within a single agent turn, multiple calls to the same tool should

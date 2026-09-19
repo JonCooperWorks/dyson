@@ -313,6 +313,7 @@ mod tests {
     /// Helper to build a ToolOutput for tests.
     fn tool_output(content: &str, is_error: bool) -> ToolOutput {
         ToolOutput {
+            human_input: None,
             content: content.to_owned(),
             is_error,
             view: None,

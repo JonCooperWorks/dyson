@@ -301,10 +301,9 @@ fn has_dependency(earlier: &[ResourceAccess], later: &[ResourceAccess]) -> bool 
     use std::collections::HashSet;
     // Global exclusive claims are a barrier, not a distinct named file.
     let global = |accesses: &[ResourceAccess]| {
-        accesses.iter().any(|a| {
-            a.kind == AccessKind::Write
-                && matches!(&a.resource, Resource::File(key) if key == "global:tool-execution")
-        })
+        accesses
+            .iter()
+            .any(|a| matches!(&a.resource, Resource::File(key) if key == "global:tool-execution"))
     };
     if global(earlier) || global(later) {
         return true;

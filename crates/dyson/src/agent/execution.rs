@@ -34,12 +34,16 @@ impl Agent {
         tool_name: &str,
         input: serde_json::Value,
     ) -> Result<ToolOutput> {
-        self.begin_run_protocol()?;
+        self.ensure_startable()?;
+        self.begin_run_protocol_with_mode(true)?;
         let result = if let Err(e) = self.limiter.check(tool_name) {
             Ok(ToolOutput::error(e.to_string()))
         } else {
             let call = ToolCall::new(tool_name, input);
-            self.execute_tool_call_timed(&call)
+            self.transition(super::continuation::Transition::Selected(vec![
+                call.clone(),
+            ]))?;
+            self.execute_tool_call_durable(&call)
                 .await
                 .map(|(output, _)| output)
         };
@@ -56,9 +60,16 @@ impl Agent {
         tool_calls: &[ToolCall],
         output: &mut dyn Output,
     ) -> Result<()> {
+        if self.pause_at_boundary()? {
+            return Ok(());
+        }
         let mut limited_calls: Vec<usize> = Vec::with_capacity(tool_calls.len());
         let mut persisted_rate_limit_result = false;
         for (i, call) in tool_calls.iter().enumerate() {
+            if self.tool_admitted(&call.id) {
+                limited_calls.push(i);
+                continue;
+            }
             if self
                 .repeated_failures
                 .get(&format!("{}:{}", call.name, call.input))
@@ -72,6 +83,7 @@ impl Agent {
                     .messages
                     .push(Message::tool_result(&call.id, &reason, true));
                 persisted_rate_limit_result = true;
+                self.transition(super::continuation::Transition::Observed(call.id.clone()))?;
                 continue;
             }
             if let Err(e) = self.limiter.check(&call.name) {
@@ -82,6 +94,7 @@ impl Agent {
                     true,
                 ));
                 persisted_rate_limit_result = true;
+                self.transition(super::continuation::Transition::Observed(call.id.clone()))?;
             } else {
                 limited_calls.push(i);
             }
@@ -89,6 +102,7 @@ impl Agent {
         if persisted_rate_limit_result {
             self.persist();
         }
+        self.checkpoint_run()?;
 
         let allowed_calls: Vec<&ToolCall> = limited_calls.iter().map(|&i| &tool_calls[i]).collect();
 
@@ -109,11 +123,14 @@ impl Agent {
         let phases = DependencyAnalyzer::analyze_plans(&plans);
 
         for phase in phases {
+            if self.pause_at_boundary()? {
+                break;
+            }
             match phase {
                 ExecutionPhase::Parallel(indices) => {
                     let futs: Vec<_> = indices
                         .iter()
-                        .map(|&idx| self.execute_tool_call_timed(allowed_calls[idx]))
+                        .map(|&idx| self.execute_tool_call_durable(allowed_calls[idx]))
                         .collect();
                     let results = futures_util::future::join_all(futs).await;
                     for (&idx, result) in indices.iter().zip(results) {
@@ -122,7 +139,10 @@ impl Agent {
                 }
                 ExecutionPhase::Sequential(indices) => {
                     for &idx in &indices {
-                        let result = self.execute_tool_call_timed(allowed_calls[idx]).await;
+                        if self.pause_at_boundary()? {
+                            break;
+                        }
+                        let result = self.execute_tool_call_durable(allowed_calls[idx]).await;
                         self.handle_tool_result(allowed_calls[idx], result, output)?;
                     }
                 }
@@ -257,14 +277,31 @@ impl Agent {
     fn handle_tool_result(
         &mut self,
         call: &ToolCall,
-        result: Result<(ToolOutput, std::time::Duration)>,
+        mut result: Result<(ToolOutput, std::time::Duration)>,
         output: &mut dyn Output,
     ) -> Result<()> {
+        if let Ok((out, _)) = &mut result {
+            if let Some(request) = out.human_input.take() {
+                if self.history_backend.is_none() {
+                    *out = ToolOutput::error(
+                        "Durable history is required for human input. Ask the user in your response instead.",
+                    );
+                } else {
+                    let notification = request.clone();
+                    self.last_run_status = super::protocol::RunStatus::WaitingForInput;
+                    self.transition(super::continuation::Transition::Wait(request))?;
+                    if let Err(error) = output.human_input_requested(&notification) {
+                        tracing::warn!(%error, "question delivery failed; durable request remains available");
+                    }
+                    return Ok(());
+                }
+            }
+        }
         let tool_result_msg = match &result {
             Ok((tool_output, duration)) => Message::tool_result(
                 &call.id,
                 &format!(
-                    "{}{}",
+                    "{}{}{}",
                     self.formatter
                         .format(call, tool_output, *duration)
                         .to_llm_message(),
@@ -275,7 +312,11 @@ impl Agent {
                         .and_then(serde_json::Value::as_str)
                         .map_or_else(String::new, |id| format!(
                             "\n[Evidence: {id}; retrieve original with task_control evidence]"
-                        ))
+                        )),
+                    tool_output.metadata.as_ref().and_then(|m|m.get("run_outcome"))
+                        .map_or_else(String::new, |outcome| format!("\n[Subagent outcome: {}]", serde_json::json!({
+                            "status":outcome["status"],"run_id":outcome["run_id"],"warnings":outcome["warnings"],"task":outcome["task"]
+                        })))
                 ),
                 tool_output.is_error,
             ),
@@ -313,6 +354,7 @@ impl Agent {
             }
         }
         self.conversation.messages.push(tool_result_msg);
+        self.transition(super::continuation::Transition::Observed(call.id.clone()))?;
         self.persist();
         if let Ok((ref tool_output, _duration)) = result {
             if let Err(error) = output.tool_result(tool_output) {
@@ -353,6 +395,19 @@ impl Agent {
             }
         }
         Ok(())
+    }
+
+    pub(super) async fn execute_tool_call_durable(
+        &self,
+        call: &ToolCall,
+    ) -> Result<(ToolOutput, std::time::Duration)> {
+        if let Some(saved) = self.saved_dispatch(call)? {
+            return Ok(saved);
+        }
+        self.save_dispatch(call, None)?;
+        let result = self.execute_tool_call_timed(call).await;
+        self.save_dispatch(call, Some(&result))?;
+        result
     }
 
     /// Execute a single tool call with timing and structured logging.

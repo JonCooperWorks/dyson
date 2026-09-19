@@ -14,9 +14,9 @@
 // React component, and the panel renders.
 // ===========================================================================
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolView {
     /// Terminal-style output — what the `bash` tool produces.
@@ -38,7 +38,7 @@ pub enum ToolView {
     Taint { flow: Vec<TaintNode> },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TermLine {
     /// Line classification: `'p'` prompt, `'c'` content, `'e'` error,
     /// `'w'` warning, `'d'` dim/info.
@@ -47,7 +47,7 @@ pub struct TermLine {
     pub t: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffFile {
     pub path: String,
     pub add: usize,
@@ -57,7 +57,7 @@ pub struct DiffFile {
     pub rows: Vec<DiffRow>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffRow {
     /// `"add"`, `"rem"`, or `"ctx"`.
     pub t: String,
@@ -67,7 +67,7 @@ pub struct DiffRow {
     pub l: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SbomRow {
     pub pkg: String,
     pub ver: String,
@@ -79,7 +79,7 @@ pub struct SbomRow {
     pub note: String,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SbomCounts {
     pub crit: usize,
     pub high: usize,
@@ -88,7 +88,7 @@ pub struct SbomCounts {
     pub total: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaintNode {
     /// `"source"`, `"prop"` (propagator), or `"sink"`.
     pub kind: String,

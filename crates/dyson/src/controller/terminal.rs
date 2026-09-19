@@ -256,7 +256,7 @@ impl super::Controller for TerminalController {
             match agent
                 .run_detailed(input, &mut output)
                 .await
-                .and_then(super::completed_text)
+                .and_then(super::interactive_text)
             {
                 Ok(_) => println!(),
                 Err(e) => eprintln!("\n[Error]: {e}"),
@@ -291,6 +291,15 @@ impl Default for TerminalOutput {
 }
 
 impl Output for TerminalOutput {
+    fn human_input_requested(
+        &mut self,
+        request: &dyson_harness::continuation::HumanInputRequest,
+    ) -> Result<(), DysonError> {
+        self.text_delta(&format!(
+            "{}\nReply with /answer <JSON object> or /decline. Answer schema: {}\n",
+            request.question, request.schema
+        ))
+    }
     fn text_delta(&mut self, text: &str) -> Result<(), DysonError> {
         write!(self.stdout, "{text}")?;
         self.stdout.flush()?;
