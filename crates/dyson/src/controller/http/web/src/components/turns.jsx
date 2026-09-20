@@ -398,7 +398,7 @@ function Turn({ turn, tools, onOpenTool, expandedTools, turnIndex, rating, onRat
     setTimeout(() => setCopied(false), 1200);
   };
 
-  const cls = `turn ${ratable ? 'ratable' : ''} ${reactionsOpen ? 'reactions-open' : ''}`.trim();
+  const cls = `turn ${isUser ? 'user-turn' : 'agent-turn'} ${ratable ? 'ratable' : ''} ${reactionsOpen ? 'reactions-open' : ''}`.trim();
   return (
     <div className={cls} onPointerUp={onTurnPointerUp}>
       <div className={`avatar ${isUser ? 'user' : 'agent'}`}>{avatarL}</div>
@@ -759,6 +759,7 @@ function Composer({
   onSend,
   onCancel,
   running,
+  blocked = false,
   autoFocusKey,
   draftText = '',
   draftAttachments = [],
@@ -858,6 +859,7 @@ function Composer({
 
   const sub = (e) => {
     e?.preventDefault();
+    if (blocked) return;
     if (!val.trim() && !atts.length) return;
     onSend(val, atts);
     if (controlled) onDraftChange({ text: '', attachments: [] });
@@ -957,7 +959,7 @@ function Composer({
             {atts.map((a, i) => (
               <span key={i} className="att">
                 <Icon name="paperclip" size={10}/> {a.name} <span className="sz">{prettySize(a.size)}</span>
-                <span className="x" onClick={() => setAttachments(atts.filter((_, j) => j !== i))}>×</span>
+                <button type="button" className="x" aria-label={`Remove ${a.name}`} onClick={() => setAttachments(atts.filter((_, j) => j !== i))}>×</button>
               </span>
             ))}
           </div>
@@ -979,8 +981,9 @@ function Composer({
         <textarea
           ref={setTextareaRef}
           className="composer-input"
+          aria-label={`Message ${agentName}`}
           value={val}
-          placeholder={running ? `${agentName} is working — this queues` : `Reply to ${agentName}…`}
+          placeholder={running ? `Add a follow-up while ${agentName} works…` : `Ask ${agentName} anything, or describe a task…`}
           onTouchStart={e => prepareComposerFocus(e.currentTarget)}
           onPointerDown={e => prepareComposerFocus(e.currentTarget)}
           onFocus={e => prepareComposerFocus(e.currentTarget)}
@@ -1043,9 +1046,9 @@ function Composer({
           {activeModel && (
             <span className="model-label" style={{fontFamily:'var(--font-mono)', fontSize:10.5, color:'var(--mute)'}}>{activeModel}</span>
           )}
-          <button className="btn send sm" onClick={sub} disabled={!val.trim() && !atts.length}
+          <button className="btn send sm" onClick={sub} disabled={blocked || (!val.trim() && !atts.length)}
                   aria-label={running ? 'Queue message' : 'Send message'}>
-            {running ? 'queue' : 'send'} <Kbd>↵</Kbd>
+            {running ? 'Queue' : 'Send'} <Icon name="arr-right" size={15}/>
           </button>
         </div>
       </div>
@@ -1053,34 +1056,31 @@ function Composer({
   );
 }
 
-function EmptyState() {
-  // Real values only.  Model from /api/providers, mind backend from
-  // /api/mind, MCP names from /api/agent — all live in the app store.
+function EmptyState({ onSelectPrompt }) {
   const model = useAppState(s => s.activeModel);
-  const mind = useAppState(s => s.mind);
   const agentName = useAppState(s => s.agentName) || 'Dyson';
   const mcpServers = useAppState(s => s.skills?.mcp || []);
   const stateSync = useAppState(s => s.stateSync);
-  const wsBackend = (mind && mind.backend) || '';
-  const mcpNames = mcpServers
-    .map(s => String(s?.name || '').trim())
-    .filter(Boolean);
-  const shownMcp = mcpNames.slice(0, 3).join(', ');
-  const hiddenMcp = Math.max(0, mcpNames.length - 3);
+  const mcpNames = mcpServers.map(s => String(s?.name || '').trim()).filter(Boolean);
   return (
     <div className="empty-state">
-      <div className="es-eyebrow">
-        <span className="es-dot"/>
-        <span>online · ready</span>
+      <div className="es-eyebrow"><span className="es-dot"/><span>Your workspace with {agentName}</span></div>
+      <h1>What shall we<br/><em>work on?</em></h1>
+      <p>Bring a question, a rough idea, or a task to finish. We'll take it from here, together.</p>
+      {onSelectPrompt && <div className="starter-grid">
+        {[
+          { icon: 'search', title: 'Explore a question', detail: 'Research, compare, and understand', prompt: 'Help me research a question. Start by asking what I want to understand and what a useful answer would look like.' },
+          { icon: 'compose', title: 'Make something', detail: 'Turn an idea into a first draft', prompt: 'Help me turn an idea into something useful. Ask me what I want to make and who it is for.' },
+          { icon: 'rate', title: 'Think it through', detail: 'Find a clear path forward', prompt: 'Help me think through a decision. Ask me about the options, constraints, and what matters most.' },
+        ].map(item => <button type="button" className="starter" key={item.title} onClick={() => onSelectPrompt(item.prompt)}>
+          <Icon name={item.icon} size={20}/><strong>{item.title}</strong><span>{item.detail}</span><Icon name="arr-right" size={15} className="starter-arrow"/>
+        </button>)}
+      </div>}
+      <div className="es-connections">
+        {model && <span>{model}</span>}
+        {mcpNames.length > 0 && <span>Connected to {mcpNames.slice(0, 3).join(', ')}{mcpNames.length > 3 ? `, +${mcpNames.length - 3}` : ''}</span>}
+        {stateSync?.configured && stateSync?.last_error && <span className="sync-warning">Memory sync needs attention</span>}
       </div>
-      <h1>You're talking to <em>{agentName}</em>.</h1>
-      <p>
-        {model && <>Model <span className="mono es-pill">{model}</span>. </>}
-        {mcpNames.length > 0 && <>MCP <span className="mono es-pill">{shownMcp}{hiddenMcp > 0 ? `, +${hiddenMcp}` : ''}</span>. </>}
-        {stateSync?.configured && stateSync?.last_error && <>Memory sync <span className="mono es-pill">error</span>. </>}
-        {wsBackend && <>Workspace backend <span className="mono es-pill">{wsBackend}</span>.</>}
-      </p>
-      <div className="es-hint">Type a message to start.</div>
     </div>
   );
 }

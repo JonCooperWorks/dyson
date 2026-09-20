@@ -155,8 +155,8 @@ enum StreamAttempt {
     Cancelled,
 }
 
-#[derive(Default)]
-struct TurnProgress {
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct TurnProgress {
     final_text: String,
     hit_max_iterations: bool,
     any_text_streamed: bool,
@@ -174,7 +174,7 @@ impl Agent {
         target = "dyson_otel",
         name = "model.request",
         skip_all,
-        fields(iteration, attempt)
+        fields(iteration, attempt, session.id = self.tool_context.current_chat_id.as_deref())
     )]
     async fn start_stream_attempt(
         &mut self,
@@ -313,7 +313,7 @@ impl Agent {
         target = "dyson_otel",
         name = "agent.iteration",
         skip_all,
-        fields(iteration)
+        fields(iteration, langfuse.observation.type = "span", session.id = self.tool_context.current_chat_id.as_deref())
     )]
     async fn stream_iteration(
         &mut self,
@@ -536,7 +536,19 @@ impl Agent {
             return Ok(LoopControl::Break);
         }
         self.conversation.messages.push(assistant_msg);
+        if let Some(record) = &mut self.continuation {
+            record.progress = progress.clone();
+        }
+        self.transition(super::continuation::Transition::Selected(
+            tool_calls.clone(),
+        ))?;
+        if self.pause_at_boundary()? {
+            return Ok(LoopControl::Break);
+        }
         self.execute_tool_calls(&tool_calls, output).await?;
+        if self.pause_at_boundary()? {
+            return Ok(LoopControl::Break);
+        }
         self.admit_pending_user_messages(output).await?;
         self.maybe_inject_budget_warning(iteration, output);
         if iteration == self.max_iterations - 1 {
@@ -554,8 +566,29 @@ impl Agent {
     ///
     /// Assumes the caller has already pushed the user message to
     /// `self.conversation.messages`.
-    #[tracing::instrument(target = "dyson_otel", name = "agent.turn", skip_all, fields(session.id = self.tool_context.current_chat_id.as_deref(), gen_ai.request.model = %self.config.model, otel.status_code = tracing::field::Empty))]
+    #[tracing::instrument(target = "dyson_otel", name = "agent.turn", skip_all, fields(langfuse.observation.type = "agent", session.id = self.tool_context.current_chat_id.as_deref(), gen_ai.request.model = %self.config.model, otel.status_code = tracing::field::Empty))]
     pub(super) async fn run_inner(&mut self, output: &mut dyn Output) -> Result<String> {
+        if let Some(message) = self
+            .conversation
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, crate::message::Role::User))
+        {
+            let text = message
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    crate::message::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            crate::telemetry::record_content(
+                "langfuse.observation.input",
+                &serde_json::Value::String(text),
+            );
+        }
         let deadline = self
             .tool_context
             .harness
@@ -584,6 +617,12 @@ impl Agent {
         if !matches!(&result, Ok(Ok(_))) {
             tracing::Span::current().record("otel.status_code", "ERROR");
         }
+        if let Ok(Ok(text)) = &result {
+            crate::telemetry::record_content(
+                "langfuse.observation.output",
+                &serde_json::Value::String(text.clone()),
+            );
+        }
         match result {
             Ok(value) => value,
             Err(_) => {
@@ -597,10 +636,30 @@ impl Agent {
     }
 
     async fn run_inner_impl(&mut self, output: &mut dyn Output) -> Result<String> {
-        self.conversation.turn_count += 1;
+        if !self.resuming {
+            self.conversation.turn_count += 1;
+        }
         self.conversation.budget_warning_fired = false;
 
-        let mut progress = TurnProgress::default();
+        let mut progress = self
+            .continuation
+            .as_ref()
+            .map(|r| r.progress.clone())
+            .unwrap_or_default();
+        self.checkpoint_run()?;
+        if self.resuming {
+            let pending = self
+                .continuation
+                .as_ref()
+                .map(|r| r.cursor.pending.clone())
+                .unwrap_or_default();
+            if !pending.is_empty() {
+                self.execute_tool_calls(&pending, output).await?;
+            }
+        }
+        if self.pause_at_boundary()? {
+            return Ok(progress.final_text);
+        }
 
         let skill_fragments = format!(
             "{}\nTask checkpoint: {}",
@@ -621,7 +680,12 @@ impl Agent {
         let mut recovered_this_turn = false;
 
         let mut progress_nudged = false;
-        'iter: for iteration in 0..self.max_iterations {
+        let start_iteration = self.continuation.as_ref().map_or(0, |r| r.cursor.iteration);
+        'iter: for iteration in start_iteration..self.max_iterations {
+            if self.pause_at_boundary()? {
+                break;
+            }
+            self.checkpoint_run()?;
             if self
                 .tool_context
                 .harness
@@ -680,6 +744,10 @@ impl Agent {
             {
                 IterationFlow::Ready(response) => response,
                 IterationFlow::RetryOuter => {
+                    if let Some(record) = &mut self.continuation {
+                        record.cursor.iteration = iteration + 1;
+                    }
+                    self.checkpoint_run()?;
                     if iteration + 1 == self.max_iterations {
                         progress.hit_max_iterations = true;
                     }
@@ -694,12 +762,28 @@ impl Agent {
             ) {
                 break;
             }
+            if let Some(record) = &mut self.continuation {
+                record.cursor.iteration = iteration + 1;
+                record.progress = progress.clone();
+            }
+            self.checkpoint_run()?;
             if iteration + 1 == self.max_iterations {
                 progress.hit_max_iterations = true;
             }
         }
 
-        if self.max_iterations == 0 {
+        // A completed response wins over a late pause request. All boundaries
+        // that can still dispatch work already check the persisted signal.
+        if matches!(
+            self.continuation.as_ref().map(|r| &r.cursor.state),
+            Some(
+                super::continuation::RunState::Paused
+                    | super::continuation::RunState::WaitingForInput { .. }
+            )
+        ) {
+            return Ok(progress.final_text);
+        }
+        if self.max_iterations == 0 || start_iteration >= self.max_iterations {
             progress.hit_max_iterations = true;
         }
         if progress.hit_max_iterations {

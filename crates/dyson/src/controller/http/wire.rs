@@ -316,6 +316,8 @@ pub(crate) struct ProviderDto {
 pub enum AuthMode {
     None,
     Bearer,
+    #[serde(rename = "bearer")]
+    SwarmBearer,
     Oidc {
         issuer: String,
         authorization_endpoint: String,

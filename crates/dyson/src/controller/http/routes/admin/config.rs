@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Default)]
 pub(super) struct ConfigureConfigPatch<'a> {
+    pub(super) http_auth_hash: Option<&'a str>,
     pub(super) provider_name: Option<&'a str>,
     pub(super) models: Option<&'a [String]>,
     pub(super) api_key: Option<&'a str>,
@@ -23,6 +24,7 @@ pub(super) struct ConfigureConfigPatch<'a> {
 
 #[derive(Default)]
 pub(super) struct AppliedConfigPatch {
+    pub(super) http_auth_changed: bool,
     pub(super) provider_changed: bool,
     pub(super) model_selection_changed: bool,
     pub(super) image_changed: bool,
@@ -33,7 +35,8 @@ pub(super) struct AppliedConfigPatch {
 
 impl AppliedConfigPatch {
     pub(super) fn any(&self) -> bool {
-        self.provider_changed
+        self.http_auth_changed
+            || self.provider_changed
             || self.model_selection_changed
             || self.image_changed
             || self.skills_changed
@@ -44,6 +47,8 @@ impl AppliedConfigPatch {
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ConfigureConfigPatchError {
+    #[error("HTTP controller missing from config")]
+    HttpControllerMissing,
     #[error("read {path}: {source}")]
     Read {
         path: PathBuf,
@@ -94,6 +99,23 @@ pub(super) async fn patch_config_once(
             source,
         })?;
     let mut applied = AppliedConfigPatch::default();
+    if let Some(hash) = patch.http_auth_hash {
+        let controllers = doc
+            .get_mut("controllers")
+            .and_then(Value::as_array_mut)
+            .ok_or(ConfigureConfigPatchError::HttpControllerMissing)?;
+        let mut found = false;
+        for controller in controllers {
+            if controller.get("type").and_then(Value::as_str) == Some("http") {
+                controller["auth"] = serde_json::json!({"type":"swarm", "hash":hash});
+                found = true;
+            }
+        }
+        if !found {
+            return Err(ConfigureConfigPatchError::HttpControllerMissing);
+        }
+        applied.http_auth_changed = true;
+    }
 
     if patch.refresh_subscription_models {
         applied.provider_changed = patch_subscription_models_doc(&mut doc)?;

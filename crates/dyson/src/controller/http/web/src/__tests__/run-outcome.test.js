@@ -15,3 +15,11 @@ it('completed outcomes do not generate errors', () => {
   expect(onError).not.toHaveBeenCalled();
   expect(onRunOutcome).toHaveBeenCalledWith(outcome);
 });
+
+it.each(['paused', 'waiting_for_input'])('treats %s as suspension, not an error', (status) => {
+  const onError = vi.fn();
+  const onRunOutcome = vi.fn();
+  dispatchStreamEvent({ type: 'run_outcome', outcome: { status } }, { onError, onRunOutcome });
+  expect(onError).not.toHaveBeenCalled();
+  expect(onRunOutcome).toHaveBeenCalledWith({ status });
+});

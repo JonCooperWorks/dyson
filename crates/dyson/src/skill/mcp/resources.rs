@@ -149,6 +149,7 @@ impl McpResourcesTool {
             }
         }
         Ok(ToolOutput {
+            human_input: None,
             content: content_parts.join("\n"),
             is_error: false,
             view: None,

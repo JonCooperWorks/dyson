@@ -94,6 +94,7 @@ impl McpRemoteTool {
             }
         }
         Ok(ToolOutput {
+            human_input: None,
             content: content_parts.join("\n"),
             is_error: tool_result.is_error,
             view: None,

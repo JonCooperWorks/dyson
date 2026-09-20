@@ -50,12 +50,12 @@ pub(super) async fn run_telegram_turn(
                 agent
                     .run_detailed(text, output)
                     .await
-                    .and_then(crate::controller::completed_text)
+                    .and_then(crate::controller::interactive_text)
             } else {
                 agent
                     .run_with_attachments_detailed(text, attachments, output)
                     .await
-                    .and_then(crate::controller::completed_text)
+                    .and_then(crate::controller::interactive_text)
             }
         }
     }

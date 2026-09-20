@@ -34,16 +34,30 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState,
         Ok(body) => body,
         Err(error) => return bad_request(&error),
     };
+    super::conversations::existing_requested_chat(state, id, None).await;
     let Some(chat) = state.chats.lock().await.get(id).cloned() else {
         return not_found();
     };
+    if chat.busy.load(std::sync::atomic::Ordering::SeqCst) {
+        return bad_request("stop the active turn before reconciling");
+    }
     let Ok(mut guard) = chat.agent.try_lock() else {
         return bad_request("stop the active turn before reconciling");
     };
-    let Some(agent) = guard.as_mut() else {
-        return bad_request("load this conversation with a read-only turn before reconciling");
+    let result = if let Some(agent) = guard.as_mut() {
+        agent.reconcile_tool_outcome(&body.run_id, &body.tool_use_id, &body.resolution)
+    } else if let Some(store) = &state.history {
+        crate::agent::Agent::reconcile_stored_tool_outcome(
+            store.clone(),
+            id,
+            &body.run_id,
+            &body.tool_use_id,
+            &body.resolution,
+        )
+    } else {
+        return bad_request("execution journal not configured");
     };
-    match agent.reconcile_tool_outcome(&body.run_id, &body.tool_use_id, &body.resolution) {
+    match result {
         Ok(()) => json_ok(&serde_json::json!({"ok":true})),
         Err(error) => bad_request(&error.sanitized_message()),
     }

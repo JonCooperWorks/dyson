@@ -32,6 +32,8 @@ impl Default for RunId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
+    Paused,
+    WaitingForInput,
     Completed,
     Cancelled,
     BudgetExceeded,
@@ -87,6 +89,10 @@ pub struct RunEvaluation {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunEventKind {
     RunStarted,
+    RunSuspended {
+        status: RunStatus,
+    },
+    RunResumed,
     LlmAttemptStarted {
         iteration: usize,
         attempt: usize,

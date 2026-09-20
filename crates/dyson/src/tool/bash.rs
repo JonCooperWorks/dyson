@@ -276,6 +276,7 @@ impl Tool for BashTool {
                 tracing::debug!(output_len = truncated.len(), "bash output captured");
 
                 Ok(ToolOutput {
+                    human_input: None,
                     content: truncated.into_owned(),
                     is_error,
                     view: Some(view),

@@ -48,9 +48,32 @@ pub(crate) fn completed_text(outcome: crate::agent::protocol::RunOutcome) -> cra
     }
 }
 
+/// Interactive controllers already rendered the question/status. A durable
+/// yield is expected there; background completion still requires Completed.
+pub(crate) fn interactive_text(
+    outcome: crate::agent::protocol::RunOutcome,
+) -> crate::Result<String> {
+    if matches!(
+        outcome.status,
+        crate::agent::protocol::RunStatus::Paused
+            | crate::agent::protocol::RunStatus::WaitingForInput
+    ) {
+        Ok(outcome.final_text)
+    } else {
+        completed_text(outcome)
+    }
+}
+
 pub trait Output: Send {
     /// A fragment of text from the LLM's response.
     fn text_delta(&mut self, text: &str) -> std::result::Result<(), DysonError>;
+
+    fn human_input_requested(
+        &mut self,
+        request: &dyson_harness::continuation::HumanInputRequest,
+    ) -> std::result::Result<(), DysonError> {
+        self.text_delta(&request.question)
+    }
 
     /// A fragment of extended-thinking / chain-of-thought reasoning.
     ///

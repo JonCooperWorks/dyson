@@ -320,13 +320,13 @@ export function ElicitationModal() {
   if (!prompt) return null;
 
   const fields = Object.entries(props);
-  const source = prompt.server ? `MCP · ${prompt.server}` : 'MCP request';
+  const source = prompt.conversation_id ? 'Dyson · Waiting for your answer' : (prompt.server ? `MCP · ${prompt.server}` : 'MCP request');
 
   return (
     <Modal
       scrimClassName="elicit-overlay"
       className="elicit-modal"
-      label="MCP request"
+      label={prompt.conversation_id ? 'Agent question' : 'MCP request'}
       onClose={() => submit('cancel')}
       closeOnScrimClick={false}
     >

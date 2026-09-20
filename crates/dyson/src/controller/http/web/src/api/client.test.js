@@ -24,12 +24,31 @@ function args(fetchSpy, call = 0) {
 }
 
 describe('DysonClient — constructor', () => {
+  it('surfaces rejected cancellation instead of reporting a stopped run', async () => {
+    const client = new DysonClient({ fetch: mockFetch(() => ({ override: { ok: false, status: 503 } })) });
+    await expect(client.cancel('c1')).rejects.toThrow(/503/);
+  });
   it('throws when no fetch is available', () => {
     expect(() => new DysonClient({ fetch: null })).toThrow(/fetch/);
   });
 });
 
 describe('DysonClient — GET endpoints', () => {
+  it('run controls bind operations to a saved run and retain CSRF headers', async () => {
+    const fetch = mockFetch(() => ({ body: { run_id: 'run-1' } }));
+    const client = new DysonClient({ fetch });
+    await client.getRun('c 1');
+    await client.pauseRun('c 1', 'run-1');
+    await client.resumeRun('c 1', 'run-1');
+    expect(args(fetch, 0)[0]).toBe('/api/conversations/c%201/run');
+    for (const [index, action] of [[1, 'pause'], [2, 'resume']]) {
+      const [url, init] = args(fetch, index);
+      expect(url).toBe(`/api/conversations/c%201/${action}`);
+      expect(init.method).toBe('POST');
+      expect(JSON.parse(init.body)).toEqual({ run_id: 'run-1' });
+      expect(new Headers(init.headers).has('x-dyson-csrf')).toBe(true);
+    }
+  });
   it('listConversations → GET /api/conversations', async () => {
     const fetch = mockFetch(() => ({ body: [{ id: 'a', title: 't' }] }));
     const client = new DysonClient({ fetch });

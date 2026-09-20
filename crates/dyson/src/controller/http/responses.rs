@@ -400,8 +400,10 @@ pub(crate) fn unauthorized(state: &HttpState) -> Resp {
     // to take the whole connection down.  Now we drop the header,
     // emit a structured warning, and ship the bare 401 so the rest
     // of the auth surface keeps working.
-    let challenge: Option<String> = match &state.auth_mode {
-        AuthMode::Bearer => Some(r#"Bearer realm="dyson", error="invalid_token""#.to_string()),
+    let challenge: Option<String> = match &state.effective_auth_mode() {
+        AuthMode::Bearer | AuthMode::SwarmBearer => {
+            Some(r#"Bearer realm="dyson", error="invalid_token""#.to_string())
+        }
         AuthMode::Oidc {
             issuer,
             authorization_endpoint,
@@ -453,7 +455,7 @@ pub(crate) fn unauthorized(state: &HttpState) -> Resp {
 /// authorization_endpoint + client_id + required_scopes; bearer: just
 /// the mode tag; none: just the mode tag).
 pub(crate) fn get_auth_config(state: &HttpState) -> Resp {
-    json_ok(&state.auth_mode)
+    json_ok(&state.effective_auth_mode())
 }
 
 /// Read a JSON body with a hard byte cap.  Every upload-bearing

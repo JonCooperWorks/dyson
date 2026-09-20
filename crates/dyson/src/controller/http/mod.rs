@@ -220,12 +220,13 @@ impl HttpController {
         } else {
             None
         };
+        let managed = matches!(&auth_config, HttpAuthConfig::Swarm { .. });
         let init = match auth_config {
             HttpAuthConfig::DangerousNoAuth => AuthInit::Ready {
                 auth: Arc::new(DangerousNoAuth),
                 mode: AuthMode::None,
             },
-            HttpAuthConfig::Bearer { hash } => {
+            HttpAuthConfig::Bearer { hash } | HttpAuthConfig::Swarm { hash } => {
                 if hash.is_empty() {
                     tracing::error!("http controller: bearer auth configured with empty hash");
                     return None;
@@ -233,7 +234,11 @@ impl HttpController {
                 match HashedBearerAuth::from_phc(hash) {
                     Ok(a) => AuthInit::Ready {
                         auth: Arc::new(a),
-                        mode: AuthMode::Bearer,
+                        mode: if managed {
+                            AuthMode::SwarmBearer
+                        } else {
+                            AuthMode::Bearer
+                        },
                     },
                     Err(e) => {
                         tracing::error!(

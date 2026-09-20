@@ -79,6 +79,8 @@ pub(crate) enum HttpAuthConfig {
     /// share the matching plaintext with their browser.  Generate the
     /// hash with `dyson hash-bearer`.
     Bearer { hash: String },
+    /// Swarm-managed bearer; configure-secret authenticated admin lifecycle.
+    Swarm { hash: String },
     /// Verify `Authorization: Bearer <jwt>` against an external OpenID
     /// Connect provider.  The controller fetches
     /// `<issuer>/.well-known/openid-configuration` at startup for the

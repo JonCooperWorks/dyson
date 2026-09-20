@@ -178,7 +178,7 @@ fn validate_existing_chat_id(id: &str) -> Result<(), &'static str> {
     }
 }
 
-async fn existing_requested_chat(
+pub(super) async fn existing_requested_chat(
     state: &HttpState,
     id: &str,
     requested_title: Option<&str>,
@@ -661,6 +661,15 @@ pub(super) async fn delete(state: &HttpState, id: &str) -> Resp {
     if let Some(cancel) = handle.cancel.lock().await.as_ref() {
         cancel.cancel();
     }
+    if !handle.busy.load(std::sync::atomic::Ordering::SeqCst) {
+        if let Some(store) = &state.history {
+            if let Err(error) =
+                crate::agent::continuation::RunCheckpoint::cancel(store.as_ref(), id)
+            {
+                return bad_request(&error.sanitized_message());
+            }
+        }
+    }
 
     let in_memory_empty = match handle.agent.lock().await.as_ref() {
         Some(a) => a.messages().is_empty(),
@@ -686,12 +695,35 @@ pub(super) async fn delete(state: &HttpState, id: &str) -> Resp {
 }
 
 pub(super) async fn cancel(state: &HttpState, id: &str) -> Resp {
+    existing_requested_chat(state, id, None).await;
     let handle = match state.chats.lock().await.get(id).cloned() {
         Some(h) => h,
         None => return not_found(),
     };
     if let Some(cancel) = handle.cancel.lock().await.as_ref() {
         cancel.cancel();
+    }
+    if handle
+        .busy
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_ok()
+    {
+        let result = state
+            .history
+            .as_ref()
+            .map(|store| crate::agent::continuation::RunCheckpoint::cancel(store.as_ref(), id))
+            .transpose();
+        handle
+            .busy
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Err(error) = result {
+            return bad_request(&error.sanitized_message());
+        }
     }
     json_ok(&serde_json::json!({ "ok": true }))
 }

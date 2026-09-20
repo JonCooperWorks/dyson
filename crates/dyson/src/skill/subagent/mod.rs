@@ -295,7 +295,7 @@ pub(crate) struct ChildSpawn<'a> {
 /// Depth overflow is returned as `ToolOutput::error` (recoverable) rather
 /// than `Err`, matching the codebase's split between bad input and
 /// runtime failure.
-#[tracing::instrument(target = "dyson_otel", name = "agent.subagent", skip_all)]
+#[tracing::instrument(target = "dyson_otel", name = "agent.subagent", skip_all, fields(langfuse.observation.type = "agent", otel.name = %spec.name, session.id = crate::telemetry::CONVERSATION_ID.try_with(Clone::clone).ok().flatten().as_deref()))]
 pub(crate) async fn spawn_child(spec: ChildSpawn<'_>) -> Result<ToolOutput> {
     if spec.parent_depth >= MAX_SUBAGENT_DEPTH {
         return Ok(ToolOutput::error(format!(
@@ -333,8 +333,12 @@ pub(crate) async fn spawn_child(spec: ChildSpawn<'_>) -> Result<ToolOutput> {
     // Wire the optional UI sink before running.  Both `events` and
     // `parent_tool_id` must be `Some` for any tee'ing to happen.
     let mut capture = CaptureOutput::new().with_ui_sink(spec.events, spec.parent_tool_id);
-    match child_agent.run(&spec.user_message, &mut capture).await {
-        Ok(final_text) => {
+    match child_agent
+        .run_detailed(&spec.user_message, &mut capture)
+        .await
+    {
+        Ok(outcome) => {
+            let final_text = outcome.final_text.clone();
             let buffered = capture.take_artefacts();
             // Snapshot token usage from the child before it's dropped so
             // the orchestrator can surface a cost line in the artefact
@@ -342,7 +346,7 @@ pub(crate) async fn spawn_child(spec: ChildSpawn<'_>) -> Result<ToolOutput> {
             // if the child is kept around for a future turn (it isn't
             // currently, but the accessor is cheap).
             let budget = child_agent.token_budget();
-            let stats = serde_json::json!({
+            let mut stats = serde_json::json!({
                 "input_tokens": budget.input_tokens_used,
                 "output_tokens": budget.output_tokens_used,
                 "llm_calls": budget.llm_calls,
@@ -356,7 +360,12 @@ pub(crate) async fn spawn_child(spec: ChildSpawn<'_>) -> Result<ToolOutput> {
                 llm_calls = budget.llm_calls,
                 "child agent completed successfully"
             );
-            let mut out = ToolOutput::success(final_text);
+            stats["run_outcome"] = serde_json::to_value(&outcome)?;
+            let mut out = if outcome.status == crate::agent::protocol::RunStatus::Completed {
+                ToolOutput::success(final_text)
+            } else {
+                ToolOutput::error(final_text)
+            };
             out.artefacts = buffered;
             out.metadata = Some(stats);
             Ok(out)

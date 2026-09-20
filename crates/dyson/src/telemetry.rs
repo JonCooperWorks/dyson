@@ -1,4 +1,4 @@
-//! Opt-in, metadata-only OTLP tracing. Never export application log events.
+//! Account-routed runtime tracing. Never export application log events.
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_subscriber::{Layer, registry::LookupSpan};
@@ -12,19 +12,72 @@ impl Drop for Guard {
     }
 }
 
-/// Only an explicit endpoint enables export. Failure leaves the application usable.
+/// Use an explicit collector or the authenticated Swarm route. Failures leave the application usable.
 pub fn init(service: &'static str) -> Guard {
-    if std::env::var("OTEL_SDK_DISABLED").is_ok_and(|v| v.eq_ignore_ascii_case("true"))
-        || ![
-            "OTEL_EXPORTER_OTLP_ENDPOINT",
-            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-        ]
-        .iter()
-        .any(|key| std::env::var(key).is_ok_and(|v| !v.trim().is_empty()))
-    {
+    if std::env::var("OTEL_SDK_DISABLED").is_ok_and(|v| v.eq_ignore_ascii_case("true")) {
         return Guard(None);
     }
+    if ![
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    ]
+    .iter()
+    .any(|key| std::env::var(key).is_ok_and(|v| !v.trim().is_empty()))
+    {
+        // Warm agents receive their proxy after startup. Resolve that route at
+        // export time; never put an owner's Langfuse key inside the runtime.
+        return std::thread::spawn(|| {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build();
+            match client {
+                Ok(client) => Guard(Some(
+                    SdkTracerProvider::builder()
+                        .with_batch_exporter(SwarmExporter(client))
+                        .build(),
+                )),
+                Err(_) => Guard(None),
+            }
+        })
+        .join()
+        .unwrap_or(Guard(None));
+    }
     start_provider(service)
+}
+
+#[derive(Debug)]
+struct SwarmExporter(reqwest::blocking::Client);
+impl opentelemetry_sdk::trace::SpanExporter for SwarmExporter {
+    async fn export(
+        &self,
+        batch: Vec<opentelemetry_sdk::trace::SpanData>,
+    ) -> opentelemetry_sdk::error::OTelSdkResult {
+        let Some((base, token)) = crate::swarm_cost::runtime_proxy_parts() else {
+            return Ok(());
+        };
+        let Some((apex, _)) = base.split_once("/llm") else {
+            return Ok(());
+        };
+        let spans: Vec<opentelemetry_proto::tonic::trace::v1::Span> =
+            batch.into_iter().map(Into::into).collect();
+        for chunk in spans.chunks(128) {
+            let payload = serde_json::json!({"resourceSpans":[{"scopeSpans":[{"spans":chunk}]}]});
+            self.0
+                .post(format!("{apex}/llm/telemetry/v1/traces"))
+                .bearer_auth(&token)
+                .json(&payload)
+                .send()
+                .and_then(reqwest::blocking::Response::error_for_status)
+                .map_err(|_| {
+                    opentelemetry_sdk::error::OTelSdkError::InternalFailure(
+                        "Swarm trace export failed".into(),
+                    )
+                })?;
+        }
+        Ok(())
+    }
 }
 
 fn start_provider(service: &'static str) -> Guard {
@@ -74,6 +127,31 @@ where
 tokio::task_local! {
     /// Correlation is independent of whether local OTel export is configured.
     pub(crate) static CONVERSATION_ID: Option<String>;
+}
+
+/// Collect only explicit task content for the account-routed exporter.
+/// The server enforces the owner's capture preference; direct collectors remain metadata-only.
+pub(crate) fn record_content(key: &'static str, value: &serde_json::Value) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    if crate::swarm_cost::runtime_proxy_parts().is_none()
+        || [
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        ]
+        .iter()
+        .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
+    {
+        return;
+    }
+    let mut text = value.to_string();
+    if text.len() > 256 * 1024 {
+        let mut end = 32 * 1024;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text = serde_json::json!({"truncated":true,"preview":&text[..end]}).to_string();
+    }
+    tracing::Span::current().set_attribute(key, text);
 }
 
 /// Propagate correlation only to the configured Swarm proxy, never model vendors.

@@ -203,6 +203,10 @@ async fn clear_chat(state: &HttpState, handle: &ChatHandle, id: &str) -> Resp {
     }
     handle.set_title(PLACEHOLDER_TITLE.to_string());
     if let Some(history) = state.history.as_ref() {
+        if let Err(error) = crate::agent::continuation::RunCheckpoint::cancel(history.as_ref(), id)
+        {
+            return bad_request(&error.sanitized_message());
+        }
         if let Err(error) = history.rotate(id) {
             tracing::warn!(error = %error, chat_id = %id, "failed to rotate chat history");
         }
@@ -266,6 +270,42 @@ pub(super) async fn post(
         Ok(b) => b,
         Err(e) => return bad_request(&e),
     };
+    if body.attachments.is_empty() {
+        if let Some(store) = &state.history {
+            match crate::agent::continuation::resume_command(store.as_ref(), id, &body.prompt) {
+                Ok(Some((run_id, answer))) => {
+                    return resume(state, id, super::runs::ResumeRequest { run_id, answer }).await;
+                }
+                Err(error) => return bad_request(&error.sanitized_message()),
+                Ok(None) => {}
+            }
+        }
+    }
+    dispatch(body, state, id, None).await
+}
+
+pub(super) async fn resume(
+    state: Arc<HttpState>,
+    id: &str,
+    resume: super::runs::ResumeRequest,
+) -> Resp {
+    super::conversations::existing_requested_chat(&state, id, None).await;
+    let body = TurnBody {
+        prompt: String::new(),
+        attachments: vec![],
+        provider: None,
+        model: None,
+        queue_mode: None,
+    };
+    dispatch(body, state, id, Some(resume)).await
+}
+
+async fn dispatch(
+    body: TurnBody,
+    state: Arc<HttpState>,
+    id: &str,
+    resume: Option<super::runs::ResumeRequest>,
+) -> Resp {
     let requested_model =
         match turn_model_selection(body.provider.as_deref(), body.model.as_deref()) {
             Ok(selection) => selection,
@@ -303,6 +343,9 @@ pub(super) async fn post(
     }
 
     if handle.busy.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if resume.is_some() {
+            return bad_request("run is already active");
+        }
         // Already running a turn for this chat — try to enqueue the
         // new POST instead of rejecting it.  When the in-flight turn
         // ends, the spawned task drains the queue and runs one more
@@ -310,6 +353,34 @@ pub(super) async fn post(
         // queue again and the loop repeats.  Persisted to disk so a
         // restart mid-turn doesn't drop messages the user typed.
         return enqueue_turn(&handle, body).await;
+    }
+    // Reject replacing a saved continuation before touching its transcript.
+    let preflight = (|| -> crate::Result<()> {
+        use crate::agent::continuation::{RunCheckpoint, RunState};
+        let record = state
+            .history
+            .as_ref()
+            .map(|h| RunCheckpoint::load(h.as_ref(), id))
+            .transpose()?
+            .flatten();
+        match (record, resume.as_ref()) {
+            (Some(record), Some(request)) => {
+                record.validate_resume(&request.run_id, request.answer.as_ref())
+            }
+            (None, Some(_)) => Err(crate::DysonError::Llm("no saved run to resume".into())),
+            (Some(record), None) if !matches!(record.cursor.state, RunState::Finished { .. }) => {
+                Err(crate::DysonError::Llm(
+                    "resume or cancel the unfinished run before starting another turn".into(),
+                ))
+            }
+            _ => Ok(()),
+        }
+    })();
+    if let Err(error) = preflight {
+        handle
+            .busy
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        return bad_request(&error.sanitized_message());
     }
     if state.is_quiesced() {
         handle
@@ -362,22 +433,39 @@ pub(super) async fn post(
 
     let history = state.history.clone();
 
+    if let Some(request) = &resume {
+        if let Some(answer) = &request.answer {
+            let saved = (|| -> crate::Result<()> {
+                let store = history
+                    .as_ref()
+                    .ok_or_else(|| crate::DysonError::Llm("durable history is required".into()))?;
+                let mut record =
+                    crate::agent::continuation::RunCheckpoint::load(store.as_ref(), id)?
+                        .ok_or_else(|| crate::DysonError::Llm("missing continuation".into()))?;
+                record.accept_answer(store.as_ref(), id, answer)
+            })();
+            if let Err(error) = saved {
+                handle
+                    .busy
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                return bad_request(&error.sanitized_message());
+            }
+        }
+    }
+
     let checkpoint_message = accepted_turn_checkpoint_message(&prompt, &attachments);
-    let checkpoint_saved = match checkpoint_accepted_turn(
-        &handle,
-        history.as_ref(),
-        id,
-        &checkpoint_message,
-    )
-    .await
-    {
-        Ok(saved) => saved,
-        Err(e) => {
-            tracing::warn!(error = %e, chat_id = %id, "failed to checkpoint accepted user turn");
-            handle
-                .busy
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-            return internal_error("failed to persist accepted turn");
+    let checkpoint_saved = if resume.is_some() {
+        false
+    } else {
+        match checkpoint_accepted_turn(&handle, history.as_ref(), id, &checkpoint_message).await {
+            Ok(saved) => saved,
+            Err(e) => {
+                tracing::warn!(error = %e, chat_id = %id, "failed to checkpoint accepted user turn");
+                handle
+                    .busy
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                return internal_error("failed to persist accepted turn");
+            }
         }
     };
 
@@ -626,9 +714,11 @@ pub(super) async fn post(
         // Cancellation aborts the current sub-turn and exits the loop —
         // the queue stays persisted so the next POST or restart picks
         // it up.
+        let mut resume = resume;
         let mut next_prompt = prompt;
         let mut next_attachments = attachments;
         loop {
+            let mut suspended = false;
             let result = tokio::select! {
                 biased;
                 _ = cancel_for_select.cancelled() => {
@@ -639,6 +729,13 @@ pub(super) async fn post(
                     Ok(String::new())
                 }
                 r = async {
+                    if let Some(request) = resume.take() {
+                        let outcome = agent.resume_detailed(&request.run_id, request.answer, &mut output).await?;
+                        suspended = matches!(outcome.status, crate::agent::protocol::RunStatus::Paused | crate::agent::protocol::RunStatus::WaitingForInput);
+                        let text = outcome.final_text.clone();
+                        chat_handle.emit(SseEvent::RunOutcome { outcome });
+                        return Ok(text);
+                    }
                     if let Some(text) = maybe_execute_slash_turn(
                         agent,
                         &mut output,
@@ -657,6 +754,7 @@ pub(super) async fn post(
                         };
                         tracing::info!(chat_id = %chat_id, ok = r.is_ok(), "TURN_WORKER: agent.run returned");
                         r.map(|outcome| {
+                            suspended = matches!(outcome.status, crate::agent::protocol::RunStatus::Paused | crate::agent::protocol::RunStatus::WaitingForInput);
                             let text = outcome.final_text.clone();
                             chat_handle.emit(SseEvent::RunOutcome { outcome });
                             text
@@ -697,6 +795,16 @@ pub(super) async fn post(
             // Cancellation: stop draining; leave the queue alone for
             // the next POST or restart to pick up.
             if cancel_for_select.is_cancelled() {
+                if let Some(store) = history.as_ref() {
+                    if let Err(error) =
+                        crate::agent::continuation::RunCheckpoint::cancel(store.as_ref(), &chat_id)
+                    {
+                        tracing::warn!(%error, "failed to cancel saved run");
+                    }
+                }
+                break;
+            }
+            if suspended {
                 break;
             }
 

@@ -1,6 +1,7 @@
 //! Agent-harness contracts with no dependency on providers or controllers.
 
 mod call;
+pub mod continuation;
 mod contracts;
 pub mod protocol;
 pub mod scheduler;

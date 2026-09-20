@@ -8,6 +8,11 @@
 //! `auth` owns the per-instance configure secret; `config` owns document patches.
 //! State replay, skill management, lifecycle, and cost backfill have separate
 //! endpoint modules. The outer HTTP router retains bearer and CSRF enforcement.
+//!
+//! Managed snapshots boot with operator bootstrap bearer authentication.
+//! Configure pins a per-instance secret, installs the instance HTTP bearer,
+//! and persists only its hash. Native lifecycle routes independently require
+//! the pinned configure secret; ordinary APIs always require the HTTP bearer.
 
 use std::path::Path;
 
@@ -26,8 +31,18 @@ use super::super::state::HttpState;
 /// but small enough to swat away accidental large payloads.
 const MAX_CONFIGURE_BODY: usize = 64 * 1024;
 
+fn deserialize_http_bearer<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<crate::auth::Credential>, D::Error> {
+    Option::<String>::deserialize(d).map(|value| value.map(crate::auth::Credential::new))
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct ConfigureBody {
+    /// Inbound instance bearer, delivered only by authenticated Swarm configure.
+    /// Credential's Debug is redacted; only its Argon2 hash is persisted.
+    #[serde(default, deserialize_with = "deserialize_http_bearer")]
+    http_bearer: Option<crate::auth::Credential>,
     /// New employee name (e.g. "PR reviewer for foo/bar").
     /// Folded into IDENTITY.md as `Name: <value>`.
     #[serde(default)]
@@ -270,6 +285,10 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     {
         return bad_request("task must be mission text; use identity_doc for full IDENTITY.md");
     }
+    let http_auth = match auth::prepare_http_auth(body.http_bearer.as_ref(), state).await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     let snapshot = state.settings_snapshot();
 
     // 1. Workspace: rewrite IDENTITY.md from the new fields.  Empty
@@ -347,6 +366,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         match patch_config_once(
             path,
             ConfigureConfigPatch {
+                http_auth_hash: http_auth.as_ref().map(|(hash, _)| hash.as_str()),
                 provider_name: body.provider_name.as_deref(),
                 models: if want_models {
                     Some(body.models.as_slice())
@@ -398,6 +418,10 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     } else {
         AppliedConfigPatch::default()
     };
+    // Persist first; do not acknowledge an auth change that a restart loses.
+    if let Some((_, auth)) = http_auth {
+        state.install_http_auth(auth);
+    }
     let provider_changed = config_patch.provider_changed;
     let model_selection_changed = config_patch.model_selection_changed;
     let models_changed = provider_changed && want_models;
@@ -406,7 +430,8 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     let mcp_changed = config_patch.mcp_changed;
     let telegram_changed = config_patch.telegram_changed;
 
-    let any_config_changed = provider_changed
+    let any_config_changed = config_patch.http_auth_changed
+        || provider_changed
         || model_selection_changed
         || image_changed
         || skills_changed
@@ -529,6 +554,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     };
     json_ok(&serde_json::json!({
         "ok": true,
+        "http_auth_applied": body.http_bearer.is_some(),
         "identity_updated": identity_changed,
         "models_updated": models_changed,
         "models_applied": models_applied,
@@ -678,7 +704,7 @@ fn extract_section(body: &str, name: &str) -> Option<String> {
 }
 
 mod auth;
-use auth::authorize_configure;
+pub(super) use auth::authorize_configure;
 pub use auth::preseed_configure_hash;
 
 mod config;

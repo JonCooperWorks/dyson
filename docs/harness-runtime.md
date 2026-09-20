@@ -16,8 +16,79 @@ terminal status, final text, and per-run token/call usage. Existing callers can
 continue using `Agent::run`, which returns the final text.
 
 Terminal status is one of `completed`, `cancelled`, `budget_exceeded`,
-`iteration_limit`, `partial`, or `failed`. Callers must not infer success from
-a non-empty string.
+`iteration_limit`, `partial`, or `failed`. `paused` and `waiting_for_input`
+are nonterminal outcomes: the caller can release its worker and later resume
+the same run. Callers must not infer success from a non-empty string.
+
+## Durable continuation and human input
+
+With a `ChatHistory` backend attached, each run writes an atomic, versioned
+`harness/continuation.json`. It contains its run identity, model iteration,
+selected tool calls (including their arguments), transcript, token usage,
+per-tool limits, repeated-failure counters, continuation text, and configuration
+fingerprints. The pure `RunCursor::reduce` state machine owns transitions;
+the agent executes effects between persisted boundaries. The existing task
+ledger remains authoritative for shared task evidence, receipts, and budgets.
+
+Pause is cooperative: it takes effect before the next model request or tool
+phase. A tool already executing is allowed to finish. Before any tool starts,
+its invocation is saved; its complete result is saved before delivery to the
+transcript/controller. On resume, committed results are reused. A journaled
+start with no observed outcome requires operator reconciliation; it is never
+silently re-executed. If the tool finished but its result receipt was lost,
+the agent receives an explicit recovery result directing it to task evidence.
+Direct skill commands use the same invocation receipts. Resuming an interrupted
+command recovers its result without starting a model turn.
+
+The HTTP API exposes these authenticated, CSRF-protected controls:
+
+| Method and path | Body / behavior |
+|---|---|
+| `GET /api/conversations/:id/run` | Current saved run, phase, pending tool names, and human question |
+| `POST /api/conversations/:id/pause` | `{"run_id":"run-…"}`; request pause at the next boundary |
+| `POST /api/conversations/:id/resume` | `{"run_id":"run-…"}`; resume the same saved run |
+| `POST /api/conversations/:id/signal` | Run ID plus `answer` below; persist the answer and resume |
+| `POST /api/conversations/:id/cancel` | Cancel active or suspended work |
+
+For example, answering the default text form:
+
+```json
+{
+  "run_id": "run-…",
+  "answer": {
+    "request_id": "tool-call-id",
+    "action": "accept",
+    "content": { "answer": "main" }
+  }
+}
+```
+
+`request_human_input` takes `question` and an optional object `schema` with
+primitive fields, enums, required fields, string lengths, and numeric bounds.
+It saves the request and yields without holding a worker or a five-minute
+timer. The existing elicitation UI lists these requests alongside MCP forms,
+and answering a durable form uses the same signal path. Answers are validated
+on the server and persisted before acknowledgement. Duplicate or stale answers
+cannot launch another run. Declining/cancelling a question withholds the rest
+of its selected tool batch, allowing the model to reconsider the plan.
+
+Controllers using `run_detailed` with attached history also accept `/resume`,
+`/answer {"answer":"main"}`, and `/decline`. Resume does not add another user
+turn, reset usage/iteration limits, or allocate a new run ID. Existing elapsed
+task budgets continue to apply, including time spent paused. Changed model,
+prompt, tool schemas, or working directory must be restored before resumption.
+No boot-time auto-execution is performed: a caller supplies a resume/signal.
+An acknowledged answer survives a crash before dispatch and can be continued
+with `/resume` without answering again.
+
+These boundaries cover Dyson's native executor. CLI providers own their
+inner execution and do not receive the native human-input tool. Arbitrary MCP
+server-originated requests still depend on that server's live protocol session;
+the durable tool is a separate option for restart-safe human interaction.
+Subagents return detailed run outcomes in metadata, and the parent receives
+the status, warnings, and task evidence contract in its tool-result context.
+Incomplete children are never labelled successful solely because they returned
+text. Raw report text remains available to staged report parsers.
 
 ## Durable execution journal
 

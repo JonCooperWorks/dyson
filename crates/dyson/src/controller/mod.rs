@@ -160,7 +160,7 @@ pub use log_tail::read_log_tail;
 
 mod output;
 pub use output::Output;
-pub(crate) use output::completed_text;
+pub(crate) use output::{completed_text, interactive_text};
 
 #[cfg(test)]
 mod tests;

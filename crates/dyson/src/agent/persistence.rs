@@ -34,6 +34,13 @@ impl Agent {
     }
 
     pub(crate) fn begin_run_protocol(&mut self) -> crate::error::Result<()> {
+        self.begin_run_protocol_with_mode(false)
+    }
+
+    pub(super) fn begin_run_protocol_with_mode(
+        &mut self,
+        direct: bool,
+    ) -> crate::error::Result<()> {
         self.tool_context.harness.ensure_loaded()?;
         if let Some(input) = self
             .conversation
@@ -66,6 +73,7 @@ impl Agent {
         self.repeated_observations.clear();
         self.last_run_status = RunStatus::Partial;
         self.try_emit_run_event(RunEventKind::RunStarted)?;
+        self.begin_continuation(direct)?;
         let unresolved = self.unresolved_tool_outcomes()?;
         if !unresolved.is_empty() {
             let warning = format!(
@@ -118,9 +126,34 @@ impl Agent {
         {
             self.last_run_status = RunStatus::Partial;
         }
-        if let Err(error) = self.try_emit_run_event(RunEventKind::RunFinished {
-            status: self.last_run_status,
-        }) {
+        let suspended = matches!(
+            self.last_run_status,
+            RunStatus::Paused | RunStatus::WaitingForInput
+        ) && result.is_ok();
+        let saved = if suspended {
+            self.checkpoint_run()
+        } else {
+            self.transition(super::continuation::Transition::Finish(
+                self.last_run_status,
+            ))
+        };
+        if let Err(error) = saved {
+            self.last_run_status = RunStatus::Failed;
+            self.run_warnings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(format!("Run checkpoint failed: {error}"));
+        }
+        let event = if suspended {
+            RunEventKind::RunSuspended {
+                status: self.last_run_status,
+            }
+        } else {
+            RunEventKind::RunFinished {
+                status: self.last_run_status,
+            }
+        };
+        if let Err(error) = self.try_emit_run_event(event) {
             self.last_run_status = RunStatus::Failed;
             self.run_warnings
                 .lock()
@@ -136,16 +169,36 @@ impl Agent {
         tool_use_id: &str,
         resolution: &str,
     ) -> crate::error::Result<()> {
+        let backend = self
+            .history_backend
+            .as_ref()
+            .ok_or_else(|| crate::error::DysonError::Llm("No execution journal attached".into()))?;
+        Self::reconcile_stored_tool_outcome(
+            backend.store.clone(),
+            &backend.chat_id,
+            run_id,
+            tool_use_id,
+            resolution,
+        )?;
+        self.tool_context
+            .harness
+            .clear_pending(&format!("{}:{}", run_id.0, tool_use_id))
+    }
+
+    /// Recovery must work before a model or a live Agent has been constructed.
+    pub fn reconcile_stored_tool_outcome(
+        store: Arc<dyn ChatHistory>,
+        chat_id: &str,
+        run_id: &RunId,
+        tool_use_id: &str,
+        resolution: &str,
+    ) -> crate::error::Result<()> {
         if resolution.trim().is_empty() {
             return Err(crate::error::DysonError::Llm(
                 "A reconciliation requires evidence of the outcome".into(),
             ));
         }
-        let backend = self
-            .history_backend
-            .as_ref()
-            .ok_or_else(|| crate::error::DysonError::Llm("No execution journal attached".into()))?;
-        let events = backend.store.load_run_events(&backend.chat_id)?;
+        let events = store.load_run_events(chat_id)?;
         if !super::protocol::unresolved_tool_outcomes(&events)
             .iter()
             .any(|t| &t.run_id == run_id && t.tool_use_id == tool_use_id)
@@ -161,21 +214,26 @@ impl Agent {
             .max()
             .unwrap_or(0)
             + 1;
-        backend.store.append_run_event(
-            &backend.chat_id,
+        store.append_run_event(
+            chat_id,
             &RunEvent::new(
                 sequence,
                 run_id.clone(),
-                self.conversation.turn_count,
+                events
+                    .iter()
+                    .filter(|e| &e.run_id == run_id)
+                    .map(|e| e.turn)
+                    .max()
+                    .unwrap_or(0),
                 RunEventKind::ToolReconciled {
                     tool_use_id: tool_use_id.into(),
                     resolution: resolution.into(),
                 },
             ),
         )?;
-        self.tool_context
-            .harness
-            .clear_pending(&format!("{}:{}", run_id.0, tool_use_id))?;
+        let runtime = super::task::TaskRuntime::default();
+        runtime.attach(store, chat_id.into());
+        runtime.clear_pending(&format!("{}:{}", run_id.0, tool_use_id))?;
         super::task::reconcile_lease(&format!("{}:{}", run_id.0, tool_use_id));
         Ok(())
     }

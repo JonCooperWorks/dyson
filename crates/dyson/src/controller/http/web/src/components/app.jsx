@@ -12,6 +12,7 @@
 import React, { useState, useEffect, useRef, useCallback, useLayoutEffect, Suspense, lazy } from 'react';
 import { Icon } from './icons.jsx';
 import { Turn, Composer, RunStatusStrip, EmptyState } from './turns.jsx';
+import { RunControls } from './run-controls.jsx';
 import { TopBar, LeftRail } from './views.jsx';
 import { CommandPalette } from './command-palette.jsx';
 import { useApi } from '../hooks/useApi.js';
@@ -400,10 +401,76 @@ function ConversationView({ conv, toolRef, setToolRef }) {
   const slashCommands = useAppState(s => s.commands);
   const scrollRef = useRef(null);
   const pinnedToBottomRef = useRef(true);
+  const [savedRun, setSavedRun] = useState(null);
+  const [runControlError, setRunControlError] = useState('');
+  const [pendingControl, setPendingControl] = useState('');
+  const [showLatest, setShowLatest] = useState(false);
+
+  useEffect(() => {
+    if (!conv || !client.getRun) return;
+    let active = true;
+    let previousState = null;
+    const refresh = () => client.getRun(conv).then(async run => {
+      if (!active) return;
+      setSavedRun(run);
+      if (run.state?.state !== 'running') setPendingControl('');
+      const stateKey = `${run.run_id}:${run.state?.state}:${run.answer_received}`;
+      const changed = previousState !== stateKey;
+      previousState = stateKey;
+      // Answers can arrive from another surface. Reattach or hydrate even if
+      // the resumed run finished before this tab could open an SSE stream.
+      if (changed || (run.state?.state === 'running' && !getSession(conv)?.running)) {
+        const data = await client.load(conv);
+        if (!active) return;
+        if (data.live && !getSession(conv)?.running) {
+          hydrateTranscript(conv, data);
+          getResources(conv).es = attachLiveStream(conv, client);
+        } else if (!data.live) {
+          getResources(conv).es?.close();
+          getResources(conv).es = null;
+          hydrateTranscript(conv, data);
+          updateSession(conv, s => settleRun(s, { done: true }));
+        }
+      }
+    }).catch(() => { if (active) setSavedRun(null); });
+    setSavedRun(null);
+    setRunControlError('');
+    setPendingControl('');
+    setShowLatest(false);
+    refresh();
+    const timer = setInterval(refresh, 2000);
+    return () => { active = false; clearInterval(timer); };
+  }, [conv, client]);
+
+  const controlRun = async (action) => {
+    if (pendingControl) return;
+    setPendingControl(action);
+    setRunControlError('');
+    try {
+      if (action === 'pause') await client.pauseRun(conv, savedRun.run_id);
+      else if (action === 'cancel') await client.cancel(conv);
+      else {
+        getResources(conv).es?.close();
+        getResources(conv).es = attachLiveStream(conv, client);
+        await client.resumeRun(conv, savedRun.run_id);
+      }
+      setSavedRun(await client.getRun(conv));
+      if (action !== 'pause') setPendingControl('');
+    } catch (error) {
+      setPendingControl('');
+      setRunControlError(error.message);
+      if (action === 'resume') {
+        getResources(conv).es?.close();
+        getResources(conv).es = null;
+        mutate(s => settleRun(s, { done: false }));
+      }
+    }
+  };
 
   const handleTranscriptScroll = useCallback((event) => {
     const el = event.currentTarget;
     pinnedToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 32;
+    setShowLatest(!pinnedToBottomRef.current);
   }, []);
 
   // URL → state: when the hash points at a specific tool ref (deep-
@@ -464,6 +531,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     if (shouldForceScroll || pinnedToBottomRef.current) {
       el.scrollTop = el.scrollHeight;
       pinnedToBottomRef.current = true;
+      setShowLatest(false);
     }
     if (shouldForceScroll) {
       updateSession(conv, s => s.justScrollOnNextRender ? { ...s, justScrollOnNextRender: false } : s);
@@ -566,11 +634,17 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     );
   };
 
-  const onCancel = () => {
-    if (conv) client.cancel(conv).catch(() => {});
-    const r = getResources(conv);
-    if (r.es) { try { r.es.close(); } catch { /* already closed */ } r.es = null; }
-    mutate(s => settleRun(s, { done: false }));
+  const onCancel = async () => {
+    if (!conv) return;
+    setRunControlError('');
+    try {
+      await client.cancel(conv);
+      const r = getResources(conv);
+      if (r.es) { r.es.close(); r.es = null; }
+      mutate(s => settleRun(s, { done: false }));
+    } catch (error) {
+      setRunControlError(`Could not cancel the run. ${error.message}`);
+    }
   };
 
   const onRate = (turnIndex, emoji) => {
@@ -605,7 +679,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     <div className={`centre${empty ? ' empty' : ''}`}>
       <div className="aurora-sweep" aria-hidden="true"/>
       <div className="context">
-        <div className="crumbs"><span className="c-leaf">{headTitle}</span></div>
+        <div className="crumbs"><span className="context-label">Conversation</span><span className="c-leaf" title={headTitle}>{convTitle || 'New conversation'}</span></div>
         <div className="right">
           <McpSummary servers={mcpServers}/>
           <button className="btn sm ghost" title="Download ShareGPT export" aria-label="Download ShareGPT export"
@@ -616,7 +690,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
       </div>
       <div className="transcript" ref={scrollRef} onScroll={handleTranscriptScroll}>
         <div className="inner">
-          {empty ? <EmptyState/> : session.liveTurns.map((t, i) => (
+          {empty ? <EmptyState onSelectPrompt={text => { mutate(s => setComposerDraft(s, { text })); scrollRef.current?.closest('.centre')?.querySelector('.composer-input')?.focus(); }}/> : session.liveTurns.map((t, i) => (
             <Turn key={i} turn={t} tools={tools}
                   onOpenTool={handleOpenTool} expandedTools={session.panels}
                   chatId={conv}
@@ -626,7 +700,14 @@ function ConversationView({ conv, toolRef, setToolRef }) {
           ))}
         </div>
       </div>
-      <ComposerDock running={session.running} phase={session.phase} tname={session.tname}
+      {showLatest && !empty && <div className="latest-wrap"><button className="btn latest-button" onClick={() => {
+        const el = scrollRef.current;
+        if (el) { el.scrollTop = el.scrollHeight; pinnedToBottomRef.current = true; setShowLatest(false); }
+      }}><Icon name="arr-down" size={14}/> Back to latest</button></div>}
+      <ComposerDock running={session.running}
+                    blocked={!!savedRun && savedRun.state?.state !== 'finished' && !session.running}
+                    controls={<><RunControls run={savedRun} running={session.running} pending={pendingControl} onAction={controlRun}/>
+                      {runControlError && <div className="run-control-error" role="alert">{runControlError}</div>}</>} phase={session.phase} tname={session.tname}
                     runStartedAt={session.runStartedAt}
                     draftText={session.draftText}
                     draftAttachments={session.draftAttachments}
@@ -719,6 +800,8 @@ function ConversationShell({ onSend, onCancel, children }) {
 
 function ComposerDock({
   running,
+  blocked = false,
+  controls,
   phase,
   tname,
   runStartedAt,
@@ -737,7 +820,8 @@ function ComposerDock({
 }) {
   return (
     <div className="composer-dock">
-      <div style={{width:'100%',maxWidth:820,display:'flex',flexDirection:'column',alignItems:'stretch'}}>
+      <div className="composer-dock-inner">
+        {controls}
         {running && (
           <RunStatusStrip
             phase={phase}
@@ -751,6 +835,7 @@ function ComposerDock({
           onSend={onSend}
           onCancel={onCancel}
           running={!!running}
+          blocked={blocked}
           autoFocusKey={autoFocusKey}
           draftText={draftText}
           draftAttachments={draftAttachments}
@@ -759,6 +844,7 @@ function ComposerDock({
           nextRunModel={nextRunModel}
           onQueueModeChange={onQueueModeChange}
           slashCommands={slashCommands}/>
+        <div className="composer-hint">{blocked ? 'Resume or cancel the saved run before sending a new message.' : running ? 'Follow-ups are queued. Your agent will see them as it works.' : <>Enter to send <span>·</span> Shift + Enter for a new line</>}</div>
       </div>
     </div>
   );

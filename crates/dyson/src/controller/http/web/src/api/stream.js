@@ -52,7 +52,7 @@ export function dispatchStreamEvent(msg, callbacks) {
     case 'compacting':  callbacks.onCompacting && callbacks.onCompacting(msg); return true;
     case 'run_outcome':
       callbacks.onRunOutcome?.(msg.outcome);
-      if (msg.outcome?.status && msg.outcome.status !== 'completed') {
+      if (msg.outcome?.status && !['completed', 'paused', 'waiting_for_input'].includes(msg.outcome.status)) {
         callbacks.onError?.(`Agent stopped: ${msg.outcome.status}`);
       }
       return true;

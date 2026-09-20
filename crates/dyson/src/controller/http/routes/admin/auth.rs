@@ -37,7 +37,7 @@ static CONFIGURE_VERIFY_CACHE: std::sync::OnceLock<
     std::sync::Mutex<HashMap<ConfigureVerifyCacheKey, Instant>>,
 > = std::sync::OnceLock::new();
 
-pub(super) async fn authorize_configure(
+pub(in crate::controller::http::routes) async fn authorize_configure(
     headers: &hyper::HeaderMap,
     state: &HttpState,
 ) -> Option<Resp> {
@@ -79,7 +79,19 @@ pub(super) async fn authorize_configure(
                     }
                     true
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // No trusted per-instance preseed/pin: managed warmup must
+                    // authenticate the operator bootstrap bearer before TOFU.
+                    if state
+                        .auth_snapshot()
+                        .validate_request(headers)
+                        .await
+                        .is_err()
+                    {
+                        return Some(unauthorized(state));
+                    }
+                    false
+                }
                 Err(e) => {
                     return Some(bad_request(&format!(
                         "read {}: {e}",
@@ -145,6 +157,39 @@ fn configure_secret_eq(a: &str, b: &str) -> bool {
 enum ConfigureHashOutcome {
     Hashed(String),
     Failed(String),
+}
+
+/// Validate and hash the instance HTTP bearer a configure call delivers.
+/// Managed (Swarm-bearer) instances must always receive one.
+pub(super) async fn prepare_http_auth(
+    http_bearer: Option<&crate::auth::Credential>,
+    state: &HttpState,
+) -> Result<Option<(String, std::sync::Arc<dyn crate::auth::Auth>)>, Resp> {
+    if matches!(
+        state.auth_mode,
+        crate::controller::http::wire::AuthMode::SwarmBearer
+    ) && http_bearer.is_none()
+    {
+        return Err(bad_request("managed configure requires http_bearer"));
+    }
+    let Some(bearer) = http_bearer else {
+        return Ok(None);
+    };
+    let bearer = bearer.expose().to_owned();
+    if bearer.len() < 16 || bearer.len() > 1024 || bearer.trim() != bearer {
+        return Err(bad_request(
+            "http_bearer must be an instance credential (16-1024 bytes)",
+        ));
+    }
+    let hash = match hash_configure_secret(bearer).await {
+        ConfigureHashOutcome::Hashed(hash) => hash,
+        ConfigureHashOutcome::Failed(_) => {
+            return Err(bad_request("HTTP credential hashing failed"));
+        }
+    };
+    let auth = crate::auth::HashedBearerAuth::from_phc(hash.clone())
+        .map_err(|_| bad_request("invalid HTTP credential hash"))?;
+    Ok(Some((hash, std::sync::Arc::new(auth))))
 }
 
 async fn hash_configure_secret(secret: String) -> ConfigureHashOutcome {
