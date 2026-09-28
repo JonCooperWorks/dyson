@@ -1044,7 +1044,12 @@ fn spawn_title_generation(
     client: RateLimitedHandle<Box<dyn LlmClient>>,
 ) {
     tokio::spawn(async move {
-        match generate_title(client, model, prompt).await {
+        // Scoped like the turn itself, so the title call carries this chat's
+        // `x-dyson-conversation-id` to Swarm as every other call of it does.
+        let title = crate::telemetry::CONVERSATION_ID
+            .scope(Some(chat_id.clone()), generate_title(client, model, prompt))
+            .await;
+        match title {
             Ok(title) => {
                 handle.set_title(title.clone());
                 if let Ok(mut titles) = state.titles.lock() {
