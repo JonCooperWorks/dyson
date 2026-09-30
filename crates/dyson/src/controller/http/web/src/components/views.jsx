@@ -136,7 +136,6 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [switchError, setSwitchError] = useState('');
   // Catalogue is null until the menu is first opened, then records both the
   // normalized entries and the provider that owns them. The latter matters
   // while Codex is active: catalogue picks must switch back through Swarm.
@@ -171,7 +170,6 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
 
   const switchTo = async (provider, modelName) => {
     setBusy(true);
-    setSwitchError('');
     try {
       const subscription = SUBSCRIPTION_PROVIDERS[provider];
       if (subscription && typeof client.getProviderAuth === 'function'
@@ -191,13 +189,7 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
         await client.postModel(provider, modelName);
         switchProviderModel(provider, modelName);
       }
-    } catch (e) {
-      // Keep the menu open on a refusal so the reason sits beside the list.
-      console.error(e);
-      setSwitchError(e?.message || 'The model could not be switched.');
-      setBusy(false);
-      return;
-    }
+    } catch (e) { console.error(e); }
     setBusy(false);
     setMenuOpen(false);
   };
@@ -239,7 +231,7 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
         <ThemeToggle/>
         {model && (
           <button type="button" className={`select provider-select backend-${execution.tone}`}
-                  onClick={() => { if (!canSwitch) return; setSwitchError(''); setMenuOpen(o => !o); }}
+                  onClick={() => canSwitch && setMenuOpen(o => !o)}
                   disabled={!canSwitch}
                   aria-haspopup="menu" aria-expanded={menuOpen}
                   aria-label={`${canSwitch ? 'Switch model' : 'Active model'}. Execution backend ${execution.label}, ${execution.detail}. Model ${nextRunModel ? nextRunModel.model : model}`}
@@ -257,7 +249,6 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
                      activeProvider={activeProvider}
                      activeModel={model}
                      nextRunModel={nextRunModel}
-                     error={switchError}
                      onPick={switchTo} onDismiss={() => setMenuOpen(false)}/>
         )}
       </div>
@@ -290,7 +281,7 @@ function fmtCtx(n) {
 // named in dyson.json.  A small "current" group keeps the configured /
 // active model one click away; every routed catalogue entry remains
 // scrollable. CSS content-visibility keeps the long list cheap to paint.
-function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel, nextRunModel, error, onPick, onDismiss }) {
+function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel, nextRunModel, onPick, onDismiss }) {
   useEscapeKey(onDismiss);
   const [query, setQuery] = useState('');
   const q = query.trim().toLowerCase();
@@ -328,7 +319,6 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
                  aria-label="Search models"
                  onChange={e => setQuery(e.target.value)}/>
         </div>
-        {error ? <div className="mm-error" role="alert">{error}</div> : null}
 
         {configShown.length > 0 && (
           <div className="mm-section">
