@@ -797,6 +797,16 @@
   z-index: 20;
 }
 /* Searchable catalogue picker (replaces the provider-tree menu). */
+.modelmenu .mm-error {
+  margin: 6px 8px 2px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger, #e5484d) 35%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger, #e5484d) 8%, transparent);
+  color: var(--danger, #e5484d);
+  font-size: 12px;
+  line-height: 1.4;
+}
 .modelmenu .mm-search {
   position: sticky;
   top: 0;

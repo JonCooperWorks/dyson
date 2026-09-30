@@ -78,12 +78,18 @@ pub(super) async fn handle_callback_query(
             model,
             "telegram model switch was not persisted by swarm"
         );
-        let _ = bot
-            .send_message(
-                chat_id,
-                "Swarm could not save that model selection; the active model was not changed.",
+        let message = if matches!(
+            error,
+            crate::swarm_state_sync::ModelSelectionError::NotAllowed
+        ) {
+            format!(
+                "This agent may not use {model}. Its allowed models are set in Swarm; the active model was not changed."
             )
-            .await;
+        } else {
+            "Swarm could not save that model selection; the active model was not changed."
+                .to_owned()
+        };
+        let _ = bot.send_message(chat_id, &message).await;
         return;
     }
 

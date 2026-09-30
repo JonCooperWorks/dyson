@@ -101,12 +101,36 @@ pub fn config_snapshot() -> Option<StateSyncConfig> {
 /// Persist the active provider/model in Swarm before a managed Dyson reports
 /// a model switch as successful. Local/non-Swarm Dysons have no state-sync
 /// config and keep their existing file-only behavior.
-pub async fn persist_model_selection(provider: &str, model: &str) -> Result<bool, String> {
+/// Why Swarm did not save a model switch.
+#[derive(Debug)]
+pub enum ModelSelectionError {
+    /// The model is outside the agent's allowed models, set in Swarm.
+    NotAllowed,
+    /// Anything else: transport, contract or server trouble.
+    Failed(String),
+}
+
+impl std::fmt::Display for ModelSelectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAllowed => f.write_str("model is not in the agent's allowed models"),
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+pub async fn persist_model_selection(
+    provider: &str,
+    model: &str,
+) -> Result<bool, ModelSelectionError> {
     let Some(config) = config_snapshot() else {
         return Ok(false);
     };
-    let url = model_selection_url(&config.url)
-        .ok_or_else(|| "state-sync URL does not match the managed Dyson contract".to_owned())?;
+    let url = model_selection_url(&config.url).ok_or_else(|| {
+        ModelSelectionError::Failed(
+            "state-sync URL does not match the managed Dyson contract".to_owned(),
+        )
+    })?;
     let response = crate::http::client()
         .post(url)
         .bearer_auth(&config.token)
@@ -116,14 +140,13 @@ pub async fn persist_model_selection(provider: &str, model: &str) -> Result<bool
         }))
         .send()
         .await
-        .map_err(|e| format!("model selection request failed: {e}"))?;
-    if response.status().is_success() {
-        Ok(true)
-    } else {
-        Err(format!(
-            "swarm rejected model selection: {}",
-            response.status()
-        ))
+        .map_err(|e| ModelSelectionError::Failed(format!("model selection request failed: {e}")))?;
+    match response.status() {
+        status if status.is_success() => Ok(true),
+        reqwest::StatusCode::FORBIDDEN => Err(ModelSelectionError::NotAllowed),
+        status => Err(ModelSelectionError::Failed(format!(
+            "swarm rejected model selection: {status}"
+        ))),
     }
 }
 

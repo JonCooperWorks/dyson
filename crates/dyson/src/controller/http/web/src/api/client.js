@@ -292,7 +292,12 @@ export class DysonClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider, model }),
     });
-    if (!r.ok) throw new Error(`set model failed: ${r.status}`);
+    if (!r.ok) {
+      // Swarm's refusal (e.g. a model outside the agent's allowed models)
+      // carries a sentence worth showing; fall back to the status.
+      const body = await r.json().catch(() => null);
+      throw new Error(body?.error || `set model failed: ${r.status}`);
+    }
     return r;
   }
 

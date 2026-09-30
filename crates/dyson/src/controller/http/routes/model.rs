@@ -11,7 +11,7 @@ use std::sync::Arc;
 use hyper::Request;
 
 use super::super::responses::{
-    Resp, bad_request, json_ok, not_found, read_json_capped, service_unavailable,
+    Resp, bad_request, json_error, json_ok, not_found, read_json_capped, service_unavailable,
 };
 use super::super::state::{ChatHandle, HttpState, RuntimeModelSelection};
 use super::super::wire::{MAX_SMALL_BODY, ModelSwitchBody};
@@ -64,6 +64,18 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: Arc<HttpSta
             model = selection.model(),
             "model switch was not persisted by swarm"
         );
+        if matches!(
+            error,
+            crate::swarm_state_sync::ModelSelectionError::NotAllowed
+        ) {
+            return json_error(
+                hyper::StatusCode::FORBIDDEN,
+                &format!(
+                    "This agent may not use {}. Its allowed models are set in Swarm; the active model was not changed.",
+                    selection.model()
+                ),
+            );
+        }
         return service_unavailable(
             "Swarm could not save the model selection; the active model was not changed",
         );
