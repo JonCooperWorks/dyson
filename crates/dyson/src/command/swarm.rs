@@ -241,7 +241,10 @@ pub async fn run() -> Result<()> {
 /// key; `SWARM_SSH_PUBLIC_KEY` is the public line). Mirrors the sidecar's
 /// `seed_ssh_key_from_env`. Idempotent: never clobbers an existing key.
 fn seed_ssh_key_from_env() -> std::io::Result<()> {
-    let private_b64 = std::env::var("SWARM_SSH_PRIVATE_KEY_B64").unwrap_or_default();
+    let private_b64 = private_key_b64(
+        std::env::var("SWARM_SSH_PRIVATE_KEY_B64").ok(),
+        std::env::var("SWARM_SECRETS_DIR").ok(),
+    );
     if private_b64.trim().is_empty() {
         return Ok(());
     }
@@ -249,6 +252,25 @@ fn seed_ssh_key_from_env() -> std::io::Result<()> {
     // dyson runs as root in the cube; ssh/git read $HOME/.ssh.
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
     seed_ssh_key(Path::new(&home), &private_b64, &public)
+}
+
+/// The SSH private key, base64. The env envelope wins (Cube and Incus
+/// deliver it there, and older swarms only ever do); when it is absent,
+/// a Kubernetes sandbox mounts it as a 0400 file named after the variable
+/// under `SWARM_SECRETS_DIR`, so it never sits in every process's env.
+/// Only that one fixed file name is read.
+fn private_key_b64(env_value: Option<String>, secrets_dir: Option<String>) -> String {
+    if let Some(value) = env_value.filter(|v| !v.trim().is_empty()) {
+        return value;
+    }
+    secrets_dir
+        .map(|dir| dir.trim().to_owned())
+        .filter(|dir| !dir.is_empty())
+        .and_then(|dir| {
+            std::fs::read_to_string(Path::new(&dir).join("SWARM_SSH_PRIVATE_KEY_B64")).ok()
+        })
+        .map(|value| value.trim().to_owned())
+        .unwrap_or_default()
 }
 
 fn seed_ssh_key(home_dir: &Path, private_b64: &str, public: &str) -> std::io::Result<()> {
@@ -507,6 +529,25 @@ mod tests {
         // Idempotent: a second seed with a different key does not overwrite.
         seed_ssh_key(home.path(), &B64.encode(b"OTHER"), "ssh-ed25519 ZZZ x").unwrap();
         assert_eq!(std::fs::read(&key).unwrap(), pem.as_bytes());
+    }
+
+    #[test]
+    fn private_key_prefers_env_and_falls_back_to_the_secrets_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_str().unwrap().to_owned();
+        // No env, no dir: nothing.
+        assert_eq!(private_key_b64(None, None), "");
+        // No env, dir without the file: nothing.
+        assert_eq!(private_key_b64(None, Some(d.clone())), "");
+        std::fs::write(dir.path().join("SWARM_SSH_PRIVATE_KEY_B64"), "ZmlsZQ==\n").unwrap();
+        // File fallback (trimmed).
+        assert_eq!(private_key_b64(None, Some(d.clone())), "ZmlsZQ==");
+        assert_eq!(
+            private_key_b64(Some("  ".into()), Some(d.clone())),
+            "ZmlsZQ=="
+        );
+        // Env still wins: Cube/Incus behaviour is unchanged.
+        assert_eq!(private_key_b64(Some("ZW52".into()), Some(d)), "ZW52");
     }
 
     #[test]
