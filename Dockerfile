@@ -16,13 +16,13 @@
 #
 # Build (uses prebuilt host binary at build/bin/dyson copied into context
 # as `dyson-bin`):
-#   docker build -t dyson:swarm -t 127.0.0.1:5000/dyson:swarm .
+#   docker build -t dyson:swarm -t ghcr.io/<owner>/dyson:swarm .
 #
 # Register with cube (resource flags come from deploy/config.env via
 # bring-up.sh's `register_cube_template` helper; the values shown here
 # are today's defaults):
 #   cubemastercli tpl create-from-image \
-#       --image 127.0.0.1:5000/dyson:swarm \
+#       --image ghcr.io/<owner>/dyson:swarm \
 #       --writable-layer-size 8G \
 #       --cpu 2000 \
 #       --memory 2000 \
