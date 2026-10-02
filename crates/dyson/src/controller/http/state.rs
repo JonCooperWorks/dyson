@@ -933,10 +933,10 @@ pub struct HttpState {
     /// (`dangerous_no_tls`) sets this to `false` so the cookie is
     /// still usable on `http://127.0.0.1:7878`.
     pub(crate) tls_enabled: bool,
-    /// Swarm latches this via `/api/admin/quiesce` before it snapshots
-    /// the cube for a template rotation. New `/turn` requests are
+    /// Swarm latches this via `/api/admin/quiesce` before it captures
+    /// the instance's state for a rotation. New `/turn` requests are
     /// refused while true so no fresh transcript write lands after the
-    /// snapshot moment and disappears during the pointer swap.
+    /// capture moment and disappears during the swap.
     pub(crate) quiesced: std::sync::atomic::AtomicBool,
 }
 
@@ -951,10 +951,9 @@ pub(crate) struct SseTicket {
 }
 
 /// Per-process artefact-ingest target.  Pushed by swarm via
-/// `/api/admin/configure` (Stage 8 posture: cube's snapshot/restore
-/// freezes `/proc/self/environ`, so the matching `SWARM_INGEST_*`
-/// env vars only land on the warmup-time process — same root cause
-/// the `proxy_token` / `proxy_base` configure-push exists for).
+/// `/api/admin/configure` (the process may start without the
+/// matching `SWARM_INGEST_*` env vars — same reason the
+/// `proxy_token` / `proxy_base` configure-push exists).
 ///
 /// Read by `SseOutput::send_artefact` on every emit; missing fields
 /// (URL or token empty) signal "ingest disabled" and the push is
@@ -1149,10 +1148,9 @@ impl HttpState {
             tls_enabled,
             titles: std::sync::Mutex::new(HashMap::new()),
             allowed_identity: std::sync::Mutex::new(allowed_identity),
-            // Warmup-time defaults from the env envelope.  Cube's
-            // snapshot/restore freezes /proc/self/environ at the
-            // template-build boot — these reads return empty strings
-            // for swarm-managed instances until /api/admin/configure
+            // Boot-time defaults from the env envelope.  These reads
+            // return empty strings when the process starts without
+            // `SWARM_INGEST_*` set, until /api/admin/configure
             // patches in the live values.  A non-swarm dyson (terminal
             // / telegram only) sees both empty and skips the push.
             ingest: {

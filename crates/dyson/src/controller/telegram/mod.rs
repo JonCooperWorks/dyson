@@ -291,7 +291,7 @@ impl super::Controller for TelegramController {
             };
 
             // A webhook-mode controller can sit parked on rx.recv()
-            // indefinitely. If swarm reconfigured the warmup cube while
+            // indefinitely. If swarm reconfigured the instance while
             // we were waiting, consume that settings update before the
             // first Telegram update builds a per-chat agent.
             if let Some(rx) = settings_rx.as_mut()

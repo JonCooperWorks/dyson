@@ -383,7 +383,7 @@ impl Output for SseOutput {
         });
 
         // Phase 3: fire-and-forget push to swarm so artefact bytes
-        // outlive the cube and feed the swarm UI's artefact list.
+        // outlive the sandbox and feed the swarm UI's artefact list.
         // Invariants:
         //   - never blocks the agent's output stream (spawn + return)
         //   - never propagates errors (logged on failure)

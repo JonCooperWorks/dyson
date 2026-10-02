@@ -1,6 +1,6 @@
 // ===========================================================================
-// `dyson swarm` — boot mode for running inside a CubeSandbox MicroVM
-// under the dyson-orchestrator (swarm).
+// `dyson swarm` — boot mode for running inside a Kata-isolated
+// Kubernetes pod under the dyson-orchestrator (swarm).
 //
 // Reads the env envelope swarm injects on sandbox creation:
 //   - SWARM_BEARER_TOKEN — auth secret the dyson_proxy stamps on every
@@ -27,7 +27,7 @@
 // Synthesises a minimal dyson.json + a workspace skeleton, then hands off
 // to the standard `listen` runtime so the HTTP controller serves the
 // dyson_proxy on the standard port. There is no native sandbox inside
-// the Cube VM (the VM is the sandbox); we pass `dangerous_no_sandbox`
+// the pod's Kata VM (the VM is the sandbox); we pass `dangerous_no_sandbox`
 // so the agent loop accepts that posture.
 // ===========================================================================
 
@@ -193,10 +193,10 @@ pub async fn run() -> Result<()> {
     std::fs::write(&cfg_path, cfg_bytes)
         .map_err(|e| DysonError::Config(format!("write {cfg_path:?}: {e}")))?;
 
-    // If swarm dropped a configure-secret preseed file into the dyson
-    // home via the cube filesystem API before bringing the instance up,
-    // hash it into configure_secret_hash now — before the HTTP listener
-    // is bound — so /api/admin/configure has no TOFU mint window.
+    // If swarm placed a configure-secret preseed file in the dyson
+    // home before bringing the instance up, hash it into
+    // configure_secret_hash now — before the HTTP listener is bound —
+    // so /api/admin/configure has no TOFU mint window.
     match dyson::controller::http::preseed_configure_hash(&home_path) {
         Ok(true) => tracing::info!("preseed: configure secret hashed at boot"),
         Ok(false) => {}
@@ -227,7 +227,7 @@ pub async fn run() -> Result<()> {
         "dyson swarm — starting HTTP controller"
     );
 
-    // Swarm runs inside a Cube MicroVM (the VM IS the sandbox), so we
+    // Swarm runs inside a Kata pod (the pod's VM IS the sandbox), so we
     // mint the bypass guard for the inner dyson — it has no OS sandbox
     // backend (bwrap / Apple Container) available.  This is the
     // structural equivalent of the operator passing
@@ -249,16 +249,15 @@ fn seed_ssh_key_from_env() -> std::io::Result<()> {
         return Ok(());
     }
     let public = std::env::var("SWARM_SSH_PUBLIC_KEY").unwrap_or_default();
-    // dyson runs as root in the cube; ssh/git read $HOME/.ssh.
+    // dyson runs as root in the sandbox; ssh/git read $HOME/.ssh.
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
     seed_ssh_key(Path::new(&home), &private_b64, &public)
 }
 
-/// The SSH private key, base64. The env envelope wins (Cube and Incus
-/// deliver it there, and older swarms only ever do); when it is absent,
-/// a Kubernetes sandbox mounts it as a 0400 file named after the variable
-/// under `SWARM_SECRETS_DIR`, so it never sits in every process's env.
-/// Only that one fixed file name is read.
+/// The SSH private key, base64. The env envelope wins when it carries
+/// the key; when it is absent, a Kubernetes sandbox mounts it as a 0400
+/// file named after the variable under `SWARM_SECRETS_DIR`, so it never
+/// sits in every process's env. Only that one fixed file name is read.
 fn private_key_b64(env_value: Option<String>, secrets_dir: Option<String>) -> String {
     if let Some(value) = env_value.filter(|v| !v.trim().is_empty()) {
         return value;
@@ -546,7 +545,7 @@ mod tests {
             private_key_b64(Some("  ".into()), Some(d.clone())),
             "ZmlsZQ=="
         );
-        // Env still wins: Cube/Incus behaviour is unchanged.
+        // Env wins when both are present.
         assert_eq!(private_key_b64(Some("ZW52".into()), Some(d)), "ZW52");
     }
 

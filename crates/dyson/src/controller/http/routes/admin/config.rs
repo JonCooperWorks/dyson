@@ -165,8 +165,8 @@ pub(super) async fn patch_config_once(
 }
 
 /// Upsert native subscription providers from the shared catalogue. Runtime
-/// configure must own this migration because a stateful Cube rotation carries
-/// the source instance's old `dyson.json` onto the new image.
+/// configure must own this migration because an instance's existing
+/// `dyson.json` can outlive the image that wrote it.
 pub(super) fn patch_subscription_models_doc(
     doc: &mut Value,
 ) -> std::result::Result<bool, ConfigureConfigPatchError> {

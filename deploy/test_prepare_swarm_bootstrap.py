@@ -26,7 +26,7 @@ class BootstrapProvisioningTests(unittest.TestCase):
             self.assertIn('--stdin', argv)
             self.assertNotIn(kwargs['input'], ' '.join(argv))
             return subprocess.CompletedProcess(argv, 0 if seal_ok else 1, '', '')
-        with patch.object(sys, 'argv', [str(SCRIPT), '--dyson', '/fake/dyson', '--hash-file', str(path), '--config', '/fake/config']), patch('subprocess.run', side_effect=run), contextlib.redirect_stdout(io.StringIO()) as output:
+        with patch.object(sys, 'argv', [str(SCRIPT), '--dyson', '/fake/dyson', '--hash-file', str(path), '--swarmctl', 'kubectl exec -i deploy/swarm -- swarmctl --config /fake/config']), patch('subprocess.run', side_effect=run), contextlib.redirect_stdout(io.StringIO()) as output:
             runpy.run_path(str(SCRIPT), run_name='__main__')
         for _, secret in calls:
             if secret: self.assertNotIn(secret, output.getvalue())
@@ -36,6 +36,7 @@ class BootstrapProvisioningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'bootstrap.hash'
             calls = self.run_script(path)
+            self.assertEqual(calls[0][0][:4], ['kubectl', 'exec', '-i', 'deploy/swarm'])
             self.assertEqual(path.read_text(), '$argon2id$test-only-hash\n')
             self.assertEqual(calls[1][1], calls[2][1])
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)

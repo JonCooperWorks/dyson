@@ -9,16 +9,20 @@ import argparse
 import os
 from pathlib import Path
 import secrets
+import shlex
 import subprocess
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dyson', required=True)
 parser.add_argument('--hash-file', type=Path, required=True)
-parser.add_argument('--config', required=True)
+# How to run swarmctl against the Swarm that owns the secret, as one
+# shell-quoted string: it must forward stdin, e.g.
+# "kubectl -n dyson-system exec -i deploy/dyson-swarm -c swarm -- swarmctl --config /run/dyson-swarm/config.toml".
+parser.add_argument('--swarmctl', required=True)
 args = parser.parse_args()
 name = 'dyson.bootstrap_token'
-ctl = ['sudo', '-n', '-u', 'dyson-swarm', 'swarmctl', '--config', args.config, 'secrets']
-listed = subprocess.run(ctl + ['system-list'], capture_output=True, text=True)
+ctl = shlex.split(args.swarmctl) + ['secrets']
+listed = subprocess.run(ctl + ['system-list'], stdin=subprocess.DEVNULL, capture_output=True, text=True)
 if listed.returncode:
     raise SystemExit('Cannot inspect bootstrap provisioning; command output withheld.')
 exists = name in listed.stdout

@@ -1401,8 +1401,8 @@ async fn admin_state_file_replay_advances_file_and_artefact_ids() {
 #[tokio::test]
 async fn admin_idle_quiesce_blocks_new_turns_until_unquiesced() {
     // Swarm's rotate-in-place path calls these endpoints before
-    // snapshotting a cube. They must exist on Dyson and must stop new
-    // writes while the snapshot is being taken.
+    // capturing an instance's state. They must exist on Dyson and must
+    // stop new writes while the state is being captured.
     let r = rig().await;
     let id = r.create_chat_id("maintenance gate").await;
     let secret = "test-configure-secret";

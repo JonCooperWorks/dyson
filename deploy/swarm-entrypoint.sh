@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Managed-Dyson boot wrapper. Provider credentials never enter the VM. Native
-# CLI scratch/config lives on tmpfs so even non-secret session artefacts vanish
-# with the microVM; durable OAuth state is KMS-sealed by Swarm.
+# Managed-Dyson boot wrapper. Provider credentials never enter the sandbox.
+# Native CLI scratch/config lives on tmpfs so even non-secret session artefacts
+# vanish with the pod; durable OAuth state is KMS-sealed by Swarm.
 set -euo pipefail
 
 subscription_root=/dev/shm/dyson-subscriptions

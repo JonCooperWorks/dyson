@@ -1,7 +1,8 @@
-//! Runtime configuration after a Cube snapshot restore.
+//! Runtime configuration pushed by Swarm.
 //!
-//! Snapshot processes retain their warmup environment. Swarm supplies the live
-//! identity, providers, model selection, and service credentials here instead.
+//! The process may start before Swarm has pushed its configuration, and a
+//! replaced pod starts from the image defaults. Swarm supplies the live
+//! identity, providers, model selection, and service credentials here.
 //! The handler updates IDENTITY.md and commits one atomic configuration patch,
 //! then reloads settings for subsequent turns.
 //!
@@ -9,7 +10,7 @@
 //! State replay, skill management, lifecycle, and cost backfill have separate
 //! endpoint modules. The outer HTTP router retains bearer and CSRF enforcement.
 //!
-//! Managed snapshots boot with operator bootstrap bearer authentication.
+//! Managed instances boot with operator bootstrap bearer authentication.
 //! Configure pins a per-instance secret, installs the instance HTTP bearer,
 //! and persists only its hash. Native lifecycle routes independently require
 //! the pinned configure secret; ordinary APIs always require the HTTP bearer.
@@ -85,18 +86,15 @@ pub(super) struct ConfigureBody {
     instance_id: Option<String>,
     /// Replacement value for `providers.<agent.provider>.api_key` —
     /// the per-instance proxy_token swarm minted at create time.
-    /// Without this, the dyson.json keeps the boot-time
-    /// `warmup-placeholder` literal as its api_key (Cube freezes
-    /// `/proc/self/environ` at warmup, so the `SWARM_PROXY_TOKEN`
-    /// env swarm injects on instance create never reaches the
-    /// running dyson process).
+    /// Without this, a dyson.json written at a boot with no
+    /// `SWARM_PROXY_TOKEN` keeps the `warmup-placeholder` literal
+    /// as its api_key.
     #[serde(default)]
     proxy_token: Option<crate::tokens::ProxyToken>,
     /// Replacement value for `providers.<agent.provider>.base_url` —
-    /// swarm's `/llm` URL the agent should call.  Same root cause
-    /// as `proxy_token`: the boot-time value is empty / loopback
-    /// and Cube's snapshot freeze means swarm can't ride env vars
-    /// to fix it.
+    /// swarm's `/llm` URL the agent should call.  Like
+    /// `proxy_token`, the boot-time value is empty / loopback
+    /// until swarm pushes the live one.
     #[serde(default)]
     proxy_base: Option<String>,
     /// Name to register the image-generation provider under in
@@ -157,10 +155,9 @@ pub(super) struct ConfigureBody {
     #[serde(default)]
     mcp_servers: Option<serde_json::Map<String, Value>>,
     /// Full URL the agent's `Output::send_artefact` POSTs to.  Mirrors
-    /// `SWARM_INGEST_URL` in the env envelope; pushed here because
-    /// the cube's snapshot/restore freezes /proc/self/environ at
-    /// warmup, same root cause `proxy_token` already needs a
-    /// configure-push.  When set together with `ingest_token` (both
+    /// `SWARM_INGEST_URL` in the env envelope; pushed here so
+    /// swarm can set it on a running process, same as
+    /// `proxy_token`.  When set together with `ingest_token` (both
     /// non-empty), `state.ingest` is updated and subsequent
     /// `send_artefact` calls fire a fire-and-forget POST.  Empty or
     /// missing leaves the existing config alone — a re-push that
@@ -466,10 +463,8 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     // Eagerly reload the settings + ClientRegistry instead of waiting
     // for the 2s polling HotReloader to notice the mtime change.  Two
     // reasons this matters:
-    //   1. Cube snapshot/restore freezes the dyson process — there's
-    //      a real possibility the program-level hot-reload tokio task
-    //      doesn't survive the resume cleanly, leaving the registry
-    //      pinned to its warmup-time clients (api_key
+    //   1. If the program-level hot-reload tokio task is not running,
+    //      the registry stays pinned to its warmup-time clients (api_key
     //      "warmup-placeholder", base_url api.openai.com).  The chat
     //      then 401s against api.openai.com on every turn.
     //   2. Even when the polling loop IS alive, a chat that fires
@@ -582,8 +577,8 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
 fn preserve_runtime_only_settings(new_settings: &mut Settings, snapshot: &Settings) {
     // `sandbox_bypass` is deliberately CLI-only and never serialized
     // into dyson.json. Eager runtime reloads must carry it forward or
-    // swarm instances inside Cube will try to build an OS sandbox and
-    // exit because bwrap is not installed there.
+    // swarm instances will try to build an OS sandbox and exit because
+    // bwrap is not installed in the image.
     new_settings.sandbox_bypass = snapshot.sandbox_bypass.clone();
 }
 

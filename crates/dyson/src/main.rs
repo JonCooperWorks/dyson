@@ -147,7 +147,7 @@ enum Commands {
         dry_run: bool,
     },
 
-    /// Boot inside a CubeSandbox under the dyson-orchestrator.
+    /// Boot inside a Swarm-managed sandbox under the dyson-orchestrator.
     /// Reads SWARM_BEARER_TOKEN, SWARM_PROXY_URL, SWARM_PROXY_TOKEN,
     /// SWARM_TASK, SWARM_NAME, SWARM_INSTANCE_ID from the env, then
     /// synthesises a dyson.json + workspace and runs the HTTP controller.

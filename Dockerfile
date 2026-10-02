@@ -1,34 +1,15 @@
 # syntax=docker/dockerfile:1.7
 #
-# Dyson — packaged as a CubeSandbox template.
+# Dyson — the managed-agent runtime image.
 #
-# Cube boots the OCI image as the rootfs of a MicroVM, then probes the
-# port given to `cubemastercli tpl create-from-image --probe`. Our
-# entrypoint runs `dyson swarm` which reads SWARM_* env vars and
-# brings up the HTTP controller on 0.0.0.0:80; swarm's host-based
-# dyson_proxy then forwards `<id>.<sandbox_domain>` traffic to it.
+# Swarm runs it as the `runtime` container of a sandbox pod. The
+# entrypoint runs `dyson swarm`, which reads SWARM_* env vars and brings
+# up the HTTP controller on 0.0.0.0:80; the pod's probes hit /healthz
+# there and Swarm's per-instance proxy forwards browser traffic to it.
 #
-# We use debian-slim instead of ghcr.io/tencentcloud/cubesandbox-base
-# because the latter's anonymous pull is gated. envd (the cube file
-# ops/exec helper) is therefore absent — fine for the smoke test where
-# swarm only needs HTTP. Add envd back if/when sandbox file ops or
-# `cube exec` matter.
-#
-# Build (uses prebuilt host binary at build/bin/dyson copied into context
-# as `dyson-bin`):
-#   docker build -t dyson:swarm -t ghcr.io/<owner>/dyson:swarm .
-#
-# Register with cube (resource flags come from deploy/config.env via
-# bring-up.sh's `register_cube_template` helper; the values shown here
-# are today's defaults):
-#   cubemastercli tpl create-from-image \
-#       --image ghcr.io/<owner>/dyson:swarm \
-#       --writable-layer-size 8G \
-#       --cpu 2000 \
-#       --memory 2000 \
-#       --expose-port 80 \
-#       --probe 80 \
-#       --probe-path /healthz
+# Build (uses the prebuilt host binary copied into the context as
+# `dyson-bin`):
+#   docker build -t dyson:swarm .
 
 # ubuntu:24.04 (glibc 2.39) matches the build host. debian:bookworm-slim
 # only ships glibc 2.36 and dies with `version GLIBC_2.39 not found` —
@@ -51,7 +32,7 @@ ARG TESTSSL_VERSION=3.2.4
 ARG TESTSSL_SHA256=98528f8a0ac07f1e226efaa8ead438247df8efcb8fee4e056a937ab82a305490
 ARG PLAYWRIGHT_VERSION=1.61.0
 # Pin the managed runtime so subscription and MCP behavior cannot change under
-# a previously registered template. Upgrade only after the signed-in live MCP
+# an image that is already deployed. Upgrade only after the signed-in live MCP
 # regression has passed against the candidate version.
 ARG CODEX_CLI_VERSION=0.146.0
 ARG CLAUDE_CODE_VERSION=2.1.177
@@ -129,7 +110,7 @@ RUN apt-get update \
 # The image contains no account material: provider OAuth stays in Swarm and
 # these CLIs receive only the source-bound proxy bearer. Claude publishes both
 # glibc and musl native binaries as optional packages; Ubuntu only needs glibc,
-# and dropping the extra ~245 MB keeps Cube's fixed 4 GiB immutable rootfs safe.
+# and dropping the extra ~245 MB keeps the image small.
 RUN npm install -g \
         "@openai/codex@${CODEX_CLI_VERSION}" \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
@@ -138,7 +119,7 @@ RUN npm install -g \
 
 # Pinned, checksum-verified web discovery stack. These release binaries keep
 # the runtime image free of a Go toolchain and make image rebuilds independent
-# of upstream `latest` tags. The Cube fleet is currently amd64-only: dyson-bin
+# of upstream `latest` tags. The fleet is currently amd64-only: dyson-bin
 # is copied from the amd64 deployment host, so matching scanner assets is
 # intentional rather than an incomplete multi-arch claim.
 RUN set -eux; \
@@ -195,7 +176,7 @@ RUN set -eux; \
 # Headless browser automation is isolated in a venv so Ubuntu's system Python
 # remains untouched. PENTEST_PYTHON is the stable entry point for scripts
 # importing playwright; installing only Chromium's headless shell avoids
-# carrying a second, unused headed browser in Cube's 4 GiB template rootfs.
+# carrying a second, unused headed browser in the image.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 ENV PENTEST_PYTHON=/opt/pentest-venv/bin/python
 RUN python3 -m venv /opt/pentest-venv \
@@ -252,29 +233,8 @@ COPY --chmod=0755 swarm-entrypoint.sh /usr/local/bin/dyson-swarm-entrypoint
 RUN mkdir -p /var/lib/dyson && chmod 0755 /var/lib/dyson
 
 # jemalloc decay tuning recommended by the dyson README for memory-budgeted
-# deployments — Cube cells are small so we want freed pages returned fast.
+# deployments — sandboxes are small so we want freed pages returned fast.
 ENV MALLOC_CONF=dirty_decay_ms:1000,muzzy_decay_ms:1000
-
-# HTTP/HTTPS forward proxy for outbound traffic.  The cube's eBPF SNAT
-# uses bpf_redirect which bypasses the host kernel's TCP stack, and
-# some upstream networks (Google, GitHub via Microsoft) silently drop
-# return packets for those flows.  Routing TCP through the
-# host-resident dyson-egress-proxy at mvm_gateway_ip:3128 makes the
-# connection originate from the host's kernel stack so every destination
-# accepts it.  These vars must be baked into the image because the cube
-# template's snapshot freezes /proc/<dyson>/environ at warmup time —
-# per-instance envVars passed by swarm at create-time never reach the
-# running process.  Per-policy gating happens host-side: the proxy
-# loads /run/dyson-egress/policies.json and checks both the source
-# sandbox IP and destination IPs before dialing, so proxy egress is
-# never broader than the sandbox's declared network policy.
-# NO_PROXY keeps swarm /llm and the local CoreDNS resolver direct.
-ENV HTTPS_PROXY=http://169.254.68.5:3128
-ENV HTTP_PROXY=http://169.254.68.5:3128
-ENV https_proxy=http://169.254.68.5:3128
-ENV http_proxy=http://169.254.68.5:3128
-ENV NO_PROXY=169.254.68.5,169.254.254.53,127.0.0.1,localhost
-ENV no_proxy=169.254.68.5,169.254.254.53,127.0.0.1,localhost
 
 # Operator bootstrap trust contains only an Argon2 hash, never the bearer.
 COPY dyson-bootstrap-auth.hash /etc/dyson/bootstrap-auth.hash
@@ -284,8 +244,8 @@ EXPOSE 80
 # tini reaps zombies and forwards signals to dyson.
 #
 # The `dyson swarm` subcommand hardcodes dangerous-no-sandbox internally
-# (Cube already provides the sandbox boundary; nesting another sandbox
-# inside it is paranoia + a debug nightmare).  Pre-CLI-restructure the
+# (the pod's Kata VM already provides the sandbox boundary; nesting
+# another sandbox inside it is paranoia + a debug nightmare).  Pre-CLI-restructure the
 # flag was a top-level `dyson --dangerous-no-sandbox swarm`; the newer
 # CLI rejects unknown top-level flags, so the flag is gone from here.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/dyson-swarm-entrypoint"]

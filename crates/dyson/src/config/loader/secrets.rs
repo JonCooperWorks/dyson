@@ -132,8 +132,7 @@ pub(super) fn reject_http_with_api_key(
         return Ok(()); // HTTPS or other scheme — fine.
     }
     // Allow local-network destinations: loopback, RFC1918 private,
-    // link-local (covers cube-to-host gateway IPs), and Tailscale's
-    // 100.64/10 carrier-grade NAT range.  Plain HTTP on these
+    // link-local, and Tailscale's 100.64/10 carrier-grade NAT range.  Plain HTTP on these
     // addresses can't leave the host's local network, so the api_key
     // never crosses an untrusted hop.  Public IPs still get rejected.
     if crate::http::host_from_url(url).is_some_and(is_local_network_host) {

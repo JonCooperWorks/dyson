@@ -16,8 +16,7 @@ pub struct CostLookupConfig {
     api_base: String,
     bearer: Option<String>,
     // Retain the instance-facing /llm base when this config came from the
-    // managed runtime envelope. Cube templates freeze the warmup process
-    // environment, so post-create credentials arrive through
+    // managed runtime envelope. Post-create credentials arrive through
     // /api/admin/configure and must remain available to native subscription
     // subprocesses and the OAuth relay without consulting /proc/environ.
     proxy_url: Option<String>,

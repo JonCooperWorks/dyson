@@ -191,7 +191,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     let is_api_path = segs.first() == Some(&"api");
 
     // `/healthz` is intentionally unauthenticated: external probes
-    // (Cube template builder, swarm's health prober, load balancers)
+    // (Kubernetes probes, swarm's health prober, load balancers)
     // need a credential-free liveness endpoint. Returns 200 with a
     // tiny JSON body — clients only check the status code.
     if matches!((&method, segs.as_slice()), (&Method::GET, ["healthz"])) {
@@ -312,9 +312,9 @@ async fn dispatch_route(
 
         // ─── admin (swarm runtime reconfigure) ────────────────────────
         // Lets dyson-orchestrator push the real SWARM_MODEL/TASK
-        // envelope after a sandbox restore — Cube's snapshot/restore
-        // freezes the dyson process's env at warmup time, so without
-        // this every instance shows "warmup-placeholder" forever.
+        // envelope to a running instance — the process may start
+        // before swarm has pushed its configuration, so without this
+        // such an instance shows "warmup-placeholder" forever.
         // See routes/admin.rs.
         (_, ["api", "admin", rest @ ..]) => dispatch_admin(req, &state, method, rest).await,
 

@@ -12,10 +12,9 @@ fn parse_minimal_json() {
     assert_eq!(root.agent.unwrap().model.unwrap(), "claude-opus-4-20250514");
 }
 
-/// Regression for the dyson-in-cube `warmup-placeholder` bug:
-/// swarm pushes `http://192.168.0.1:8080/llm/openrouter` as the
-/// per-cube proxy_base (the cube-dev gateway IP — host-local, no
-/// hairpin to the host's public IP).  Before the fix, the loader's
+/// Regression for the managed-dyson `warmup-placeholder` bug:
+/// swarm pushes a plain-HTTP proxy_base on a private address
+/// (e.g. `http://192.168.0.1:8080/llm/openrouter`).  Before the fix, the loader's
 /// `reject_http_with_api_key` saw `http://` + non-localhost host +
 /// non-empty api_key and threw.  The hot-reload path swallowed the
 /// error, the registry never picked up the patched values, and

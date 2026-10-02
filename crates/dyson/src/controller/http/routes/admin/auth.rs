@@ -16,8 +16,8 @@ use tokio::io::AsyncWriteExt;
 use dyson_common::contracts::DYSON_CONFIGURE_HEADER;
 
 /// Filename inside the dyson home dir that holds the argon2id hash
-/// of the configure secret.  Lives next to `workspace/`, persists
-/// across cube restores (it's in the writable layer).  PHC string
+/// of the configure secret.  Lives next to `workspace/`, so it
+/// persists with the runtime's state directory.  PHC string
 /// format (`$argon2id$v=19$...`) so argon2's verifier can re-derive
 /// the salt.
 pub(super) const CONFIGURE_HASH_FILENAME: &str = "configure_secret_hash";
@@ -52,8 +52,7 @@ pub(in crate::controller::http::routes) async fn authorize_configure(
     };
 
     // Resolve the hash file's path.  Living next to `workspace/`
-    // means a cube template restore picks it up via the writable
-    // layer — same spot dyson_home resolves to from
+    // keeps it in the runtime's state directory — same spot dyson_home resolves to from
     // `dyson swarm`'s DYSON_HOME env (default /var/lib/dyson).
     let snapshot = state.settings_snapshot();
     let hash_dir = workspace_parent_dir(snapshot.workspace.connection_string.expose());
@@ -297,8 +296,8 @@ fn configure_verify_cache_key(
 }
 
 /// Resolve the directory the configure-secret hash lives in.  We
-/// keep it next to the workspace so cube template restores preserve
-/// it via the writable layer.  `connection_string` for the in-memory
+/// keep it next to the workspace so it persists with the runtime's
+/// state directory.  `connection_string` for the in-memory
 /// Consume `<dyson_home>/configure.preseed` at boot, hashing its
 /// contents into `configure_secret_hash` so the first
 /// `/api/admin/configure` POST verifies against the swarm-supplied

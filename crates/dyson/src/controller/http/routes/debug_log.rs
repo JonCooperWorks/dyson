@@ -1,6 +1,6 @@
 // Auth-bypassed tail of the dyson rolling log file.  Mounted at
 // `GET /api/_debug/log` for forensic access from the host while
-// debugging the cube → swarm `/llm` hang.  This is a debug-only
+// debugging the sandbox → swarm `/llm` hang.  This is a debug-only
 // surface that ships with the binary; it should be ripped out (or
 // gated behind a build feature) once the underlying bug is closed.
 

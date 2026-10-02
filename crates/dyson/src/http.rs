@@ -192,12 +192,11 @@ fn configured_client_builder_with(
         .redirect(safe_redirect_policy());
     // Wire up HTTP_PROXY / HTTPS_PROXY explicitly because the crate is
     // built with `default-features = false`, which disables reqwest's
-    // automatic env-based proxy detection.  The cube image bakes
-    // these vars into its env so curl / requests / etc pick them up
+    // automatic env-based proxy detection.  Swarm sets these
+    // vars in the pod env so curl / requests / etc pick them up
     // for free; without this, dyson's own reqwest client would dial
-    // every destination directly and silently bypass the host
-    // Dyson egress proxy that the cube relies on for upstreams that
-    // drop eBPF-SNAT'd connections (Google, GitHub via Microsoft, …).
+    // every destination directly and silently bypass the
+    // in-cluster egress proxy.
     //
     // NO_PROXY is honoured separately for each scheme: hosts in
     // NO_PROXY (typically the swarm /llm gateway and the local

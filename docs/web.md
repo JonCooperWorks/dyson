@@ -642,7 +642,7 @@ GET /api/agent                   # running agent metadata and MCP inventory
 
 These routes are ordinary `/api/*` routes from Dyson's perspective, so they use
 the same controller auth. They exist for `dyson-swarm` to reconfigure or drain a
-running sandbox after Cube restore:
+running sandbox:
 
 ```
 POST /api/admin/configure          # patch generated dyson.json, model, tools, MCP, Telegram proxy

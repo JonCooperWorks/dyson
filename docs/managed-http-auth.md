@@ -1,19 +1,19 @@
 # Managed Dyson HTTP authentication
 
-Cube snapshots preserve the process started during template warmup. Environment
-variables injected on restore cannot replace that process's HTTP authenticator.
-Managed templates therefore boot with `auth.type: swarm` and an operator bootstrap
+A managed Dyson process starts from the image before Swarm has pushed its
+instance configuration, and a replaced pod starts from the image defaults again.
+Managed images therefore boot with `auth.type: swarm` and an operator bootstrap
 bearer hash, never `dangerous_no_auth`.
 
 The deploy runbook provisions `dyson.bootstrap_token` in Swarm's sealed system
 store. Only its Argon2 hash is copied into `/etc/dyson/bootstrap-auth.hash` in the
 image. Keep `.build/dyson-bootstrap-auth.hash` with deployment backups. The helper
 refuses to silently replace either half of an existing trust pair. Bootstrap
-rotation must account for every still-available template generation.
+rotation must account for every image generation still in use.
 
 On configure, Swarm sends the instance bearer in `http_bearer`. It first
 authenticates with that bearer (cold boots), then retries a 401 with the bootstrap
-bearer (snapshot warmup). No anonymous retry exists. Before a configure secret
+bearer (a process still on image defaults). No anonymous retry exists. Before a configure secret
 has been pinned, Dyson requires the current HTTP authenticator or a matching
 trusted configure preseed. Once pinned, only the same configure secret can change
 configuration; bootstrap cannot reset it.
@@ -23,7 +23,7 @@ installs it in memory before returning success, and invalidates outstanding SSE
 tickets. Ordinary APIs, SSE ticket issuance, and Telegram webhook ingestion all
 use the current authenticator. Auth discovery reports `mode: bearer`; liveness
 and static assets remain public. Swarm rejects configure acknowledgements without
-`http_auth_applied: true`, so an older template cannot silently retain anonymous
+`http_auth_applied: true`, so an older image cannot silently retain anonymous
 access after a successful provisioning response.
 
 Only the existing configure-protected admin lifecycle routes can authenticate

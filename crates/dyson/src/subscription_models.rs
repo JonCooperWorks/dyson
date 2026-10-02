@@ -2,7 +2,7 @@
 //!
 //! These are shared by the immutable Swarm boot config and the runtime
 //! configure path. Keeping both paths on one source of truth matters because
-//! Cube rotations preserve `dyson.json` from the source snapshot.
+//! an instance's `dyson.json` can outlive the image that wrote it.
 
 /// Models returned by Codex's authenticated `model/list` response.
 pub const CHATGPT: &[&str] = &[

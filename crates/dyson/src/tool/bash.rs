@@ -159,7 +159,7 @@ impl Tool for BashTool {
 
         // Source from the process env first so the spawned shell at least
         // has PATH, HTTPS_PROXY, etc. — the parent dyson process inherits
-        // these from the cube image, and without them every shell command
+        // these from the pod environment, and without them every shell command
         // runs without a $PATH and curl has no proxy URL to dial.
         // Then layer ctx.env on top so callers can override or add per-
         // invocation overrides (mostly tests).  Allow-list filter applies
@@ -496,12 +496,10 @@ pub(crate) fn is_safe_env_var(name: &str) -> bool {
         // HTTP forward-proxy configuration.  Values, not secrets — the
         // proxy URL just tells `curl` / `wget` / language SDKs which
         // host to dial when stepping outbound.  Required when the
-        // agent runs in a sandbox where direct egress doesn't reach
-        // every destination (some upstream networks drop SYN-ACKs for
-        // the kernel-bypass NAT path the cube uses); without these
-        // forwarded into the spawned shell, `curl https://google.com`
-        // dials Google directly and silently times out even though
-        // the cube image bakes in a working proxy.
+        // agent runs in a sandbox whose egress goes through a forward
+        // proxy; without these forwarded into the spawned shell,
+        // `curl https://google.com` dials Google directly and silently
+        // times out even though the pod env carries a working proxy.
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",

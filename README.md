@@ -6,8 +6,8 @@ through a sandbox, feed results back to the model, and repeat until the task is
 done.
 
 The sibling [`dyson-swarm`](https://github.com/JonCooperWorks/dyson-swarm)
-repo is the host-side control plane for running Dyson agents inside Cube
-sandboxes. This repo is the agent process itself.
+repo is the control plane that runs Dyson agents as Kata-isolated Kubernetes
+pods. This repo is the agent process itself.
 
 ## What It Does
 
@@ -130,7 +130,7 @@ cargo run -- hash-bearer 'super-secret-token'
 
 The `swarm` subcommand is for `dyson-swarm`; it reads `SWARM_*` environment
 variables, synthesizes runtime config, and starts the HTTP controller inside a
-Cube sandbox.
+Swarm-managed sandbox pod.
 
 ## Configuration
 
