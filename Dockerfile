@@ -226,6 +226,12 @@ RUN if [ -s /usr/local/share/ca-certificates/dyson-egress.crt ]; then \
 
 COPY --chmod=0755 dyson-bin /usr/local/bin/dyson
 COPY --chmod=0755 swarm-entrypoint.sh /usr/local/bin/dyson-swarm-entrypoint
+# First process of the container, built from dyson-swarm (crates/warm-hold)
+# and staged in the build context by the image build script. It execs the
+# entrypoint at once unless the sandbox is a held warm one
+# (SWARM_WARM_HOLD=1), in which case it waits for Swarm's bind first. A
+# context without the binary fails here, on purpose.
+COPY --chmod=0755 dyson-warm-hold /usr/local/bin/dyson-warm-hold
 
 # Workspace lives at /var/lib/dyson; the swarm subcommand creates it on
 # first boot. Pre-create with the right perms so the agent can write
@@ -248,5 +254,5 @@ EXPOSE 80
 # another sandbox inside it is paranoia + a debug nightmare).  Pre-CLI-restructure the
 # flag was a top-level `dyson --dangerous-no-sandbox swarm`; the newer
 # CLI rejects unknown top-level flags, so the flag is gone from here.
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/dyson-swarm-entrypoint"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/dyson-warm-hold", "--", "/usr/local/bin/dyson-swarm-entrypoint"]
 CMD ["swarm"]
