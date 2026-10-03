@@ -179,15 +179,29 @@ impl RunEvent {
 /// was never durably observed. This is the key crash-recovery invariant: an
 /// unknown outcome is visible and is not converted into an automatic retry.
 pub fn unresolved_tool_outcomes(events: &[RunEvent]) -> Vec<UnresolvedToolOutcome> {
-    let mut active: HashMap<(RunId, String), UnresolvedToolOutcome> = HashMap::new();
+    let mut index = ToolOutcomeIndex::default();
     for event in events {
+        index.apply(event);
+    }
+    index.unresolved()
+}
+
+/// Incremental projection of the durable journal. Contains only outstanding
+/// calls, so healthy long conversations do not retain their whole history.
+#[derive(Default)]
+pub struct ToolOutcomeIndex {
+    active: HashMap<(RunId, String), UnresolvedToolOutcome>,
+}
+
+impl ToolOutcomeIndex {
+    pub fn apply(&mut self, event: &RunEvent) {
         match &event.kind {
             RunEventKind::ToolStarted {
                 tool_use_id,
                 effective_tool_name,
                 idempotency_key,
             } => {
-                active.insert(
+                self.active.insert(
                     (event.run_id.clone(), tool_use_id.clone()),
                     UnresolvedToolOutcome {
                         run_id: event.run_id.clone(),
@@ -199,19 +213,23 @@ pub fn unresolved_tool_outcomes(events: &[RunEvent]) -> Vec<UnresolvedToolOutcom
             }
             RunEventKind::ToolFinished { tool_use_id, .. }
             | RunEventKind::ToolReconciled { tool_use_id, .. } => {
-                active.remove(&(event.run_id.clone(), tool_use_id.clone()));
+                self.active
+                    .remove(&(event.run_id.clone(), tool_use_id.clone()));
             }
             _ => {}
         }
     }
-    let mut unresolved: Vec<_> = active.into_values().collect();
-    unresolved.sort_by(|a, b| {
-        a.run_id
-            .0
-            .cmp(&b.run_id.0)
-            .then_with(|| a.tool_use_id.cmp(&b.tool_use_id))
-    });
-    unresolved
+
+    pub fn unresolved(&self) -> Vec<UnresolvedToolOutcome> {
+        let mut unresolved: Vec<_> = self.active.values().cloned().collect();
+        unresolved.sort_by(|a, b| {
+            a.run_id
+                .0
+                .cmp(&b.run_id.0)
+                .then_with(|| a.tool_use_id.cmp(&b.tool_use_id))
+        });
+        unresolved
+    }
 }
 
 /// Grade one run from its canonical event stream. The grader is deliberately

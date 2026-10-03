@@ -7,19 +7,28 @@ use super::{Agent, HistoryBackend, PersistHook};
 
 impl Agent {
     pub(crate) fn try_emit_run_event(&self, kind: RunEventKind) -> crate::error::Result<()> {
+        self.try_emit_run_events([kind])
+    }
+
+    pub(crate) fn try_emit_run_events<const N: usize>(
+        &self,
+        kinds: [RunEventKind; N],
+    ) -> crate::error::Result<()> {
         let mut sequence = self
             .event_sequence
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        *sequence += 1;
-        let event = RunEvent::new(
-            *sequence,
-            self.active_run_id.clone(),
-            self.conversation.turn_count,
-            kind,
-        );
+        let events = kinds.map(|kind| {
+            *sequence += 1;
+            RunEvent::new(
+                *sequence,
+                self.active_run_id.clone(),
+                self.conversation.turn_count,
+                kind,
+            )
+        });
         if let Some(backend) = &self.history_backend {
-            backend.store.append_run_event(&backend.chat_id, &event)?;
+            backend.store.append_run_events(&backend.chat_id, &events)?;
         }
         Ok(())
     }
@@ -275,7 +284,8 @@ impl Agent {
         let Some(backend) = &self.history_backend else {
             return Ok(Vec::new());
         };
-        let events = backend.store.load_run_events(&backend.chat_id)?;
-        Ok(super::protocol::unresolved_tool_outcomes(&events))
+        backend
+            .store
+            .load_unresolved_tool_outcomes(&backend.chat_id)
     }
 }

@@ -48,7 +48,36 @@ const MEDIA_REF_PREFIX: &str = "@media/";
 pub struct DiskChatHistory {
     /// Root directory holding every chat subdir.
     dir: PathBuf,
-    journal_lock: std::sync::Mutex<()>,
+    // Bound lock memory while letting unrelated chats persist concurrently.
+    journal_locks: [std::sync::Mutex<()>; 64],
+    outcomes: std::sync::Mutex<HashMap<String, CachedOutcomes>>,
+}
+
+#[derive(PartialEq, Eq)]
+struct JournalStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    identity: (u64, u64),
+}
+
+impl JournalStamp {
+    fn new(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            identity: {
+                use std::os::unix::fs::MetadataExt as _;
+                (metadata.dev(), metadata.ino())
+            },
+        }
+    }
+}
+
+struct CachedOutcomes {
+    stamp: JournalStamp,
+    index: dyson_harness::protocol::ToolOutcomeIndex,
 }
 
 impl DiskChatHistory {
@@ -63,7 +92,8 @@ impl DiskChatHistory {
         }
         Ok(Self {
             dir,
-            journal_lock: std::sync::Mutex::new(()),
+            journal_locks: std::array::from_fn(|_| std::sync::Mutex::new(())),
+            outcomes: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -76,6 +106,13 @@ impl DiskChatHistory {
     /// Per-chat root: `{dir}/{chat_id}`.
     pub(crate) fn chat_root(&self, chat_id: &str) -> PathBuf {
         self.dir.join(chat_id)
+    }
+
+    fn journal_lock(&self, chat_id: &str) -> &std::sync::Mutex<()> {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        chat_id.hash(&mut hasher);
+        &self.journal_locks[(hasher.finish() % self.journal_locks.len() as u64) as usize]
     }
 
     fn transcript_path(&self, chat_id: &str) -> PathBuf {
@@ -148,7 +185,10 @@ impl ChatHistory for DiskChatHistory {
                 "invalid harness record identifier".into(),
             ));
         }
-        let _guard = self.journal_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self
+            .journal_lock(chat_id)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = self.chat_root(chat_id).join("harness");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{key}.json"));
@@ -322,14 +362,28 @@ impl ChatHistory for DiskChatHistory {
     }
 
     fn append_run_event(&self, chat_id: &str, event: &dyson_harness::RunEvent) -> Result<()> {
+        self.append_run_events(chat_id, std::slice::from_ref(event))
+    }
+
+    fn append_run_events(&self, chat_id: &str, events: &[dyson_harness::RunEvent]) -> Result<()> {
         use std::io::{Read as _, Seek as _, Write as _};
 
-        let _guard = self.journal_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if events.is_empty() {
+            return Ok(());
+        }
+        let _guard = self
+            .journal_lock(chat_id)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let root = self.chat_root(chat_id);
         std::fs::create_dir_all(&root)?;
         let path = self.run_events_path(chat_id);
         let creates_journal = !path.exists();
-        let bytes = serde_json::to_vec(event)?;
+        let mut bytes = Vec::new();
+        for event in events {
+            serde_json::to_writer(&mut bytes, event)?;
+            bytes.push(b'\n');
+        }
         let mut options = std::fs::OpenOptions::new();
         options.create(true).read(true).write(true);
         #[cfg(unix)]
@@ -342,7 +396,8 @@ impl ChatHistory for DiskChatHistory {
         // Repair only that uncommitted tail before appending so one torn write
         // cannot poison all later replay. Earlier malformed records remain a
         // hard error because silently skipping committed history is unsafe.
-        let file_len = file.metadata()?.len();
+        let previous_stamp = JournalStamp::new(&file.metadata()?);
+        let file_len = previous_stamp.len;
         if file_len > 0 {
             let mut final_byte = [0_u8; 1];
             file.seek(std::io::SeekFrom::End(-1))?;
@@ -370,7 +425,6 @@ impl ChatHistory for DiskChatHistory {
         }
         file.seek(std::io::SeekFrom::End(0))?;
         file.write_all(&bytes)?;
-        file.write_all(b"\n")?;
         file.sync_data()?;
         #[cfg(unix)]
         if creates_journal {
@@ -379,7 +433,66 @@ impl ChatHistory for DiskChatHistory {
             // after `tool_started` is acknowledged.
             std::fs::File::open(&root)?.sync_all()?;
         }
+        // Update the projection only AFTER the event is durable. Any external
+        // change or failed write makes its stamp miss and forces replay.
+        let stamp = JournalStamp::new(&file.metadata()?);
+        let mut outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cached) = outcomes.get_mut(chat_id) {
+            if cached.stamp == previous_stamp {
+                for event in events {
+                    cached.index.apply(event);
+                }
+                cached.stamp = stamp;
+            } else {
+                outcomes.remove(chat_id);
+            }
+        }
         Ok(())
+    }
+
+    fn load_unresolved_tool_outcomes(
+        &self,
+        chat_id: &str,
+    ) -> Result<Vec<dyson_harness::protocol::UnresolvedToolOutcome>> {
+        let _guard = self
+            .journal_lock(chat_id)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let path = self.run_events_path(chat_id);
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.outcomes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(chat_id);
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let stamp = JournalStamp::new(&metadata);
+        {
+            let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(cached) = outcomes.get(chat_id)
+                && cached.stamp == stamp
+            {
+                return Ok(cached.index.unresolved());
+            }
+        }
+        let mut index = dyson_harness::protocol::ToolOutcomeIndex::default();
+        for event in self.load_run_events(chat_id)? {
+            index.apply(&event);
+        }
+        let unresolved = index.unresolved();
+        if stamp.modified.is_some() && stamp == JournalStamp::new(&std::fs::metadata(&path)?) {
+            let mut outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
+            // Only outstanding calls are retained, and the chat cache is bounded.
+            if outcomes.len() >= 128 {
+                outcomes.clear();
+            }
+            outcomes.insert(chat_id.to_string(), CachedOutcomes { stamp, index });
+        }
+        Ok(unresolved)
     }
 
     fn load_run_events(&self, chat_id: &str) -> Result<Vec<dyson_harness::RunEvent>> {
@@ -990,5 +1103,242 @@ mod tests {
         assert_eq!(store.load_run_events("chat_j").unwrap().len(), 1);
         assert!(!dir.join("chat_j").join("archives").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn outcome_projection_tracks_durable_appends_and_reloads_external_changes() {
+        use dyson_harness::{RunEvent, RunEventKind, RunId};
+        let (dir, store) = temp_store("outcome_projection");
+        let run = RunId::new();
+        let started = RunEvent::new(
+            1,
+            run.clone(),
+            1,
+            RunEventKind::ToolStarted {
+                tool_use_id: "t".into(),
+                effective_tool_name: "bash".into(),
+                idempotency_key: "key".into(),
+            },
+        );
+        store.append_run_event("chat_j", &started).unwrap();
+        assert_eq!(
+            store.load_unresolved_tool_outcomes("chat_j").unwrap().len(),
+            1
+        );
+        store
+            .append_run_event(
+                "chat_j",
+                &RunEvent::new(
+                    2,
+                    run,
+                    1,
+                    RunEventKind::ToolFinished {
+                        tool_use_id: "t".into(),
+                        effective_tool_name: "bash".into(),
+                        is_error: false,
+                        duration_ms: 1,
+                    },
+                ),
+            )
+            .unwrap();
+        assert!(
+            store
+                .load_unresolved_tool_outcomes("chat_j")
+                .unwrap()
+                .is_empty()
+        );
+        // A snapshot restore can replace a journal while the store is alive.
+        let path = store.run_events_path("chat_j");
+        let replacement = path.with_extension("replacement");
+        std::fs::write(
+            &replacement,
+            format!("{}\n", serde_json::to_string(&started).unwrap()),
+        )
+        .unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert_eq!(
+            store.load_unresolved_tool_outcomes("chat_j").unwrap().len(),
+            1
+        );
+        // Corrupt committed history must fail closed, even after a cache hit.
+        std::fs::write(&path, "broken\n").unwrap();
+        assert!(store.load_unresolved_tool_outcomes("chat_j").is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            store
+                .load_unresolved_tool_outcomes("chat_j")
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn outcome_projection_handles_torn_tail_and_process_restart() {
+        use dyson_harness::{RunEvent, RunEventKind, RunId};
+        use std::io::Write as _;
+        let (dir, store) = temp_store("outcome_torn");
+        let run = RunId::new();
+        let event = RunEvent::new(
+            1,
+            run.clone(),
+            1,
+            RunEventKind::ToolStarted {
+                tool_use_id: "t".into(),
+                effective_tool_name: "bash".into(),
+                idempotency_key: "key".into(),
+            },
+        );
+        store.append_run_event("chat_j", &event).unwrap();
+        store.load_unresolved_tool_outcomes("chat_j").unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(store.run_events_path("chat_j"))
+            .unwrap()
+            .write_all(b"{\"torn\":")
+            .unwrap();
+        assert_eq!(
+            store.load_unresolved_tool_outcomes("chat_j").unwrap().len(),
+            1
+        );
+        store
+            .append_run_event(
+                "chat_j",
+                &RunEvent::new(
+                    2,
+                    run,
+                    1,
+                    RunEventKind::ToolReconciled {
+                        tool_use_id: "t".into(),
+                        resolution: "verified".into(),
+                    },
+                ),
+            )
+            .unwrap();
+        assert!(
+            store
+                .load_unresolved_tool_outcomes("chat_j")
+                .unwrap()
+                .is_empty()
+        );
+        let reopened = DiskChatHistory::new(dir.clone()).unwrap();
+        assert!(
+            reopened
+                .load_unresolved_tool_outcomes("chat_j")
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unrelated_chats_do_not_wait_for_a_journal_write_lock() {
+        let (dir, store) = temp_store("chat_locks");
+        let store = std::sync::Arc::new(store);
+        let chat = (0..1000)
+            .map(|i| format!("other_{i}"))
+            .find(|id| !std::ptr::eq(store.journal_lock("busy"), store.journal_lock(id)))
+            .unwrap();
+        let guard = store.journal_lock("busy").lock().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let writer = std::sync::Arc::clone(&store);
+        let thread = std::thread::spawn(move || {
+            send.send(
+                writer
+                    .save_harness_record(&chat, "task", &serde_json::json!({"ok":true}))
+                    .is_ok(),
+            )
+            .unwrap();
+        });
+        let result = receive.recv_timeout(std::time::Duration::from_secs(2));
+        drop(guard);
+        thread.join().unwrap();
+        assert!(result.unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn batched_pre_execution_events_replay_in_order_after_restart() {
+        use dyson_harness::{RunEvent, RunEventKind, RunId};
+        let (dir, store) = temp_store("journal_batch");
+        let run = RunId::new();
+        let events = [
+            RunEvent::new(
+                1,
+                run.clone(),
+                1,
+                RunEventKind::ToolAuthorized {
+                    tool_use_id: "t".into(),
+                    effective_tool_name: "bash".into(),
+                    idempotency: dyson_harness::Idempotency::Unsafe,
+                    timeout_ms: 1000,
+                },
+            ),
+            RunEvent::new(
+                2,
+                run,
+                1,
+                RunEventKind::ToolStarted {
+                    tool_use_id: "t".into(),
+                    effective_tool_name: "bash".into(),
+                    idempotency_key: "key".into(),
+                },
+            ),
+        ];
+        store.append_run_events("chat_j", &events).unwrap();
+        let reopened = DiskChatHistory::new(dir.clone()).unwrap();
+        assert_eq!(reopened.load_run_events("chat_j").unwrap(), events);
+        assert_eq!(
+            reopened
+                .load_unresolved_tool_outcomes("chat_j")
+                .unwrap()
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[ignore = "manual long-conversation recovery-query benchmark"]
+    fn benchmark_long_journal_outcome_queries() {
+        use dyson_harness::{RunEvent, RunEventKind, RunId};
+        let (dir, store) = temp_store("outcome_benchmark");
+        std::fs::create_dir_all(store.chat_root("chat_j")).unwrap();
+        let run = RunId::new();
+        let mut bytes = Vec::new();
+        for sequence in 0..10_000 {
+            serde_json::to_writer(
+                &mut bytes,
+                &RunEvent::new(sequence, run.clone(), 1, RunEventKind::RunStarted),
+            )
+            .unwrap();
+            bytes.push(b'\n');
+        }
+        std::fs::write(store.run_events_path("chat_j"), bytes).unwrap();
+        store.load_unresolved_tool_outcomes("chat_j").unwrap();
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            assert!(
+                dyson_harness::protocol::unresolved_tool_outcomes(
+                    &store.load_run_events("chat_j").unwrap()
+                )
+                .is_empty()
+            );
+        }
+        let replay = start.elapsed();
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            assert!(
+                store
+                    .load_unresolved_tool_outcomes("chat_j")
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        println!(
+            "10,000-event journal, 100 queries: replay={replay:?}, projection={:?}",
+            start.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -163,18 +163,16 @@ impl BuiltinSkill {
             });
         }
 
-        // Build the system prompt dynamically from the loaded tools.
-        let tool_list: Vec<String> = tools
-            .iter()
-            .map(|t| format!("- **{}**: {}", t.name(), t.description()))
-            .collect();
+        // Descriptions already travel in the tool definitions on every model
+        // call. Keep an inventory here without paying for them a second time.
+        let tool_list: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
 
         let system_prompt = format!(
-            "You have access to the following built-in tools:\n\n{}\n\n\
+            "Available built-in tools: {}. Their tool definitions describe usage and arguments.\n\n\
              Use these tools to help answer questions and complete tasks. \
              When running commands, prefer concise output. \
              Check command results before proceeding to the next step.",
-            tool_list.join("\n")
+            tool_list.join(", ")
         );
 
         Self {
@@ -319,6 +317,23 @@ mod tests {
         let prompt = skill.system_prompt().unwrap();
         assert!(prompt.contains("bash"));
         assert!(!prompt.is_empty());
+    }
+
+    #[test]
+    fn prompt_inventory_keeps_tools_without_repeating_their_descriptions() {
+        let skill = default_skill();
+        let prompt = skill.system_prompt().unwrap();
+        let duplicate_bytes: usize = skill.tools().iter().map(|t| t.description().len()).sum();
+        for tool in skill.tools() {
+            assert!(prompt.contains(tool.name()));
+            assert!(!tool.description().is_empty());
+            assert!(!prompt.contains(tool.description()));
+        }
+        println!(
+            "Built-in tool description bytes removed from system prompt: {duplicate_bytes}; inventory bytes: {}",
+            prompt.len()
+        );
+        assert!(prompt.len() < duplicate_bytes);
     }
 
     #[test]

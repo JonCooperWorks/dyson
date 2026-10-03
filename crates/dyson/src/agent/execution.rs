@@ -775,22 +775,25 @@ impl Agent {
             ctx.harness.validate_observations(&plan)?;
             ctx.harness.prepare_mutation()?;
         }
-        self.try_emit_run_event(super::protocol::RunEventKind::ToolAuthorized {
+        let authorized = super::protocol::RunEventKind::ToolAuthorized {
             tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
             effective_tool_name: name.to_string(),
             idempotency: plan.idempotency,
             timeout_ms: plan.timeout_ms,
-        })?;
+        };
         let idempotency_key = format!(
             "{}:{}",
             self.active_run_id.0,
             ctx.tool_use_id.as_deref().unwrap_or("direct")
         );
-        self.try_emit_run_event(super::protocol::RunEventKind::ToolStarted {
+        let tool_started = super::protocol::RunEventKind::ToolStarted {
             tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
             effective_tool_name: name.to_string(),
             idempotency_key: ctx.idempotency_key.clone().unwrap_or(idempotency_key),
-        })?;
+        };
+        // Both records precede execution, with no side effect between them.
+        // One fsync preserves the replay contract without a redundant barrier.
+        self.try_emit_run_events([authorized, tool_started])?;
 
         if mutates {
             lease.arm(format!(

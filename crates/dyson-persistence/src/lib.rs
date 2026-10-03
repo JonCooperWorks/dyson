@@ -142,8 +142,26 @@ pub trait ChatHistory: Send + Sync {
         Ok(())
     }
 
+    /// Commit adjacent events at one durability barrier when supported.
+    fn append_run_events(&self, chat_id: &str, events: &[dyson_harness::RunEvent]) -> Result<()> {
+        for event in events {
+            self.append_run_event(chat_id, event)?;
+        }
+        Ok(())
+    }
+
     /// Load the canonical run journal for replay, recovery, and evaluations.
     fn load_run_events(&self, _chat_id: &str) -> Result<Vec<dyson_harness::RunEvent>> {
         Ok(Vec::new())
+    }
+
+    /// Query recovery state without requiring a full journal replay per tool.
+    fn load_unresolved_tool_outcomes(
+        &self,
+        chat_id: &str,
+    ) -> Result<Vec<dyson_harness::protocol::UnresolvedToolOutcome>> {
+        Ok(dyson_harness::protocol::unresolved_tool_outcomes(
+            &self.load_run_events(chat_id)?,
+        ))
     }
 }

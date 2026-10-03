@@ -271,9 +271,7 @@ impl TaskRuntime {
             if checkpoint.pending.is_empty() {
                 continue;
             }
-            let unresolved = crate::agent::protocol::unresolved_tool_outcomes(
-                &storage.store.load_run_events(&chat)?,
-            );
+            let unresolved = storage.store.load_unresolved_tool_outcomes(&chat)?;
             for (operation, claims) in checkpoint.pending {
                 if unresolved
                     .iter()
