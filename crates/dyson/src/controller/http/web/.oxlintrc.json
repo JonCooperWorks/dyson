@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react"],
+  "categories": { "correctness": "off" },
+  "env": { "browser": true, "es2024": true, "node": true },
+  "globals": { "__BUILD__": "readonly" },
+  "rules": {
+    "no-undef": "error",
+    "react/jsx-no-undef": "error"
+  }
+}

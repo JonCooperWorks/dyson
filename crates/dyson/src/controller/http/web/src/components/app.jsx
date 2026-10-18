@@ -354,7 +354,7 @@ function App() {
           {showLeft && <div className="scrim" onClick={closeRails}/>}
           <LeftRail active={conv} onNew={newConversation}
                     setActive={(id) => { setConv(id); setToolRef(null); setShowLeft(false); }}/>
-          <ConversationView conv={conv} toolRef={toolRef} setToolRef={setToolRef}/>
+          <ConversationView conv={conv} setConv={setConv} toolRef={toolRef} setToolRef={setToolRef}/>
         </main>
       )}
       {view === 'mind' && (
@@ -390,7 +390,7 @@ function App() {
 // Renders the session for `conv`.  Streaming SSE for inactive chats
 // keeps populating their sessions, so switching back picks up exactly
 // where the user left off.
-function ConversationView({ conv, toolRef, setToolRef }) {
+function ConversationView({ conv, setConv, toolRef, setToolRef }) {
   const client = useApi();
   const session = useSession(conv);
   const mutate = useSessionMutator(conv);
