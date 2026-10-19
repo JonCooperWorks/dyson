@@ -182,11 +182,15 @@ impl Tool for BashTool {
         // (turn cancelled via `tokio::select!` in the controller), the whole
         // shell process group gets SIGKILLed instead of leaving grandchildren
         // behind.
+        // Taken right before the fork so Swarm can pair this call with the
+        // shell's exec, which the VM's security sensor records.
+        let spawned_ms = crate::security_spawns::now_ms();
         let child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| DysonError::tool("bash", format!("failed to spawn: {e}")))?;
+        crate::security_spawns::record(ctx.tool_use_id.as_deref(), "bash", spawned_ms);
         let mut child = ManagedChild::new(child);
 
         // -- Drain stdout/stderr concurrently with wait() --
