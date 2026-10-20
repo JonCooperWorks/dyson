@@ -403,6 +403,8 @@ impl LlmClient for ClaudeCodeClient {
                 .env("ANTHROPIC_AUTH_TOKEN", token);
         }
 
+        crate::security_spawns::correlate(&mut cmd, None);
+
         // -- Spawn the process --
         let mut child = cmd.spawn().map_err(|e| {
             DysonError::Llm(format!(

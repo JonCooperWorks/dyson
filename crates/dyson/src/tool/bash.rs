@@ -184,6 +184,7 @@ impl Tool for BashTool {
         // behind.
         // Taken right before the fork so Swarm can pair this call with the
         // shell's exec, which the VM's security sensor records.
+        crate::security_spawns::correlate(&mut cmd, ctx.tool_use_id.as_deref());
         let spawned_ms = crate::security_spawns::now_ms();
         let child = cmd
             .stdout(Stdio::piped())

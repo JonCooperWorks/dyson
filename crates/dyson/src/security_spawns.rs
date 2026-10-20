@@ -25,6 +25,45 @@ pub struct Spawn {
     pub spawned_ms: i64,
 }
 
+/// Correlate a launched process tree with the active tool/agent observation.
+/// Set only on this Command; never mutate the process-wide environment.
+/// Descendants inherit the execution ID unless they explicitly clear it.
+pub fn correlate(cmd: &mut tokio::process::Command, tool_use_id: Option<&str>) -> String {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    let execution = format!("{:032x}", rand::random::<u128>());
+    // Clear inherited IDs first: an absent current span must not misattribute
+    // this invocation to whichever process launched Dyson.
+    for key in [
+        "DYSON_EXECUTION_ID",
+        "DYSON_TRACE_ID",
+        "DYSON_SPAN_ID",
+        "DYSON_TOOL_CALL_ID",
+    ] {
+        cmd.env_remove(key);
+    }
+    cmd.env("DYSON_EXECUTION_ID", &execution);
+    let span = tracing::Span::current();
+    span.set_attribute("dyson.execution.id", execution.clone());
+    let context = span.context();
+    let borrowed = context.span();
+    let identity = borrowed.span_context();
+    if identity.is_valid() {
+        cmd.env("DYSON_TRACE_ID", identity.trace_id().to_string());
+        cmd.env("DYSON_SPAN_ID", identity.span_id().to_string());
+    }
+    if let Some(id) = tool_use_id.filter(|id| {
+        !id.is_empty()
+            && id.len() <= 256
+            && id
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_.:".contains(&c))
+    }) {
+        cmd.env("DYSON_TOOL_CALL_ID", id);
+    }
+    execution
+}
+
 fn queue() -> &'static Mutex<Vec<Spawn>> {
     static QUEUE: OnceLock<Mutex<Vec<Spawn>>> = OnceLock::new();
     QUEUE.get_or_init(|| Mutex::new(Vec::new()))
@@ -146,5 +185,57 @@ mod tests {
         let before = queue().lock().unwrap().len();
         record(Some("toolu_1"), "bash", 1);
         assert_eq!(queue().lock().unwrap().len(), before);
+    }
+    #[tokio::test]
+    async fn execution_ids_are_per_invocation_and_inherited_by_descendants() {
+        let mut first = tokio::process::Command::new("sh");
+        first
+            .env_clear()
+            .env("DYSON_TRACE_ID", "stale")
+            .env("DYSON_TOOL_CALL_ID", "stale");
+        first.arg("-c").arg("printf '%s|%s|%s|' \"$DYSON_EXECUTION_ID\" \"$DYSON_TRACE_ID\" \"$DYSON_TOOL_CALL_ID\"; sh -c 'printf %s \"$DYSON_EXECUTION_ID\"'");
+        let id = correlate(&mut first, Some("call-1"));
+        let output = first.output().await.unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("{id}||call-1|{id}")
+        );
+        let mut second = tokio::process::Command::new("sh");
+        assert_ne!(id, correlate(&mut second, None));
+    }
+
+    #[test]
+    fn execution_id_is_attached_to_the_active_trace_span() {
+        use opentelemetry::trace::TracerProvider;
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+        use tracing_subscriber::prelude::*;
+        let memory = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(memory.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        let execution = tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("tool.execute");
+            let _entered = span.enter();
+            let mut command = tokio::process::Command::new("sh");
+            let id = correlate(&mut command, Some("call-1"));
+            let env: std::collections::HashMap<_, _> = command
+                .as_std()
+                .get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|s| s.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect();
+            assert_eq!(env["DYSON_TRACE_ID"].as_ref().unwrap().len(), 32);
+            assert_eq!(env["DYSON_SPAN_ID"].as_ref().unwrap().len(), 16);
+            id
+        });
+        let spans = memory.get_finished_spans().unwrap();
+        assert!(spans[0].attributes.iter().any(|a| a.key.as_str() == "dyson.execution.id" && a.value.to_string() == execution));
     }
 }
