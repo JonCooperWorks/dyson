@@ -184,14 +184,21 @@ impl Tool for BashTool {
         // behind.
         // Taken right before the fork so Swarm can pair this call with the
         // shell's exec, which the VM's security sensor records.
-        crate::security_spawns::correlate(&mut cmd, ctx.tool_use_id.as_deref());
+        // The execution ID in the shell's environment is a hint the shell
+        // controls; the spawn report carries the one this runtime issued.
+        let execution = crate::security_spawns::correlate(&mut cmd, ctx.tool_use_id.as_deref());
         let spawned_ms = crate::security_spawns::now_ms();
         let child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| DysonError::tool("bash", format!("failed to spawn: {e}")))?;
-        crate::security_spawns::record(ctx.tool_use_id.as_deref(), "bash", spawned_ms);
+        crate::security_spawns::record(
+            ctx.tool_use_id.as_deref(),
+            "bash",
+            spawned_ms,
+            Some(&execution),
+        );
         let mut child = ManagedChild::new(child);
 
         // -- Drain stdout/stderr concurrently with wait() --

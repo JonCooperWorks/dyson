@@ -403,7 +403,10 @@ impl LlmClient for ClaudeCodeClient {
                 .env("ANTHROPIC_AUTH_TOKEN", token);
         }
 
-        crate::security_spawns::correlate(&mut cmd, None);
+        // One execution ID per CLI launch, reported as this runtime's (the
+        // environment copy is only a hint; see `security_spawns`).
+        let execution = crate::security_spawns::correlate(&mut cmd, None);
+        let spawned_ms = crate::security_spawns::now_ms();
 
         // -- Spawn the process --
         let mut child = cmd.spawn().map_err(|e| {
@@ -413,6 +416,7 @@ impl LlmClient for ClaudeCodeClient {
                 self.claude_path
             ))
         })?;
+        crate::security_spawns::record(None, "claude_code", spawned_ms, Some(&execution));
 
         // -- Write prompt to stdin and close it --
         //

@@ -7,6 +7,15 @@
 //! clock. Swarm pairs the two. Only ids and names leave the VM, never the
 //! command. Best effort: a report that cannot be delivered is dropped and
 //! the process simply shows as an unlinked tool call.
+//!
+//! Each report also carries the execution ID [`correlate`] set on the launch
+//! (`DYSON_EXECUTION_ID`), harness CLI launches included (reported with no
+//! tool call id; Swarm does not pair those with tool shells). The variable a
+//! process carries is only a hint: the process can change or clear it, or
+//! copy another one from its own environment. The report is the runtime's
+//! own, authenticated as its instance, so Swarm can say whether an ID a
+//! process carried was issued on that agent (`execution_verified`), never
+//! that this process is the launch it was issued for.
 
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -20,14 +29,21 @@ const MAX_BATCH: usize = 200;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Spawn {
+    /// Empty for a launch that is not a tool call (a harness CLI). Sent even
+    /// then: Swarm before execution IDs requires the field, and drops it.
     pub tool_use_id: String,
     pub tool_name: String,
     pub spawned_ms: i64,
+    /// The launch's `DYSON_EXECUTION_ID`. Older Swarm ignores it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
 }
 
 /// Correlate a launched process tree with the active tool/agent observation.
 /// Set only on this Command; never mutate the process-wide environment.
 /// Descendants inherit the execution ID unless they explicitly clear it.
+/// Returns the execution ID, for the spawn report ([`record`]): the
+/// environment copy is a hint the process controls; the report is not.
 pub fn correlate(cmd: &mut tokio::process::Command, tool_use_id: Option<&str>) -> String {
     use opentelemetry::trace::TraceContextExt;
     use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -76,9 +92,37 @@ pub fn now_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
-/// Queue one report. No-op outside Swarm or without a tool call id.
-pub fn record(tool_use_id: Option<&str>, tool_name: &str, spawned_ms: i64) {
-    let Some(id) = tool_use_id.filter(|id| !id.is_empty() && id.len() <= 256) else {
+/// The report for one launch, or None with neither a tool call id nor an
+/// execution ID to report.
+fn spawn(
+    tool_use_id: Option<&str>,
+    tool_name: &str,
+    spawned_ms: i64,
+    execution_id: Option<&str>,
+) -> Option<Spawn> {
+    let tool_use_id = tool_use_id.filter(|id| !id.is_empty() && id.len() <= 256);
+    let execution_id =
+        execution_id.filter(|id| id.len() == 32 && id.bytes().all(|c| c.is_ascii_hexdigit()));
+    if tool_use_id.is_none() && execution_id.is_none() {
+        return None;
+    }
+    Some(Spawn {
+        tool_use_id: tool_use_id.unwrap_or_default().to_owned(),
+        tool_name: tool_name.chars().take(128).collect(),
+        spawned_ms,
+        execution_id: execution_id.map(str::to_owned),
+    })
+}
+
+/// Queue one report. No-op outside Swarm, or with neither a tool call id
+/// nor an execution ID.
+pub fn record(
+    tool_use_id: Option<&str>,
+    tool_name: &str,
+    spawned_ms: i64,
+    execution_id: Option<&str>,
+) {
+    let Some(report) = spawn(tool_use_id, tool_name, spawned_ms, execution_id) else {
         return;
     };
     if crate::swarm_cost::runtime_proxy_parts().is_none() {
@@ -90,11 +134,7 @@ pub fn record(tool_use_id: Option<&str>, tool_name: &str, spawned_ms: i64) {
     if queue.len() >= MAX_QUEUED {
         queue.remove(0);
     }
-    queue.push(Spawn {
-        tool_use_id: id.to_owned(),
-        tool_name: tool_name.chars().take(128).collect(),
-        spawned_ms,
-    });
+    queue.push(report);
     drop(queue);
     ensure_flusher();
 }
@@ -168,6 +208,7 @@ mod tests {
                 tool_use_id: format!("t{i}"),
                 tool_name: "bash".into(),
                 spawned_ms: i,
+                execution_id: None,
             })
             .collect();
         let first = drain_batch(&mut q);
@@ -183,9 +224,51 @@ mod tests {
             return;
         }
         let before = queue().lock().unwrap().len();
-        record(Some("toolu_1"), "bash", 1);
+        record(Some("toolu_1"), "bash", 1, Some(&"a".repeat(32)));
         assert_eq!(queue().lock().unwrap().len(), before);
     }
+    #[test]
+    fn reports_carry_the_execution_id_and_keep_the_wire_shape() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let bash = spawn(Some("toolu_1"), "bash", 5, Some(id)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&bash).unwrap(),
+            serde_json::json!({"tool_use_id": "toolu_1", "tool_name": "bash",
+                               "spawned_ms": 5, "execution_id": id})
+        );
+        // A harness launch: no tool call, still reported for its ID, with
+        // the field Swarm before execution IDs requires (it drops the row).
+        let harness = spawn(None, "codex", 6, Some(id)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&harness).unwrap(),
+            serde_json::json!({"tool_use_id": "", "tool_name": "codex",
+                               "spawned_ms": 6, "execution_id": id})
+        );
+        // No ID (or a malformed one): the shape Swarm had before.
+        let plain = spawn(Some("toolu_2"), "bash", 7, Some("not-hex")).unwrap();
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            serde_json::json!({"tool_use_id": "toolu_2", "tool_name": "bash", "spawned_ms": 7})
+        );
+        assert_eq!(spawn(None, "bash", 8, None), None);
+        assert_eq!(spawn(Some(""), "bash", 8, Some("x")), None);
+    }
+
+    #[tokio::test]
+    async fn the_reported_execution_id_is_the_one_the_process_sees() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.env_clear()
+            .arg("-c")
+            .arg("printf %s \"$DYSON_EXECUTION_ID\"");
+        let id = correlate(&mut cmd, Some("call-1"));
+        let report = spawn(Some("call-1"), "bash", now_ms(), Some(&id)).unwrap();
+        let output = cmd.output().await.unwrap();
+        assert_eq!(
+            Some(String::from_utf8(output.stdout).unwrap()),
+            report.execution_id
+        );
+    }
+
     #[tokio::test]
     async fn execution_ids_are_per_invocation_and_inherited_by_descendants() {
         let mut first = tokio::process::Command::new("sh");
