@@ -49,6 +49,8 @@ use crate::config::Settings;
 ///
 /// Multiple controllers run as concurrent tokio tasks.  Each is independent:
 /// separate agent instances, separate conversation state, separate I/O.
+// `#[async_trait]` emits a bare `#[must_use]` on boxed-future trait methods.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait Controller: Send {
     /// Human-readable name for logging (e.g., "terminal").

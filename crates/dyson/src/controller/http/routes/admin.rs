@@ -284,7 +284,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     }
     let http_auth = match auth::prepare_http_auth(body.http_bearer.as_ref(), state).await {
         Ok(auth) => auth,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let snapshot = state.settings_snapshot();
 
@@ -365,11 +365,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
             ConfigureConfigPatch {
                 http_auth_hash: http_auth.as_ref().map(|(hash, _)| hash.as_str()),
                 provider_name: body.provider_name.as_deref(),
-                models: if want_models {
-                    Some(body.models.as_slice())
-                } else {
-                    None
-                },
+                models: want_models.then_some(body.models.as_slice()),
                 api_key: if want_api_key {
                     body.proxy_token
                         .as_ref()
@@ -377,11 +373,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
                 } else {
                     None
                 },
-                base_url: if want_base_url {
-                    body.proxy_base.as_deref()
-                } else {
-                    None
-                },
+                base_url: body.proxy_base.as_deref().filter(|_| want_base_url),
                 active_selection,
                 image_provider_block: if want_image_block {
                     body.image_provider_name
@@ -390,16 +382,14 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
                 } else {
                     None
                 },
-                image_provider: if want_image_provider {
-                    body.image_generation_provider.as_deref()
-                } else {
-                    None
-                },
-                image_model: if want_image_model {
-                    body.image_generation_model.as_deref()
-                } else {
-                    None
-                },
+                image_provider: body
+                    .image_generation_provider
+                    .as_deref()
+                    .filter(|_| want_image_provider),
+                image_model: body
+                    .image_generation_model
+                    .as_deref()
+                    .filter(|_| want_image_model),
                 tools: body.tools.as_deref(),
                 reset_skills: body.reset_skills,
                 mcp_servers: body.mcp_servers.as_ref(),

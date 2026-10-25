@@ -123,6 +123,8 @@ pub use dyson_harness::{Idempotency, ResourceAccess, ResourceClaim, ToolExecutio
 ///     }
 /// }
 /// ```
+// `#[async_trait]` emits a bare `#[must_use]` on boxed-future trait methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// The tool's unique name, used for dispatch and display.
@@ -274,18 +276,17 @@ pub(crate) fn validate_tool_input(
                 ));
             }
         }
-        if let Some(number) = value.as_f64() {
-            if schema
+        if let Some(number) = value.as_f64()
+            && (schema
                 .get("minimum")
                 .and_then(serde_json::Value::as_f64)
                 .is_some_and(|min| number < min)
                 || schema
                     .get("maximum")
                     .and_then(serde_json::Value::as_f64)
-                    .is_some_and(|max| number > max)
-            {
-                return Some(format!("{path}: number is outside the allowed range"));
-            }
+                    .is_some_and(|max| number > max))
+        {
+            return Some(format!("{path}: number is outside the allowed range"));
         }
         if let Some(expected) = schema.get("type").and_then(serde_json::Value::as_str) {
             let valid = match expected {

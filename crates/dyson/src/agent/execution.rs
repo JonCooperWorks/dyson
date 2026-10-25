@@ -280,21 +280,21 @@ impl Agent {
         mut result: Result<(ToolOutput, std::time::Duration)>,
         output: &mut dyn Output,
     ) -> Result<()> {
-        if let Ok((out, _)) = &mut result {
-            if let Some(request) = out.human_input.take() {
-                if self.history_backend.is_none() {
-                    *out = ToolOutput::error(
-                        "Durable history is required for human input. Ask the user in your response instead.",
-                    );
-                } else {
-                    let notification = request.clone();
-                    self.last_run_status = super::protocol::RunStatus::WaitingForInput;
-                    self.transition(super::continuation::Transition::Wait(request))?;
-                    if let Err(error) = output.human_input_requested(&notification) {
-                        tracing::warn!(%error, "question delivery failed; durable request remains available");
-                    }
-                    return Ok(());
+        if let Ok((out, _)) = &mut result
+            && let Some(request) = out.human_input.take()
+        {
+            if self.history_backend.is_none() {
+                *out = ToolOutput::error(
+                    "Durable history is required for human input. Ask the user in your response instead.",
+                );
+            } else {
+                let notification = request.clone();
+                self.last_run_status = super::protocol::RunStatus::WaitingForInput;
+                self.transition(super::continuation::Transition::Wait(request))?;
+                if let Err(error) = output.human_input_requested(&notification) {
+                    tracing::warn!(%error, "question delivery failed; durable request remains available");
                 }
+                return Ok(());
             }
         }
         let tool_result_msg = match &result {

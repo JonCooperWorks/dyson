@@ -147,10 +147,10 @@ async fn authorize_route(
             | (&Method::DELETE, ["api", "admin", "skills", _])
             | (&Method::GET, ["api", "admin", "skills" | "idle"])
     );
-    if configure_admin {
-        if let Some(response) = admin::authorize_configure(req.headers(), state).await {
-            return Some(response);
-        }
+    if configure_admin
+        && let Some(response) = admin::authorize_configure(req.headers(), state).await
+    {
+        return Some(response);
     }
     let ticket_authorized = consume_sse_ticket(req, state, method, segs);
     if !configure_admin

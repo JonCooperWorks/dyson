@@ -46,6 +46,8 @@ pub struct GeneratedImage {
 /// Implementations handle the HTTP call and response parsing for a specific
 /// image generation API.  The `ImageGenerateTool` delegates to this trait
 /// and handles input/output formatting.
+// `#[async_trait]` emits a bare `#[must_use]` on boxed-future trait methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ImageGenerationProvider: Send + Sync {
     /// Generate images from a text prompt.

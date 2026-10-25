@@ -270,15 +270,15 @@ pub(super) async fn post(
         Ok(b) => b,
         Err(e) => return bad_request(&e),
     };
-    if body.attachments.is_empty() {
-        if let Some(store) = &state.history {
-            match crate::agent::continuation::resume_command(store.as_ref(), id, &body.prompt) {
-                Ok(Some((run_id, answer))) => {
-                    return resume(state, id, super::runs::ResumeRequest { run_id, answer }).await;
-                }
-                Err(error) => return bad_request(&error.sanitized_message()),
-                Ok(None) => {}
+    if body.attachments.is_empty()
+        && let Some(store) = &state.history
+    {
+        match crate::agent::continuation::resume_command(store.as_ref(), id, &body.prompt) {
+            Ok(Some((run_id, answer))) => {
+                return resume(state, id, super::runs::ResumeRequest { run_id, answer }).await;
             }
+            Err(error) => return bad_request(&error.sanitized_message()),
+            Ok(None) => {}
         }
     }
     dispatch(body, state, id, None).await
@@ -433,23 +433,23 @@ async fn dispatch(
 
     let history = state.history.clone();
 
-    if let Some(request) = &resume {
-        if let Some(answer) = &request.answer {
-            let saved = (|| -> crate::Result<()> {
-                let store = history
-                    .as_ref()
-                    .ok_or_else(|| crate::DysonError::Llm("durable history is required".into()))?;
-                let mut record =
-                    crate::agent::continuation::RunCheckpoint::load(store.as_ref(), id)?
-                        .ok_or_else(|| crate::DysonError::Llm("missing continuation".into()))?;
-                record.accept_answer(store.as_ref(), id, answer)
-            })();
-            if let Err(error) = saved {
-                handle
-                    .busy
-                    .store(false, std::sync::atomic::Ordering::SeqCst);
-                return bad_request(&error.sanitized_message());
-            }
+    if let Some(request) = &resume
+        && let Some(answer) = &request.answer
+    {
+        let saved = (|| -> crate::Result<()> {
+            let store = history
+                .as_ref()
+                .ok_or_else(|| crate::DysonError::Llm("durable history is required".into()))?;
+            let mut record =
+                crate::agent::continuation::RunCheckpoint::load(store.as_ref(), id)?
+                    .ok_or_else(|| crate::DysonError::Llm("missing continuation".into()))?;
+            record.accept_answer(store.as_ref(), id, answer)
+        })();
+        if let Err(error) = saved {
+            handle
+                .busy
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return bad_request(&error.sanitized_message());
         }
     }
 
@@ -795,12 +795,11 @@ async fn dispatch(
             // Cancellation: stop draining; leave the queue alone for
             // the next POST or restart to pick up.
             if cancel_for_select.is_cancelled() {
-                if let Some(store) = history.as_ref() {
-                    if let Err(error) =
+                if let Some(store) = history.as_ref()
+                    && let Err(error) =
                         crate::agent::continuation::RunCheckpoint::cancel(store.as_ref(), &chat_id)
-                    {
-                        tracing::warn!(%error, "failed to cancel saved run");
-                    }
+                {
+                    tracing::warn!(%error, "failed to cancel saved run");
                 }
                 break;
             }

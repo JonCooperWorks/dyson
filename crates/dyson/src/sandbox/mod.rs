@@ -122,6 +122,8 @@ pub enum SandboxDecision {
 ///
 /// Sandboxes are `Send + Sync` because the agent may process tool calls
 /// from multiple conversations (future: multi-session support).
+// `#[async_trait]` emits a bare `#[must_use]` on boxed-future trait methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Sandbox: Send + Sync {
     /// Inspect a tool call before execution.

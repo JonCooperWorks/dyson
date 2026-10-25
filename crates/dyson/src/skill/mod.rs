@@ -83,6 +83,8 @@ use crate::tool::{Tool, ToolOutput};
 /// Agent shuts down:
 ///   → skill.on_unload()         # close connections, clean up temp files
 /// ```
+// `#[async_trait]` emits a bare `#[must_use]` on boxed-future trait methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Skill: Send + Sync {
     /// The skill's unique name, used for logging and identification.

@@ -31,6 +31,8 @@ use tokio::process::Command;
 /// Implementations handle transcription for a specific engine or API.
 /// The `media::resolve_attachment()` function delegates to this trait and
 /// handles input/output formatting.
+// `#[async_trait]` emits a bare `#[must_use]` on boxed-future trait methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Transcriber: Send + Sync {
     /// Transcribe raw audio bytes to text.

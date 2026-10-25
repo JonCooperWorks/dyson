@@ -661,14 +661,11 @@ pub(super) async fn delete(state: &HttpState, id: &str) -> Resp {
     if let Some(cancel) = handle.cancel.lock().await.as_ref() {
         cancel.cancel();
     }
-    if !handle.busy.load(std::sync::atomic::Ordering::SeqCst) {
-        if let Some(store) = &state.history {
-            if let Err(error) =
-                crate::agent::continuation::RunCheckpoint::cancel(store.as_ref(), id)
-            {
-                return bad_request(&error.sanitized_message());
-            }
-        }
+    if !handle.busy.load(std::sync::atomic::Ordering::SeqCst)
+        && let Some(store) = &state.history
+        && let Err(error) = crate::agent::continuation::RunCheckpoint::cancel(store.as_ref(), id)
+    {
+        return bad_request(&error.sanitized_message());
     }
 
     let in_memory_empty = match handle.agent.lock().await.as_ref() {

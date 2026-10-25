@@ -686,12 +686,11 @@ impl Agent {
     /// Messages are cleared immediately so the caller can continue.  Dreams
     /// run in the background with no way to block the caller.
     pub fn clear(&mut self) {
-        if let Some(backend) = &self.history_backend {
-            if let Err(error) =
+        if let Some(backend) = &self.history_backend
+            && let Err(error) =
                 continuation::RunCheckpoint::cancel(backend.store.as_ref(), &backend.chat_id)
-            {
-                tracing::warn!(%error, "failed to cancel saved run on clear");
-            }
+        {
+            tracing::warn!(%error, "failed to cancel saved run on clear");
         }
         self.continuation = None;
         self.fire_dreams(DreamEvent::SessionEnd);
@@ -1087,12 +1086,11 @@ impl Agent {
         user_input: &str,
         output: &mut dyn Output,
     ) -> Result<protocol::RunOutcome> {
-        if let Some(backend) = &self.history_backend {
-            if let Some((run, answer)) =
+        if let Some(backend) = &self.history_backend
+            && let Some((run, answer)) =
                 continuation::resume_command(backend.store.as_ref(), &backend.chat_id, user_input)?
-            {
-                return self.resume_detailed(&run, answer, output).await;
-            }
+        {
+            return self.resume_detailed(&run, answer, output).await;
         }
         self.ensure_startable()?;
         let before = self.conversation.token_budget.clone();

@@ -184,6 +184,8 @@ async fn read_response_text_capped(
 /// transport's background reader routes that server-originated traffic to
 /// an [`InboundHandler`] installed via [`McpTransport::set_inbound_handler`];
 /// it still correlates responses to our own outbound requests by id.
+// `#[async_trait]` emits a bare `#[must_use]` on boxed-future trait methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait McpTransport: Send + Sync {
     /// Send a JSON-RPC request and wait for the response.
@@ -214,6 +216,8 @@ pub trait McpTransport: Send + Sync {
 /// Routes JSON-RPC messages that the MCP *server* originates (server →
 /// client).  Implemented by the skill's notification/request router and
 /// installed on the transport with [`McpTransport::set_inbound_handler`].
+// `#[async_trait]` emits a bare `#[must_use]` on boxed-future trait methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait InboundHandler: Send + Sync {
     /// Handle a server-originated request.  The returned `Value` becomes

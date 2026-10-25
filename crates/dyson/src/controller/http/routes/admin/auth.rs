@@ -163,31 +163,33 @@ enum ConfigureHashOutcome {
 pub(super) async fn prepare_http_auth(
     http_bearer: Option<&crate::auth::Credential>,
     state: &HttpState,
-) -> Result<Option<(String, std::sync::Arc<dyn crate::auth::Auth>)>, Resp> {
+) -> Result<Option<(String, std::sync::Arc<dyn crate::auth::Auth>)>, Box<Resp>> {
     if matches!(
         state.auth_mode,
         crate::controller::http::wire::AuthMode::SwarmBearer
     ) && http_bearer.is_none()
     {
-        return Err(bad_request("managed configure requires http_bearer"));
+        return Err(Box::new(bad_request(
+            "managed configure requires http_bearer",
+        )));
     }
     let Some(bearer) = http_bearer else {
         return Ok(None);
     };
     let bearer = bearer.expose().to_owned();
     if bearer.len() < 16 || bearer.len() > 1024 || bearer.trim() != bearer {
-        return Err(bad_request(
+        return Err(Box::new(bad_request(
             "http_bearer must be an instance credential (16-1024 bytes)",
-        ));
+        )));
     }
     let hash = match hash_configure_secret(bearer).await {
         ConfigureHashOutcome::Hashed(hash) => hash,
         ConfigureHashOutcome::Failed(_) => {
-            return Err(bad_request("HTTP credential hashing failed"));
+            return Err(Box::new(bad_request("HTTP credential hashing failed")));
         }
     };
     let auth = crate::auth::HashedBearerAuth::from_phc(hash.clone())
-        .map_err(|_| bad_request("invalid HTTP credential hash"))?;
+        .map_err(|_| Box::new(bad_request("invalid HTTP credential hash")))?;
     Ok(Some((hash, std::sync::Arc::new(auth))))
 }
 

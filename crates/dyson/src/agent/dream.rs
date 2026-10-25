@@ -146,6 +146,8 @@ pub struct DreamOutcome {
 /// - `run()` must never block the agent loop.  It runs in a spawned task.
 /// - Dreams communicate only through the shared workspace (`Arc<RwLock>`).
 ///   Nothing enters the main conversation history.
+// `#[async_trait]` emits a bare `#[must_use]` on boxed-future trait methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Dream: Send + Sync {
     /// Human-readable name for logging and observability.

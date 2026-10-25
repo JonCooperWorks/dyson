@@ -165,10 +165,10 @@ impl RunCheckpoint {
         if &self.cursor.run_id != run {
             return Err(invalid("run ID does not match the saved continuation"));
         }
-        if let (Some(saved), Some(answer)) = (&self.accepted_answer, answer) {
-            if saved != answer {
-                return Err(invalid("a different answer was already accepted"));
-            }
+        if let (Some(saved), Some(answer)) = (&self.accepted_answer, answer)
+            && saved != answer
+        {
+            return Err(invalid("a different answer was already accepted"));
         }
         match (&self.cursor.state, answer.or(self.accepted_answer.as_ref())) {
             (RunState::Running | RunState::Paused, None) => Ok(()),
@@ -196,15 +196,14 @@ impl RunCheckpoint {
 
 impl Agent {
     pub(super) fn ensure_startable(&self) -> Result<()> {
-        if let Some(backend) = &self.history_backend {
-            if let Some(record) = RunCheckpoint::load(backend.store.as_ref(), &backend.chat_id)? {
-                if !matches!(record.cursor.state, RunState::Finished { .. }) {
-                    return Err(invalid(format!(
-                        "Run {} is unfinished; resume or cancel it before starting another turn",
-                        record.cursor.run_id.0
-                    )));
-                }
-            }
+        if let Some(backend) = &self.history_backend
+            && let Some(record) = RunCheckpoint::load(backend.store.as_ref(), &backend.chat_id)?
+            && !matches!(record.cursor.state, RunState::Finished { .. })
+        {
+            return Err(invalid(format!(
+                "Run {} is unfinished; resume or cancel it before starting another turn",
+                record.cursor.run_id.0
+            )));
         }
         Ok(())
     }

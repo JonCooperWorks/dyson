@@ -185,6 +185,8 @@ pub struct StreamResponse {
 /// LLM calls are network I/O — building the HTTP request, streaming the
 /// response.  Async lets the tokio runtime do other work (handle Ctrl-C,
 /// run the UI) while waiting for the first token.
+// `#[async_trait]` emits a bare `#[must_use]` on boxed-future trait methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     /// Start a streaming completion.

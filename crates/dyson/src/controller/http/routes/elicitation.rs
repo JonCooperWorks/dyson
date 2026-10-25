@@ -33,10 +33,10 @@ fn durable_pending(state: &HttpState) -> crate::Result<Vec<serde_json::Value>> {
     let mut pending = Vec::new();
     if let Some(store) = &state.history {
         for chat in store.list_harness_chats()? {
-            if let Some(record) = RunCheckpoint::load(store.as_ref(), &chat)? {
-                if let Some(request) = record.pending_input(&chat) {
-                    pending.push(request);
-                }
+            if let Some(record) = RunCheckpoint::load(store.as_ref(), &chat)?
+                && let Some(request) = record.pending_input(&chat)
+            {
+                pending.push(request);
             }
         }
     }

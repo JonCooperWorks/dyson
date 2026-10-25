@@ -635,6 +635,8 @@ impl Agent {
         }
     }
 
+    // The agent loop's turn state machine reads best as one function; splitting it risks behaviour drift.
+    #[allow(clippy::cognitive_complexity)]
     async fn run_inner_impl(&mut self, output: &mut dyn Output) -> Result<String> {
         if !self.resuming {
             self.conversation.turn_count += 1;

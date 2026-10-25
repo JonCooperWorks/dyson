@@ -127,6 +127,8 @@ impl AuthInfo {
 ///     Err(_) => { return unauthorized_response(); }
 /// }
 /// ```
+// `#[async_trait]` emits a bare `#[must_use]` on boxed-future trait methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Auth: Send + Sync {
     /// Apply authentication to an outgoing HTTP request.
