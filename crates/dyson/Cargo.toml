@@ -70,6 +70,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # Content + storage
 rusqlite = { version = "0.40", features = ["bundled"] }
 regex = "1"
+cedar-policy = { version = "4.14", optional = true }
 glob = "0.3"
 ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
@@ -129,6 +130,11 @@ wiremock = "0.6"
 tokio = { version = "1", features = ["test-util"] }
 
 [features]
+default = ["cedar"]
+# Cedar policy layer over the tool sandbox (`sandbox.cedar` in dyson.json).
+# Without it a `cedar` block is parsed and ignored with a warning.
+cedar = ["dep:cedar-policy"]
+
 # Exposes `SandboxBypassGuard::for_test()` and the test variant of
 # `SandboxBypassPurpose` to downstream integration test crates (where
 # `cfg(test)` from inside this crate is not visible).  NEVER enable

@@ -1,0 +1,32 @@
+// Entity model for tool calls.  One action, `call_tool`: the tool is the
+// resource, so per-tool rules match on `resource == Dyson::Tool::"bash"`
+// and MCP tools by `resource.server`.
+namespace Dyson {
+  entity Agent = {
+    // Swarm instance id when running under Swarm.
+    instance_id?: String,
+  };
+
+  entity Tool = {
+    // "builtin" or "mcp".
+    kind: String,
+    // MCP server name, for tools registered as `mcp__<server>__<tool>`.
+    server?: String,
+  };
+
+  action call_tool appliesTo {
+    principal: Agent,
+    resource: Tool,
+    context: {
+      // Subagent nesting depth; 0 = top-level agent.
+      depth: Long,
+      // Top-level string fields lifted from the tool input when present.
+      command?: String,
+      // Absolute: relative paths are joined to the working directory.
+      path?: String,
+      url?: String,
+      // Lowercased host of `url`.
+      host?: String,
+    }
+  };
+}

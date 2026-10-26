@@ -20,6 +20,43 @@ pub fn digest(s: &str) -> String {
     format!("{:x}", Sha256::digest(s.as_bytes()))
 }
 
+/// JSON text with every object's keys sorted, for digests stored in
+/// checkpoints.  `cedar-policy-core` switches on serde_json's
+/// `preserve_order`, so plain `to_string` of a `Value` follows insertion
+/// order; sorted is what it produced before, so checkpoints written by
+/// older binaries still resume.  Structs come out with sorted fields too,
+/// so only use it on `Value`s, tuples and sequences of them.
+pub fn canonical_json(value: &impl Serialize) -> serde_json::Result<String> {
+    fn sort_keys(value: serde_json::Value) -> serde_json::Value {
+        use serde_json::Value;
+        match value {
+            Value::Object(map) => {
+                let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(k, v)| (k, sort_keys(v)))
+                        .collect(),
+                )
+            }
+            Value::Array(items) => Value::Array(items.into_iter().map(sort_keys).collect()),
+            other => other,
+        }
+    }
+    serde_json::to_string(&sort_keys(serde_json::to_value(value)?))
+}
+
+#[cfg(test)]
+#[test]
+fn canonical_json_sorts_nested_keys_whatever_the_insertion_order() {
+    let value = serde_json::json!({"b": 1, "a": {"z": [{"y": 1, "x": 2}], "c": null}});
+    assert_eq!(
+        canonical_json(&("bash", value)).unwrap(),
+        r#"["bash",{"a":{"c":null,"z":[{"x":2,"y":1}]},"b":1}]"#
+    );
+}
+
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub struct Criterion {
     pub id: String,

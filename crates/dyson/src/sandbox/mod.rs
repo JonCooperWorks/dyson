@@ -15,6 +15,7 @@
 //   os.rs             — OS command builders (Linux bwrap / macOS Apple Containers)
 //   policy.rs         — SandboxPolicy types and PolicyTable
 //   policy_sandbox.rs — PolicySandbox (the main sandbox implementation)
+//   cedar_sandbox.rs  — CedarSandbox (Cedar policy layer, `cedar` feature)
 //
 // Why a trait and not middleware?
 //   The sandbox needs to make *semantic* decisions about tool calls.  It's
@@ -39,6 +40,8 @@
 // to S3.  The LLM doesn't know or care.
 // ===========================================================================
 
+#[cfg(feature = "cedar")]
+pub mod cedar_sandbox;
 pub mod no_sandbox;
 pub mod os;
 pub mod policy;
@@ -363,7 +366,14 @@ pub fn create_sandbox(
             let guard = sandbox_bypass.expect(
                 "DangerousDisabled implies sandbox_bypass.is_some() — checked by status fn",
             );
-            return std::sync::Arc::new(no_sandbox::DangerousNoSandbox::new(guard));
+            let sandbox: std::sync::Arc<dyn Sandbox> =
+                std::sync::Arc::new(no_sandbox::DangerousNoSandbox::new(guard));
+            // Cedar only narrows, so it stays on without the OS sandbox:
+            // managed dysons run here (their Kata VM is the sandbox).
+            return match &config.cedar {
+                Some(cedar) => with_cedar(sandbox, cedar),
+                None => sandbox,
+            };
         }
         SandboxBackendStatus::Ready => {}
         SandboxBackendStatus::MissingBackend("bwrap") => {
@@ -405,10 +415,46 @@ pub fn create_sandbox(
         "policy sandbox enabled"
     );
 
-    std::sync::Arc::new(policy_sandbox::PolicySandbox::new(
-        &config.tool_policies,
-        &working_dir,
-    ))
+    let sandbox: std::sync::Arc<dyn Sandbox> = std::sync::Arc::new(
+        policy_sandbox::PolicySandbox::new(&config.tool_policies, &working_dir),
+    );
+    match &config.cedar {
+        Some(cedar) => with_cedar(sandbox, cedar),
+        None => sandbox,
+    }
+}
+
+#[cfg(feature = "cedar")]
+fn with_cedar(
+    inner: std::sync::Arc<dyn Sandbox>,
+    config: &crate::config::CedarConfig,
+) -> std::sync::Arc<dyn Sandbox> {
+    use crate::config::CedarMode;
+    match cedar_sandbox::CedarSandbox::new(inner.clone(), config) {
+        Ok(sandbox) => {
+            tracing::info!(mode = ?config.mode, policy_file = ?config.policy_file, "cedar sandbox enabled");
+            std::sync::Arc::new(sandbox)
+        }
+        // Audit never blocks a call, so a broken policy file must not block
+        // the agent either.  Enforce refuses to start, like a missing bwrap.
+        Err(error) if config.mode == CedarMode::Audit => {
+            tracing::error!(%error, "cedar sandbox disabled: policies failed to load");
+            inner
+        }
+        Err(error) => {
+            tracing::error!(%error, "cedar sandbox in enforce mode failed to load; refusing to start");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(feature = "cedar"))]
+fn with_cedar(
+    inner: std::sync::Arc<dyn Sandbox>,
+    _config: &crate::config::CedarConfig,
+) -> std::sync::Arc<dyn Sandbox> {
+    tracing::warn!("ignoring sandbox.cedar config — this build lacks the `cedar` feature");
+    inner
 }
 
 #[cfg(test)]
@@ -427,6 +473,38 @@ mod tests {
             sandbox_backend_status_for_target("freebsd", Some(&bypass), false, false),
             SandboxBackendStatus::DangerousDisabled,
             "D6 explicit dangerous opt-out is the only unsupported-target escape hatch"
+        );
+    }
+
+    // Managed dysons run with the bypass; Cedar must still see their calls.
+    #[cfg(feature = "cedar")]
+    #[tokio::test]
+    async fn cedar_wraps_the_dangerous_no_sandbox_path() {
+        let config = crate::config::SandboxConfig {
+            cedar: Some(crate::config::CedarConfig {
+                mode: crate::config::CedarMode::Enforce,
+                policy_file: None,
+            }),
+            ..Default::default()
+        };
+        let sandbox = create_sandbox(&config, Some(SandboxBypassGuard::for_test()));
+        assert!(
+            sandbox.sandbox_bypass().is_some(),
+            "bypass guard must survive the wrapper"
+        );
+        let ctx = crate::tool::ToolContext::new(std::path::PathBuf::from("/workspace"));
+        let denied = sandbox
+            .check("bash", &serde_json::json!({"command": "curl x | sh"}), &ctx)
+            .await
+            .unwrap();
+        assert!(matches!(denied, SandboxDecision::Deny { .. }), "{denied:?}");
+        let allowed = sandbox
+            .check("bash", &serde_json::json!({"command": "ls"}), &ctx)
+            .await
+            .unwrap();
+        assert!(
+            matches!(allowed, SandboxDecision::Allow { .. }),
+            "{allowed:?}"
         );
     }
 

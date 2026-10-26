@@ -1,8 +1,8 @@
 //! Convert deserialized configuration into runtime settings.
 use crate::config::{
-    ActiveProvider, BuiltinSkillConfig, CompactionConfig, ControllerConfig, LocalSkillConfig,
-    McpAuthConfig, McpConfig, McpTransportConfig, ProviderConfig, SandboxConfig, Settings,
-    SkillConfig, SubagentAgentConfig, SubagentSkillConfig,
+    ActiveProvider, BuiltinSkillConfig, CedarConfig, CedarMode, CompactionConfig, ControllerConfig,
+    LocalSkillConfig, McpAuthConfig, McpConfig, McpTransportConfig, ProviderConfig, SandboxConfig,
+    Settings, SkillConfig, SubagentAgentConfig, SubagentSkillConfig,
 };
 use crate::secret::SecretRegistry;
 
@@ -394,7 +394,25 @@ pub(super) fn parse_sandbox(sandbox: Option<JsonSandbox>, settings: &mut Setting
         disabled: sb.disabled,
         os_profile: sb.os_profile,
         tool_policies,
+        cedar: sb.cedar.map(parse_cedar),
     };
+}
+
+fn parse_cedar(jc: JsonCedar) -> CedarConfig {
+    let mode = match jc.mode.as_deref() {
+        None | Some("audit") => CedarMode::Audit,
+        Some("enforce") => CedarMode::Enforce,
+        // A typo must never turn enforcement on, and failing the whole
+        // config over an audit layer is worse than auditing.
+        Some(other) => {
+            tracing::warn!(mode = other, "unknown sandbox.cedar.mode; using audit");
+            CedarMode::Audit
+        }
+    };
+    CedarConfig {
+        mode,
+        policy_file: jc.policy_file.map(std::path::PathBuf::from),
+    }
 }
 
 /// Parse workspace configuration.

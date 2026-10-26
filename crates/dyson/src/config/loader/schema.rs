@@ -229,6 +229,15 @@ pub(super) struct JsonSandbox {
     /// Per-tool sandbox policies (tool name or glob → policy overrides).
     #[serde(default)]
     pub(super) tool_policies: std::collections::HashMap<String, JsonToolPolicy>,
+    /// Cedar policy layer (`{"mode": "audit"|"enforce", "policy_file": ...}`).
+    pub(super) cedar: Option<JsonCedar>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct JsonCedar {
+    pub(super) mode: Option<String>,
+    pub(super) policy_file: Option<String>,
 }
 
 /// Per-tool policy overrides in dyson.json.

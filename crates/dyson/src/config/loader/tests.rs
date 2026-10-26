@@ -665,3 +665,30 @@ fn read_config_file_tightens_loose_perms() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn sandbox_cedar_parses_and_unknown_mode_falls_back_to_audit() {
+    use crate::config::CedarMode;
+    let parse = |json: &str| {
+        let sb: JsonSandbox = serde_json::from_str(json).unwrap();
+        let mut settings = crate::config::Settings::default();
+        parsing::parse_sandbox(Some(sb), &mut settings);
+        settings.sandbox.cedar
+    };
+    assert!(parse(r#"{}"#).is_none());
+    let c = parse(r#"{"cedar": {}}"#).unwrap();
+    assert_eq!(c.mode, CedarMode::Audit);
+    assert!(c.policy_file.is_none());
+    let c = parse(r#"{"cedar": {"mode": "enforce", "policy_file": "/etc/dyson/tools.cedar"}}"#)
+        .unwrap();
+    assert_eq!(c.mode, CedarMode::Enforce);
+    assert_eq!(
+        c.policy_file.unwrap(),
+        std::path::Path::new("/etc/dyson/tools.cedar")
+    );
+    // A typo must never switch enforcement on.
+    assert_eq!(
+        parse(r#"{"cedar": {"mode": "enforcing"}}"#).unwrap().mode,
+        CedarMode::Audit
+    );
+}

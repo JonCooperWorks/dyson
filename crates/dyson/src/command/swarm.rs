@@ -435,6 +435,10 @@ fn build_swarm_config(inputs: SwarmConfigInputs<'_>) -> serde_json::Value {
             },
             telegram_controller
         ],
+        // Audit-only Cedar over every tool call, on the default policies.
+        // There is no OS sandbox in the pod, so this is the only per-call
+        // record of what the agent tried that policy would refuse.
+        "sandbox": { "cedar": { "mode": "audit" } },
         "workspace": { "connection_string": inputs.workspace_str },
         "chat_history": {
             "backend": "disk",
@@ -679,6 +683,12 @@ mod tests {
         assert_eq!(chat["base_url"], "https://dyson.example.com/llm/openrouter");
         assert_eq!(chat["models"], json!(["anthropic/claude-sonnet-4-5"]));
         assert_eq!(chat["api_key"], "swarm-token");
+    }
+
+    #[test]
+    fn swarm_config_turns_on_cedar_in_audit_mode() {
+        let cfg = cfg_with_proxy();
+        assert_eq!(cfg["sandbox"], json!({ "cedar": { "mode": "audit" } }));
     }
 
     #[test]

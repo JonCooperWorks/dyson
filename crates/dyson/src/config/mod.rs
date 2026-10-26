@@ -191,6 +191,32 @@ pub struct SandboxConfig {
     /// Values override the default policy for that tool.
     /// Unspecified tools get sensible defaults (see `sandbox::policy`).
     pub tool_policies: std::collections::HashMap<String, crate::sandbox::policy::ToolPolicyConfig>,
+
+    /// Cedar policy layer evaluated before the capability checks.
+    /// `None` = not configured.  Only acted on in builds with the
+    /// `cedar` feature; see `sandbox::cedar_sandbox`.
+    pub cedar: Option<CedarConfig>,
+}
+
+/// `sandbox.cedar` in dyson.json.
+///
+/// ```json
+/// "sandbox": { "cedar": { "mode": "audit", "policy_file": "/etc/dyson/tools.cedar" } }
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct CedarConfig {
+    pub mode: CedarMode,
+    /// Replaces the built-in default policy set when set.
+    pub policy_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CedarMode {
+    /// Evaluate and log what Cedar would deny; never block.
+    #[default]
+    Audit,
+    /// A Cedar deny blocks the tool call.
+    Enforce,
 }
 
 // ---------------------------------------------------------------------------

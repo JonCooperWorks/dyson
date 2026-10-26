@@ -215,7 +215,7 @@ impl Agent {
             .map(|(name, tool)| (name, tool.input_schema()))
             .collect();
         definitions.sort_by(|a, b| a.0.cmp(b.0));
-        super::task::digest(&serde_json::to_string(&definitions).expect("JSON tool schemas"))
+        super::task::digest(&super::task::canonical_json(&definitions).expect("JSON tool schemas"))
     }
 
     pub(super) fn begin_continuation(&mut self, direct: bool) -> Result<()> {

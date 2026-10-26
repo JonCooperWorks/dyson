@@ -327,10 +327,53 @@ The original bash-only sandbox. Still available for direct use, but
 functions. The profile-based API (`"default"`, `"strict"`, `"permissive"`)
 is preserved for backward compatibility.
 
+### CedarSandbox (`cedar` cargo feature, on by default)
+
+A [Cedar](https://www.cedarpolicy.com/) policy layer in front of
+`PolicySandbox`. Each tool call becomes a Cedar request:
+
+| | |
+|---|---|
+| principal | `Dyson::Agent::"<SWARM_INSTANCE_ID>"` (`"local"` outside Swarm) |
+| action | `Dyson::Action::"call_tool"` |
+| resource | `Dyson::Tool::"<tool name>"` with `kind` (`builtin`/`mcp`) and `server` for `mcp__<server>__*` |
+| context | `depth`, plus `command`, `path` (made absolute), `url`, `host` when the input has them |
+
+The schema is [cedar/tools.cedarschema](../crates/dyson/src/sandbox/cedar/tools.cedarschema).
+Policies are strictly validated against it at startup, so a misspelt
+attribute fails loudly instead of silently dropping a forbid.
+[cedar/default.cedar](../crates/dyson/src/sandbox/cedar/default.cedar) holds
+a baseline permit plus forbids for curl/wget piped to a shell, `rm -rf` of `/`
+or `~`, built-in reads of SSH/cloud credential files, and cloud metadata
+endpoints.
+
+```json
+{ "sandbox": { "cedar": { "mode": "audit", "policy_file": "/etc/dyson/tools.cedar" } } }
+```
+
+- `mode: "audit"` (the default, and the fallback for an unknown value)
+  logs would-deny decisions on the `sandbox.cedar` tracing target and lets
+  the call through. If policies fail to load, the layer is skipped and an
+  error is logged.
+- `mode: "enforce"` turns a Cedar deny into a tool error that names the
+  policy ids. Evaluation errors deny, and policies that fail to load stop
+  startup.
+- `policy_file` replaces the defaults. Start from `default.cedar`.
+
+Cedar can only narrow what `PolicySandbox` allows: an allow still goes
+through the capability checks. Without the cargo feature, a `cedar` block is
+ignored with a warning. It still applies under `--dangerous-no-sandbox`,
+which is how managed dysons run (the Kata VM is their sandbox); there it
+wraps `DangerousNoSandbox` and is the only per-call check.
+
+Managed dysons get `{"mode": "audit"}` with the default policies from
+`dyson swarm`'s generated dyson.json.
+
 ### DangerousNoSandbox (CLI-only bypass)
 
-Disables all sandboxes. Only available via `--dangerous-no-sandbox` CLI
-flag. Cannot be set from config.
+Disables the OS and capability sandboxes. Only available via
+`--dangerous-no-sandbox` CLI flag. Cannot be set from config. A configured
+Cedar layer still applies.
 
 ---
 

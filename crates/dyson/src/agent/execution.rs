@@ -643,7 +643,7 @@ impl Agent {
             && let Some(key) = tool.idempotency_key(input, ctx)
         {
             let receipt_key = super::task::digest(&format!("{name}:{key}"));
-            let hash = super::task::digest(&input.to_string());
+            let hash = super::task::digest(&super::task::canonical_json(input)?);
             if ctx.harness.receipt_pending(&receipt_key, &hash)? {
                 let mut lookup_ctx = ctx.clone();
                 lookup_ctx.idempotency_key = Some(key.clone());
@@ -756,7 +756,7 @@ impl Agent {
         let receipt_key = provider_key
             .as_ref()
             .map(|k| super::task::digest(&format!("{name}:{k}")));
-        let input_hash = super::task::digest(&input.to_string());
+        let input_hash = super::task::digest(&super::task::canonical_json(input)?);
         if let Some(key) = &receipt_key {
             if let Some(cached) = ctx.harness.receipt(key, &input_hash)? {
                 return Ok(cached);
