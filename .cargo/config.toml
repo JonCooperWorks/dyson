@@ -1,0 +1,3 @@
+[build]
+# Incremental state was half of a 46 GB target/; agent edit loops gain little from it.
+incremental = false
