@@ -57,13 +57,15 @@ impl ArtefactReader for HttpArtefactReader {
         if let Some(dir) = self.data_dir.as_ref() {
             if let Some(chat_id) = chat_id {
                 if let Some(entry) = ArtefactStore::load_from_disk_for_chat(dir, chat_id, id) {
-                    return Ok(ArtefactLookup::Found(record_from_entry(id, &entry)));
+                    return Ok(ArtefactLookup::Found(Box::new(record_from_entry(
+                        id, &entry,
+                    ))));
                 }
             } else {
                 let records = records_from_disk(dir, id);
                 match records.as_slice() {
                     [] => {}
-                    [record] => return Ok(ArtefactLookup::Found(record.clone())),
+                    [record] => return Ok(ArtefactLookup::Found(Box::new(record.clone()))),
                     _ => {
                         let summaries = records.iter().map(summary_from_record).collect();
                         return Ok(ArtefactLookup::Ambiguous(summaries));
@@ -81,7 +83,7 @@ impl ArtefactReader for HttpArtefactReader {
         };
         Ok(match records.as_slice() {
             [] => ArtefactLookup::Missing,
-            [record] => ArtefactLookup::Found(record.clone()),
+            [record] => ArtefactLookup::Found(Box::new(record.clone())),
             _ => ArtefactLookup::Ambiguous(records.iter().map(summary_from_record).collect()),
         })
     }

@@ -37,7 +37,8 @@ pub struct ArtefactRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtefactLookup {
     Missing,
-    Found(ArtefactRecord),
+    /// Boxed: a record is much larger than the other variants.
+    Found(Box<ArtefactRecord>),
     Ambiguous(Vec<ArtefactSummary>),
 }
 
@@ -133,7 +134,7 @@ impl Tool for ArtefactsTool {
                     return Ok(ToolOutput::error("invalid artifact id"));
                 }
                 let record = match reader.read(chat_id, id)? {
-                    ArtefactLookup::Found(record) => record,
+                    ArtefactLookup::Found(record) => *record,
                     ArtefactLookup::Missing => {
                         let scope = chat_id
                             .map(|chat_id| format!(" in chat {chat_id}"))
@@ -310,7 +311,7 @@ mod tests {
                 .collect();
             Ok(match matches.as_slice() {
                 [] => ArtefactLookup::Missing,
-                [record] => ArtefactLookup::Found(record.clone()),
+                [record] => ArtefactLookup::Found(Box::new(record.clone())),
                 _ => ArtefactLookup::Ambiguous(
                     matches
                         .iter()
