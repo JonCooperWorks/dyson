@@ -175,7 +175,7 @@ pub async fn fetch_cost_call(
         .get(config.call_url(audit_id))
         .header("accept", "application/json");
     if let Some(token) = config.bearer.as_deref() {
-        req = req.bearer_auth(token);
+        req = crate::auth::workload_identity::attach(req.bearer_auth(token), token);
     }
     let resp = req.send().await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -224,7 +224,7 @@ pub async fn fetch_audit_calls(
         .get(config.audit_list_url(query))
         .header("accept", "application/json");
     if let Some(token) = config.bearer.as_deref() {
-        req = req.bearer_auth(token);
+        req = crate::auth::workload_identity::attach(req.bearer_auth(token), token);
     }
     let resp = req.send().await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {

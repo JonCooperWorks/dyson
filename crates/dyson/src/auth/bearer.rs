@@ -69,7 +69,11 @@ impl Auth for BearerTokenAuth {
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<reqwest::RequestBuilder> {
-        Ok(request.header("Authorization", format!("Bearer {}", self.token.expose())))
+        let request = request.header("Authorization", format!("Bearer {}", self.token.expose()));
+        Ok(super::workload_identity::attach(
+            request,
+            self.token.expose(),
+        ))
     }
 
     async fn validate_request(&self, headers: &hyper::HeaderMap) -> Result<AuthInfo> {

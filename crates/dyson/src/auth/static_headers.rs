@@ -47,6 +47,9 @@ impl Auth for StaticHeadersAuth {
     ) -> Result<reqwest::RequestBuilder> {
         for (key, value) in &self.headers {
             request = request.header(key.as_str(), value.as_str());
+            if key.eq_ignore_ascii_case("authorization") {
+                request = super::workload_identity::attach(request, value);
+            }
         }
         Ok(request)
     }

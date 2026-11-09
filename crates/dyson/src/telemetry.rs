@@ -64,9 +64,14 @@ impl opentelemetry_sdk::trace::SpanExporter for SwarmExporter {
             batch.into_iter().map(Into::into).collect();
         for chunk in spans.chunks(128) {
             let payload = serde_json::json!({"resourceSpans":[{"scopeSpans":[{"spans":chunk}]}]});
-            self.0
+            let mut request = self
+                .0
                 .post(format!("{apex}/llm/telemetry/v1/traces"))
-                .bearer_auth(&token)
+                .bearer_auth(&token);
+            if let Some(identity) = crate::auth::workload_identity::token_for(&token) {
+                request = request.header(crate::auth::workload_identity::HEADER, identity);
+            }
+            request
                 .json(&payload)
                 .send()
                 .and_then(reqwest::blocking::Response::error_for_status)

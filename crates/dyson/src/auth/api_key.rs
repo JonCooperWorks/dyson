@@ -44,7 +44,8 @@ impl Auth for ApiKeyAuth {
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<reqwest::RequestBuilder> {
-        Ok(request.header(&self.header_name, self.key.expose()))
+        let request = request.header(&self.header_name, self.key.expose());
+        Ok(super::workload_identity::attach(request, self.key.expose()))
     }
 
     async fn validate_request(&self, headers: &hyper::HeaderMap) -> Result<AuthInfo> {

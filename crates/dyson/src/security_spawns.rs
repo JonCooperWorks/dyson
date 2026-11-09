@@ -182,14 +182,17 @@ async fn flush() {
         let Some((apex, _)) = base.split_once("/llm") else {
             return;
         };
-        let sent = crate::http::client()
-            .post(format!("{apex}{PATH}"))
-            .bearer_auth(&token)
-            .timeout(Duration::from_secs(5))
-            .json(&serde_json::json!({ "spawns": batch }))
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status);
+        let sent = crate::auth::workload_identity::attach(
+            crate::http::client()
+                .post(format!("{apex}{PATH}"))
+                .bearer_auth(&token),
+            &token,
+        )
+        .timeout(Duration::from_secs(5))
+        .json(&serde_json::json!({ "spawns": batch }))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status);
         if let Err(error) = sent {
             tracing::debug!(error = %error, "tool spawn report dropped");
             return;

@@ -48,6 +48,7 @@ pub mod no_auth;
 pub mod oauth;
 pub mod oidc;
 pub mod static_headers;
+pub mod workload_identity;
 
 pub use api_key::ApiKeyAuth;
 pub use bearer::BearerTokenAuth;
