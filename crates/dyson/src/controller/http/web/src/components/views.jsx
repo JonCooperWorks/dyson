@@ -10,7 +10,9 @@ import {
   DysonMark,
   SUBSCRIPTION_CONNECT_PROVIDERS,
   SubscriptionConnectModal,
+  SwarmBar,
   createThemeController,
+  useSwarmContext,
 } from 'dyson-common-ui';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
@@ -115,6 +117,9 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
   const model = useAppState(s => s.activeModel);
   const providers = useAppState(s => s.providers);
   const agentName = useAppState(s => s.agentName);
+  // Swarm's way back (`GET /_swarm/context`, answered by the Swarm proxy, never
+  // the agent). Null on a self-hosted Dyson, so no bar is drawn.
+  const swarm = useSwarmContext();
   // The active provider a catalogue pick switches to.  Falls back to the
   // first provider when none is flagged active (fresh boot).
   const activeProvider = providers.find(p => p.active) || providers[0] || null;
@@ -217,6 +222,7 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
           <Icon name="compose" size={15}/>
         </button>
       )}
+      <SwarmBar context={swarm}/>
       <div className="brand"><DysonMark className="brand-logo" size={22} aria-hidden="true"/><div className="name">{brandLabel(agentName)}</div></div>
       <nav aria-label="Workspace">
         {NAVS.map(n => (

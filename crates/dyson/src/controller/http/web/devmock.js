@@ -340,6 +340,17 @@ export function dysonMock() {
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
         const url = req.url || '';
+        // What the Swarm proxy answers on an agent host (the Swarm bar).
+        if (url === '/_swarm/context') {
+          return json(res, {
+            apex_url: 'https://swarm.example.com/',
+            instance: { id: 'dyson-dev', name: 'Dyson' },
+            agents: [
+              { id: 'case-2', name: 'Case', open_url: 'https://case-2.swarm.example.com/' },
+              { id: 'dyson-dev', name: 'Dyson', open_url: 'https://dyson-dev.swarm.example.com/' },
+            ],
+          });
+        }
         if (!url.startsWith('/api/')) return next();
 
         if (url === '/api/auth/config') {

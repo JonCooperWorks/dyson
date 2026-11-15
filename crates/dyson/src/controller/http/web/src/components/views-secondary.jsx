@@ -10,7 +10,7 @@
 import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { markdown, prettySize } from './turns.jsx';
-import { copyToClipboard, downloadBlob, SecurityReportView, EvalReportView } from 'dyson-common-ui';
+import { copyToClipboard, downloadBlob, SecurityReportView, EvalReportView, swarmHref, useSwarmContext } from 'dyson-common-ui';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession } from '../hooks/useSession.js';
@@ -315,6 +315,8 @@ function AuditRow({ r }) {
 
 export function AuditView() {
   const client = useApi();
+  const swarm = useSwarmContext();
+  const swarmActivity = swarm ? swarmHref(swarm, `i/${swarm.instance.id}/activity`) : null;
   const [range, setRange] = useState('7d');
   const [rows, setRows] = useState([]);
   const [source, setSource] = useState('swarm');
@@ -355,6 +357,9 @@ export function AuditView() {
       <div style={{maxWidth: 1080, margin:'0 auto'}}>
         <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14, flexWrap:'wrap', gap:10}}>
           <div className="eyebrow">LLM Audit · {rows.length} request{rows.length === 1 ? '' : 's'}</div>
+          {swarmActivity && (
+            <a className="audit-swarm-link" href={swarmActivity}>See all activity in Swarm</a>
+          )}
           <div style={{display:'flex', gap:4}}>
             {AUDIT_RANGES.map(r => (
               <button key={r.id} onClick={() => setRange(r.id)}

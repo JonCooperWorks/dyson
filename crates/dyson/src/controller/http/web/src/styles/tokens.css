@@ -1,24 +1,7 @@
 /* Dyson — tokens */
 
-/* Self-host the Latin subsets so we don't pay Google Fonts'
- * render-blocking CSS round-trip on first load.  One file per family
- * covers 400–700 via font-synthesis; total ~60 KiB bundled into the
- * binary.  swap lets text paint in the fallback before the webfont
- * arrives — the aesthetic is preserved, FCP isn't held hostage. */
-@font-face {
-  font-family: 'Geist';
-  font-style: normal;
-  font-weight: 400 700;
-  font-display: swap;
-  src: url('./fonts/geist-400.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'JetBrains Mono';
-  font-style: normal;
-  font-weight: 400 700;
-  font-display: swap;
-  src: url('./fonts/jetbrainsmono-400.woff2') format('woff2');
-}
+/* Geist and JetBrains Mono (@font-face + files) come from
+   dyson-common-ui/tokens.css, shared with Swarm (UX spec 4.1). */
 
 :root {
   /* Neutrals — slightly cooler, deeper bottom of the ramp lifts the

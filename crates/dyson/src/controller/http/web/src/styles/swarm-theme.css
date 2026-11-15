@@ -1470,6 +1470,32 @@ textarea {
   color: var(--fg);
 }
 .errorblock-tag { color: var(--danger); }
+.errorblock-action {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--accent);
+  font: 500 13px/1.5 var(--sans);
+  white-space: nowrap;
+  text-decoration: none;
+}
+.errorblock-action:hover { text-decoration: underline; }
+.audit-swarm-link {
+  margin-left: auto;
+  color: var(--accent);
+  font: 500 13px/1.5 var(--sans);
+  text-decoration: none;
+}
+.audit-swarm-link:hover { text-decoration: underline; }
+/* The Swarm bar is a <nav> inside .topbar: undo the workspace-nav rules
+   above (grow, hidden icons, compact buttons) for it. */
+.topbar .swarm-bar { flex: 0 1 auto; gap: 2px; }
+.topbar .swarm-bar button {
+  height: 32px;
+  padding: 0 8px;
+  gap: 4px;
+  font: 500 13px/18px var(--sans);
+}
+.topbar .swarm-bar button svg { display: inline-block; }
 
 .typing {
   display: flex;

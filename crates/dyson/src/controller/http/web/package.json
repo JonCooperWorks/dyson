@@ -16,7 +16,7 @@
     "lint": "oxlint -c .oxlintrc.json --deny-warnings src"
   },
   "dependencies": {
-    "dyson-common-ui": "git+ssh://git@github.com/JonCooperWorks/dyson-common.git#ui-v0.1.15",
+    "dyson-common-ui": "git+ssh://git@github.com/JonCooperWorks/dyson-common.git#ui-v0.1.22",
     "markdown-it": "^14.1.1",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"

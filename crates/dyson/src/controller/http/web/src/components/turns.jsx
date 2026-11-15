@@ -5,7 +5,7 @@ import { Icon, Kbd } from './icons.jsx';
 // Clipboard dance (modern API → legacy textarea + execCommand fallback →
 // swallow) lives in the shared UI package — the fallback matters because
 // dyson is often served over plain HTTP where navigator.clipboard is gated.
-import { copyToClipboard } from 'dyson-common-ui';
+import { copyToClipboard, swarmHref, useSwarmContext } from 'dyson-common-ui';
 import { useAppState } from '../hooks/useAppState.js';
 import { useApiOptional } from '../hooks/useApi.js';
 import { requestOpenArtefact } from '../store/app.js';
@@ -680,11 +680,23 @@ function ArtefactShareControl({ block, chatId }) {
 // error, etc.) as a distinct red-tinted card instead of inline text,
 // so the user doesn't have to mentally separate "[error] …" from the
 // surrounding agent prose.  Block shape: { type:'error', message }.
+// Balance errors from Swarm's model proxy ("You're out of credit…") or a
+// provider's 402. The link goes to Swarm's billing page built from the
+// Swarm context, never to a URL inside the (agent-visible) message.
+const BALANCE_ERROR = /out of credit|payment required|\b402\b|insufficient (?:credit|balance|funds)|add credits?\b/i;
+
+export function isBalanceError(message) {
+  return BALANCE_ERROR.test(String(message || ''));
+}
+
 function ErrorBlock({ block }) {
+  const swarm = useSwarmContext();
+  const billing = swarm && isBalanceError(block.message) ? swarmHref(swarm, 'settings/billing') : null;
   return (
     <div className="errorblock" role="alert">
       <span className="errorblock-tag mono">error</span>
       <span className="errorblock-msg">{block.message}</span>
+      {billing && <a className="errorblock-action" href={billing}>Add credit in Swarm</a>}
     </div>
   );
 }
