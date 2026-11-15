@@ -135,6 +135,12 @@ pub trait ChatHistory: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// When the chat's current transcript last changed, in Unix seconds.
+    /// `None` when the backend can't tell (or the chat has no transcript).
+    fn updated_at(&self, _chat_id: &str) -> Option<i64> {
+        None
+    }
+
     /// Durably append one canonical agent-run event.  Backends that do not
     /// support execution journaling may keep the default no-op, but the disk
     /// backend persists JSONL before side-effecting tool calls begin.

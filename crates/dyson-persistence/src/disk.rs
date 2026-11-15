@@ -361,6 +361,15 @@ impl ChatHistory for DiskChatHistory {
         Ok(rows.into_iter().map(|(id, _)| id).collect())
     }
 
+    fn updated_at(&self, chat_id: &str) -> Option<i64> {
+        // Same clock `list()` sorts by, so the order and the times agree.
+        let modified = std::fs::metadata(self.transcript_path(chat_id))
+            .and_then(|m| m.modified())
+            .ok()?;
+        let secs = modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+        i64::try_from(secs).ok()
+    }
+
     fn append_run_event(&self, chat_id: &str, event: &dyson_harness::RunEvent) -> Result<()> {
         self.append_run_events(chat_id, std::slice::from_ref(event))
     }
@@ -856,6 +865,19 @@ mod tests {
         let loaded = store.load("nonexistent").unwrap();
         assert!(loaded.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn updated_at_is_the_transcript_mtime() {
+        let (_dir, store) = temp_store("updated_at");
+        assert_eq!(store.updated_at("chat_1"), None);
+        store.save("chat_1", &[Message::user("hi")]).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let at = store.updated_at("chat_1").expect("saved chat has a time");
+        assert!((now - at).abs() < 60, "updated_at {at} vs now {now}");
     }
 
     #[test]

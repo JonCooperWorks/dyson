@@ -39,6 +39,8 @@ struct Parked {
     /// Monotonic stamp so the UI can render oldest-first deterministically;
     /// `HashMap` iteration order is otherwise unstable.
     seq: u64,
+    /// Unix seconds when the prompt was parked; Swarm shows "waiting 2 min".
+    asked_at: u64,
     responder: oneshot::Sender<Value>,
 }
 
@@ -70,6 +72,9 @@ impl ElicitationBroker {
                 message,
                 schema,
                 seq,
+                asked_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs()),
                 responder: tx,
             },
         );
@@ -97,6 +102,7 @@ impl ElicitationBroker {
                     "server": p.server,
                     "message": p.message,
                     "requestedSchema": p.schema,
+                    "asked_at": p.asked_at,
                 })
             })
             .collect()

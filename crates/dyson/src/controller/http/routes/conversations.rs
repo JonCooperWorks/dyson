@@ -133,6 +133,7 @@ pub(super) async fn list(state: &HttpState) -> Resp {
                 live: h.busy.load(std::sync::atomic::Ordering::Relaxed),
                 has_artefacts: with_artefacts.contains(id),
                 source: source_for_chat_id(id),
+                updated_at: state.history.as_ref().and_then(|h| h.updated_at(id)),
             });
         }
     }

@@ -129,6 +129,8 @@ async fn durable_question_can_be_answered_after_http_process_reconstruction() {
         .find(|p| p["conversation_id"] == id)
         .unwrap();
     assert_eq!(prompt["run_id"], run);
+    // Swarm's agents list shows "Waiting on you · 2 min" from this.
+    assert!(prompt["asked_at"].as_u64().is_some_and(|at| at > 1_600_000_000));
     let answer_url = format!(
         "{base}/api/mcp/elicitations/{}",
         prompt["id"].as_str().unwrap()

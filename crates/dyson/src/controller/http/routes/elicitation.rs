@@ -34,14 +34,36 @@ fn durable_pending(state: &HttpState) -> crate::Result<Vec<serde_json::Value>> {
     if let Some(store) = &state.history {
         for chat in store.list_harness_chats()? {
             if let Some(record) = RunCheckpoint::load(store.as_ref(), &chat)?
-                && let Some(request) = record.pending_input(&chat)
+                && let Some(mut request) = record.pending_input(&chat)
             {
+                if let Some(at) = suspended_at(store.as_ref(), &chat, &record) {
+                    request["asked_at"] = at.into();
+                }
                 pending.push(request);
             }
         }
     }
     pending.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     Ok(pending)
+}
+
+/// Unix seconds of the suspension that is waiting for this answer: the
+/// newest `RunSuspended` event of the checkpoint's run.  Best-effort; a
+/// journal that can't be read just leaves `asked_at` out.
+fn suspended_at(
+    store: &dyn crate::chat_history::ChatHistory,
+    chat: &str,
+    record: &RunCheckpoint,
+) -> Option<u64> {
+    let events = store.load_run_events(chat).ok()?;
+    events
+        .iter()
+        .rev()
+        .find(|e| {
+            e.run_id == record.cursor.run_id
+                && matches!(e.kind, crate::agent::protocol::RunEventKind::RunSuspended { .. })
+        })
+        .and_then(|e| u64::try_from(e.unix_ms / 1000).ok())
 }
 
 /// `POST /api/mcp/elicitations/:id` — answer an open prompt.  The body is
