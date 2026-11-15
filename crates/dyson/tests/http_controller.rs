@@ -1276,6 +1276,30 @@ async fn admin_state_file_replay_enforces_durable_allowlist() {
         "hello"
     );
 
+    // A replayed transcript keeps the mirror's time instead of the roll's.
+    let dated = r
+        .post_json_with_headers(
+            "/api/admin/state/file",
+            &serde_json::json!({
+                "namespace": "chats",
+                "path": "c-7/transcript.json",
+                "mime": "application/json",
+                "body_b64": "W10=",
+                "updated_at": 1_700_000_000_i64
+            }),
+            &[("x-swarm-configure", secret)],
+        )
+        .await;
+    assert_eq!(dated.status(), StatusCode::OK);
+    let modified = std::fs::metadata(r.chat_dir.path().join("c-7/transcript.json"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(
+        modified,
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)
+    );
+
     for path in ["dyson.json", ".env", "memory.db", "channels/c-1/memory.db"] {
         let resp = r
             .post_json_with_headers(

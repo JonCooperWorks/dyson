@@ -29,8 +29,9 @@ pub(crate) struct ConversationDto {
     /// the operator can tell at a glance where a conversation came
     /// from when both transports share the same on-disk chat dir.
     pub(crate) source: &'static str,
-    /// Unix seconds of the transcript's last change, when the history
-    /// backend knows it.  Swarm's agent page shows "2 h ago" from it.
+    /// Unix seconds of the chat's last activity (newest journalled run,
+    /// else the transcript's last change), when the history backend knows
+    /// it.  Swarm's agent page shows "2 h ago" from it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) updated_at: Option<i64>,
 }

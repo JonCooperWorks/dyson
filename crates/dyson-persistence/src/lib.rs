@@ -135,8 +135,10 @@ pub trait ChatHistory: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// When the chat's current transcript last changed, in Unix seconds.
-    /// `None` when the backend can't tell (or the chat has no transcript).
+    /// When the chat last had activity, in Unix seconds: the newest run
+    /// recorded in the chat's own journal, else when its transcript last
+    /// changed. `None` when the backend can't tell (or the chat has no
+    /// transcript).
     fn updated_at(&self, _chat_id: &str) -> Option<i64> {
         None
     }

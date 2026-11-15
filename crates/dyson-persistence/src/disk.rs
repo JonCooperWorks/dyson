@@ -362,7 +362,14 @@ impl ChatHistory for DiskChatHistory {
     }
 
     fn updated_at(&self, chat_id: &str) -> Option<i64> {
-        // Same clock `list()` sorts by, so the order and the times agree.
+        // The run journal records when each turn happened, inside the data
+        // itself, so it survives a state replay (which rewrites every file
+        // and resets mtimes to the roll time). Chats that never journalled
+        // a run fall back to the transcript mtime, which the replay now
+        // restores from the mirror's recorded time.
+        if let Some(at) = newest_run_event_secs(&self.run_events_path(chat_id)) {
+            return Some(at);
+        }
         let modified = std::fs::metadata(self.transcript_path(chat_id))
             .and_then(|m| m.modified())
             .ok()?;
@@ -530,6 +537,43 @@ impl ChatHistory for DiskChatHistory {
             }
         }
         Ok(events)
+    }
+}
+
+/// Newest `unix_ms` among the run journal's last complete records, in Unix
+/// seconds. Reads only the tail (growing the window while no whole record
+/// fits, up to 4 MiB) so a long-lived chat's journal is not read in full.
+/// `None` when there is no journal or no readable record.
+fn newest_run_event_secs(path: &Path) -> Option<i64> {
+    use std::io::{Read as _, Seek as _};
+
+    const FIRST_WINDOW: u64 = 64 * 1024;
+    const MAX_WINDOW: u64 = 4 * 1024 * 1024;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut window = FIRST_WINDOW;
+    loop {
+        let start = len.saturating_sub(window);
+        file.seek(std::io::SeekFrom::Start(start)).ok()?;
+        let mut bytes = Vec::with_capacity((len - start) as usize);
+        file.by_ref().take(len - start).read_to_end(&mut bytes).ok()?;
+        let mut lines: Vec<&[u8]> = bytes.split(|b| *b == b'\n').collect();
+        if start > 0 && !lines.is_empty() {
+            // The window began mid-record.
+            lines.remove(0);
+        }
+        let newest = lines
+            .iter()
+            .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+            .filter_map(|event| event.get("unix_ms").and_then(serde_json::Value::as_u64))
+            .max();
+        if let Some(ms) = newest {
+            return i64::try_from(ms / 1000).ok().filter(|secs| *secs > 0);
+        }
+        if start == 0 || window >= MAX_WINDOW {
+            return None;
+        }
+        window = (window * 4).min(MAX_WINDOW);
     }
 }
 
@@ -868,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn updated_at_is_the_transcript_mtime() {
+    fn updated_at_without_a_journal_is_the_transcript_mtime() {
         let (_dir, store) = temp_store("updated_at");
         assert_eq!(store.updated_at("chat_1"), None);
         store.save("chat_1", &[Message::user("hi")]).unwrap();
@@ -878,6 +922,32 @@ mod tests {
             .as_secs() as i64;
         let at = store.updated_at("chat_1").expect("saved chat has a time");
         assert!((now - at).abs() < 60, "updated_at {at} vs now {now}");
+    }
+
+    #[test]
+    fn updated_at_comes_from_the_run_journal_not_file_mtimes() {
+        let (dir, store) = temp_store("updated_at_journal");
+        store.save("chat_1", &[Message::user("hi")]).unwrap();
+        let root = dir.join("chat_1");
+        // A state replay rewrites the files now; the turns happened earlier.
+        let mut journal = String::new();
+        for (sequence, unix_ms) in [(1, 1_700_000_000_000_u64), (2, 1_700_000_300_500)] {
+            journal.push_str(&format!(
+                "{{\"schema_version\":1,\"sequence\":{sequence},\"unix_ms\":{unix_ms},\"run_id\":\"r\",\"turn\":0,\"type\":\"x\"}}\n"
+            ));
+        }
+        // A torn final record is ignored.
+        journal.push_str("{\"unix_ms\":17999");
+        std::fs::write(root.join("run-events.jsonl"), &journal).unwrap();
+        assert_eq!(store.updated_at("chat_1"), Some(1_700_000_300));
+
+        // Records bigger than the first tail window are still found.
+        let big = format!(
+            "{{\"unix_ms\":1700000900000,\"pad\":\"{}\"}}\n",
+            "x".repeat(200 * 1024)
+        );
+        std::fs::write(root.join("run-events.jsonl"), format!("{journal}\n{big}")).unwrap();
+        assert_eq!(store.updated_at("chat_1"), Some(1_700_000_900));
     }
 
     #[test]

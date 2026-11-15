@@ -20,6 +20,12 @@ struct RestoreStateFileBody {
     deleted: bool,
     #[serde(default)]
     body_b64: Option<String>,
+    /// The mirrored file's own modification time (Unix seconds), as Dyson
+    /// pushed it. Restored files keep it as their mtime so a replay does
+    /// not make every conversation look updated at the roll time. Older
+    /// Swarms omit it; the file then keeps the write time.
+    #[serde(default)]
+    updated_at: Option<i64>,
 }
 
 pub(in super::super) async fn post_state_file(
@@ -95,6 +101,12 @@ pub(in super::super) async fn post_state_file(
     if let Err(e) = tokio::fs::write(&tmp, &bytes).await {
         return bad_request(&format!("write {}: {e}", tmp.display()));
     }
+    if let Some(modified) = restored_mtime(body.updated_at, std::time::SystemTime::now())
+        && let Err(e) = set_mtime(&tmp, modified).await
+    {
+        // The content is what matters; a wrong mtime only skews ordering.
+        tracing::warn!(path = %tmp.display(), error = %e, "state restore: could not keep mtime");
+    }
     if let Err(e) = tokio::fs::rename(&tmp, &abs).await {
         let _ = tokio::fs::remove_file(&tmp).await;
         return bad_request(&format!(
@@ -112,6 +124,29 @@ pub(in super::super) async fn post_state_file(
         "bytes": bytes.len(),
         "deleted": false,
     }))
+}
+
+/// The mtime a restored file should carry: the mirror's recorded time when
+/// it is plausible (after 2001, not in the future beyond clock skew).
+fn restored_mtime(
+    updated_at: Option<i64>,
+    now: std::time::SystemTime,
+) -> Option<std::time::SystemTime> {
+    let secs = u64::try_from(updated_at?).ok().filter(|s| *s > 1_000_000_000)?;
+    let at = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))?;
+    (at <= now + std::time::Duration::from_secs(300)).then_some(at)
+}
+
+async fn set_mtime(path: &Path, modified: std::time::SystemTime) -> std::io::Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)?
+            .set_modified(modified)
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 fn state_root(
@@ -148,4 +183,23 @@ pub(super) fn clean_relative_path(path: &str) -> std::result::Result<PathBuf, St
         return Err("path is empty".into());
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restored_mtime;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn restored_files_keep_the_mirrors_time_when_plausible() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_763_200_000);
+        assert_eq!(
+            restored_mtime(Some(1_763_000_000), now),
+            Some(UNIX_EPOCH + Duration::from_secs(1_763_000_000))
+        );
+        assert_eq!(restored_mtime(None, now), None);
+        assert_eq!(restored_mtime(Some(-5), now), None);
+        assert_eq!(restored_mtime(Some(12), now), None);
+        assert_eq!(restored_mtime(Some(1_763_200_000 + 86_400), now), None);
+    }
 }
