@@ -127,20 +127,28 @@ describe('TopBar — catalogue picker', () => {
     await waitFor(() => expect(postModel).toHaveBeenCalledWith('p', 'deepseek/deepseek-v4-pro'));
   });
 
-  it('keeps an unavailable catalogue quiet when configured models remain usable', async () => {
-    setProviders([{ id: 'p', name: 'Provider', active: true, activeModel: 'seed', models: ['seed'] }], 'seed');
-    const listModels = vi.fn(async () => ({ models: [] }));
-    renderTopBar({ listModels, postModel: vi.fn(async () => ({})) });
+  it.each([
+    ['unavailable upstream', async () => ({ available: false, models: [] })],
+    ['failed API request', async () => { throw new Error('offline'); }],
+  ])('keeps configured models usable during a %s and retries on reopen', async (_, fail) => {
+    setProviders([{ id: 'p', active: true, activeModel: 'seed', models: ['seed', 'backup'] }], 'seed');
+    const listModels = vi.fn().mockImplementationOnce(fail).mockResolvedValue(CATALOGUE);
+    const postModel = vi.fn(async () => ({}));
+    renderTopBar({ listModels, postModel });
 
     fireEvent.click(screen.getByTitle('Switch model'));
-    await waitFor(() => expect(listModels).toHaveBeenCalled());
-    // No throw or implementation-noise empty state; the seeded model remains
-    // pickable from the configured group.
-    await waitFor(() => expect(screen.queryByText('Catalogue · loading')).toBeNull());
-    expect(screen.queryByText('No catalogue available.')).toBeNull();
-    // 'seed' shows both in the top-bar button and as a pickable item in the
-    // "current" group.
-    expect(screen.getAllByText('seed').length).toBeGreaterThanOrEqual(2);
+    await screen.findByText('Catalogue · unavailable');
+    const search = screen.getByLabelText('Search models');
+    fireEvent.change(search, { target: { value: 'missing' } });
+    expect(screen.queryByText('No matching models.')).toBeNull();
+    fireEvent.change(search, { target: { value: 'backup' } });
+    fireEvent.click(screen.getByText('backup'));
+    await waitFor(() => expect(postModel).toHaveBeenCalledWith('p', 'backup'));
+
+    fireEvent.click(screen.getByTitle('Switch model'));
+    await screen.findByText('openai/gpt-5');
+    fireEvent.change(screen.getByLabelText('Search models'), { target: { value: 'missing' } });
+    expect(screen.getByText('No matching models.')).toBeTruthy();
   });
 
   it('starts device auth before selecting the ChatGPT subscription provider', async () => {

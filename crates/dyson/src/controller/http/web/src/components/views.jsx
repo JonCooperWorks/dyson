@@ -157,7 +157,11 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
   // test/embed clients may not expose listModels — degrade to the
   // configured list rather than throwing.
   useEffect(() => {
-    if (!menuOpen || catalogue !== null || typeof client.listModels !== 'function') return;
+    if (!menuOpen) {
+      if (catalogue?.available === false) setCatalogue(null);
+      return;
+    }
+    if (catalogue !== null || typeof client.listModels !== 'function') return;
     let alive = true;
     setCataLoading(true);
     client.listModels()
@@ -166,9 +170,10 @@ function TopBar({ view, setView, onToggleLeft, onNewChat, running, nextRunModel,
         setCatalogue({
           provider: typeof r?.provider === 'string' ? r.provider : activeProvider?.id || '',
           models: Array.isArray(r?.models) ? r.models : [],
+          available: r?.available !== false && Array.isArray(r?.models),
         });
       })
-      .catch(() => { if (alive) setCatalogue({ provider: '', models: [] }); })
+      .catch(() => { if (alive) setCatalogue({ provider: '', models: [], available: false }); })
       .finally(() => { if (alive) setCataLoading(false); });
     return () => { alive = false; };
   }, [menuOpen, catalogue, client]);
@@ -310,10 +315,8 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
     return (m.id || '').toLowerCase().includes(q)
       || (m.name || '').toLowerCase().includes(q);
   });
-  // An unavailable catalogue is not actionable when configured models are
-  // already present. Keep that implementation detail quiet; only surface an
-  // empty state when the user has actively searched and nothing matches.
-  const showCatalogue = loading || matches.length > 0 || (!!q && configShown.length === 0);
+  const unavailable = catalogue?.available === false;
+  const showCatalogue = loading || unavailable || matches.length > 0 || (!!q && configShown.length === 0);
 
   return (
     <>
@@ -355,8 +358,8 @@ function ModelMenu({ configured, catalogue, loading, activeProvider, activeModel
             nothing matched anywhere. */}
         {showCatalogue && (
         <div className="mm-section">
-          <div className="mm-label">Catalogue · {loading ? 'loading' : matches.length}</div>
-          {!loading && matches.length === 0 && (
+          <div className="mm-label">Catalogue · {loading ? 'loading' : unavailable ? 'unavailable' : matches.length}</div>
+          {!loading && !unavailable && matches.length === 0 && (
             <div className="mm-empty">No matching models.</div>
           )}
           {matches.map(m => {

@@ -26,14 +26,18 @@ fn read(path: &str) -> Option<String> {
         .then(|| token.to_owned())
 }
 
+pub(crate) fn is_swarm_credential(credential: &str) -> bool {
+    credential
+        .strip_prefix("Bearer ")
+        .unwrap_or(credential)
+        .trim()
+        .starts_with(SWARM_BEARER_PREFIX)
+}
+
 /// The current token, when `credential` is a Swarm proxy bearer (bare, or
 /// as an `Authorization: Bearer` value) and the token file exists.
 pub fn token_for(credential: &str) -> Option<String> {
-    let bearer = credential
-        .strip_prefix("Bearer ")
-        .unwrap_or(credential)
-        .trim();
-    if !bearer.starts_with(SWARM_BEARER_PREFIX) {
+    if !is_swarm_credential(credential) {
         return None;
     }
     let path =

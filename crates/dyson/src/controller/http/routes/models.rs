@@ -17,14 +17,14 @@
 // The response names the provider that owns the catalogue so a selected
 // entry routes through Swarm even when Codex is currently active.
 //
-// Degrades to `{ "provider": null, "models": [] }` (never a 5xx) whenever no catalogue is
-// reachable — off-swarm dev, a provider with no base_url, or an upstream
-// blip — so the SPA can quietly fall back to the configured list.
+// Reports unavailable discovery alongside any stale entries so the SPA can
+// continue offering configured and previously discovered models.
 // ===========================================================================
 
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::auth::workload_identity;
 use serde::Serialize;
 
 use super::super::responses::{Resp, json_ok};
@@ -164,6 +164,15 @@ fn normalize(body: &serde_json::Value) -> Vec<ModelEntry> {
         .collect()
 }
 
+fn catalogue_request(url: &str, key: &str) -> reqwest::RequestBuilder {
+    let client = if workload_identity::is_swarm_credential(key) {
+        crate::http::no_redirect_client()
+    } else {
+        crate::http::client()
+    };
+    workload_identity::attach(client.get(url).bearer_auth(key), key)
+}
+
 pub(super) async fn list(state: &HttpState) -> Resp {
     // Resolve the active provider only as a fallback for standalone configs.
     // On managed Dysons the named `openrouter` route remains the catalogue
@@ -178,10 +187,10 @@ pub(super) async fn list(state: &HttpState) -> Resp {
     let Some((provider_name, provider_cfg)) =
         catalogue_provider(&snapshot.providers, active_name.as_deref())
     else {
-        return json_ok(&serde_json::json!({ "provider": null, "models": [] }));
+        return json_ok(&serde_json::json!({ "provider": null, "models": [], "available": false }));
     };
     let Some(url) = catalogue_url(provider_cfg.base_url.as_deref()) else {
-        return json_ok(&serde_json::json!({ "provider": null, "models": [] }));
+        return json_ok(&serde_json::json!({ "provider": null, "models": [], "available": false }));
     };
 
     // Serve a fresh cache hit without touching the network.
@@ -193,30 +202,32 @@ pub(super) async fn list(state: &HttpState) -> Resp {
         return json_ok(&serde_json::json!({
             "provider": provider_name,
             "models": entry.models,
+            "available": true,
         }));
     }
 
-    let key = provider_cfg.api_key.expose().to_string();
-    let fetched = crate::http::client()
-        .get(&url)
-        .bearer_auth(&key)
+    let fetched = catalogue_request(&url, provider_cfg.api_key.expose())
         .send()
         .await;
 
     let models = match fetched {
         Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-            Ok(body) => Some(normalize(&body)),
-            Err(e) => {
-                tracing::debug!(error = %e, "model catalogue: upstream body was not JSON");
+            Ok(body) if body["data"].is_array() => Some(normalize(&body)),
+            Ok(_) => {
+                tracing::warn!("model catalogue: upstream response missing data array");
+                None
+            }
+            Err(_) => {
+                tracing::warn!("model catalogue: upstream body was not JSON");
                 None
             }
         },
         Ok(resp) => {
-            tracing::debug!(status = %resp.status(), "model catalogue: upstream non-2xx");
+            tracing::warn!(status = %resp.status(), "model catalogue: upstream non-2xx");
             None
         }
-        Err(e) => {
-            tracing::debug!(error = %e, "model catalogue: upstream request failed");
+        Err(_) => {
+            tracing::warn!("model catalogue: upstream request failed");
             None
         }
     };
@@ -233,6 +244,7 @@ pub(super) async fn list(state: &HttpState) -> Resp {
             json_ok(&serde_json::json!({
                 "provider": provider_name,
                 "models": models,
+                "available": true,
             }))
         }
         // Upstream failed and there's no fresh cache — fall back to stale
@@ -246,6 +258,7 @@ pub(super) async fn list(state: &HttpState) -> Resp {
             json_ok(&serde_json::json!({
                 "provider": provider_name,
                 "models": stale.unwrap_or_default(),
+                "available": false,
             }))
         }
     }
@@ -261,6 +274,34 @@ mod tests {
             models: vec!["seed".into()],
             api_key: crate::auth::Credential::from("test-key"),
             base_url: base_url.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn catalogue_request_scopes_and_refreshes_identity() {
+        // Isolate the mounted-token override from concurrent tests.
+        const CHILD: &str = "DYSON_CATALOGUE_IDENTITY_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let test = std::thread::current().name().unwrap().to_owned();
+            let dir = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test])
+                .env(CHILD, "1")
+                .env("DYSON_WORKLOAD_IDENTITY_FILE", dir.path().join("token"))
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let path = std::env::var_os("DYSON_WORKLOAD_IDENTITY_FILE").unwrap();
+        let url = "https://catalogue.example/v1/models";
+        for token in ["test-identity", "rotated-test-identity"] {
+            std::fs::write(&path, token).unwrap();
+            let req = catalogue_request(url, "pt_test").build().unwrap();
+            assert!(req.headers()[workload_identity::HEADER] == token);
+            let req = catalogue_request(url, "sk-test").build().unwrap();
+            assert!(!req.headers().contains_key(workload_identity::HEADER));
         }
     }
 

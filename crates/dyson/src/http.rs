@@ -169,6 +169,17 @@ static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .expect("failed to build HTTP client")
 });
 
+/// A custom identity header would be forwarded across origins by reqwest.
+pub(crate) fn no_redirect_client() -> &'static reqwest::Client {
+    static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+        configured_client_builder()
+            .redirect(Policy::none())
+            .build()
+            .expect("failed to build HTTP client")
+    });
+    &CLIENT
+}
+
 fn configured_client_builder() -> reqwest::ClientBuilder {
     configured_client_builder_with(CONNECT_TIMEOUT, REQUEST_TIMEOUT, READ_TIMEOUT)
 }
