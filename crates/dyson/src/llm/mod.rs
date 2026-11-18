@@ -46,6 +46,7 @@ pub mod pricing;
 pub mod registry;
 pub(crate) mod sse_parser;
 pub mod stream;
+pub(crate) mod wire_tools;
 
 use std::pin::Pin;
 

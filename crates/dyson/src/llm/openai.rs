@@ -172,19 +172,12 @@ impl OpenAiClient {
         // -- Build tools array --
         //
         // OpenAI wraps tool definitions in a {"type":"function","function":{...}} envelope.
-        let tools_json: Vec<serde_json::Value> = tools
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.input_schema,
-                    }
-                })
-            })
-            .collect();
+        // Names and count are fitted to OpenAI's limits on the wire, and
+        // mapped back on the way in (see `wire_tools`).
+        let wire = super::wire_tools::WireTools::new(tools);
+        let tools_json = wire.tools_json();
+        let mut messages_json = messages_json;
+        wire.encode_history(&mut messages_json);
 
         let message_count = messages_json.len();
         let mut body = serde_json::json!({
@@ -249,6 +242,15 @@ impl OpenAiClient {
         let provider = provider_label(&self.base_url);
         let model = config.model.clone();
         let mut response = crate::llm::build_stream_response(response, parser);
+        if !wire.is_identity() {
+            let mut inner = response.stream;
+            response.stream = Box::pin(async_stream::stream! {
+                use tokio_stream::StreamExt as _;
+                while let Some(item) = inner.next().await {
+                    yield item.map(|event| wire.decode(event));
+                }
+            });
+        }
         response.swarm_llm_audit_id = audit_id;
         response.provider = Some(provider.clone());
         response.model = Some(model.clone());

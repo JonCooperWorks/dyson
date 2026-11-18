@@ -324,6 +324,22 @@ impl AgentBuilder {
     }
 }
 
+/// The detailed run API reports a failure as a `Failed` outcome rather than
+/// an error, so the caller's error path never sees it. Tell the output here
+/// (the HTTP controller turns this into the chat's error banner), or a turn
+/// whose model call is refused ends with no reply and no word of why.
+fn surface_run_error(result: Result<String>, output: &mut dyn Output) -> String {
+    match result {
+        Ok(text) => text,
+        Err(error) => {
+            if let Err(report) = output.error(&error) {
+                tracing::warn!(error = %report, "could not report a failed run");
+            }
+            String::new()
+        }
+    }
+}
+
 impl Agent {
     /// Start building an agent with the two required components.
     ///
@@ -1041,10 +1057,8 @@ impl Agent {
     ) -> Result<protocol::RunOutcome> {
         self.ensure_startable()?;
         let before = self.conversation.token_budget.clone();
-        let final_text = self
-            .run_with_attachments(text, attachments, output)
-            .await
-            .unwrap_or_default();
+        let result = self.run_with_attachments(text, attachments, output).await;
+        let final_text = surface_run_error(result, output);
         Ok(self.detailed_outcome(&before, final_text))
     }
 
@@ -1094,7 +1108,8 @@ impl Agent {
         }
         self.ensure_startable()?;
         let before = self.conversation.token_budget.clone();
-        let final_text = self.run(user_input, output).await.unwrap_or_default();
+        let result = self.run(user_input, output).await;
+        let final_text = surface_run_error(result, output);
         Ok(self.detailed_outcome(&before, final_text))
     }
 }

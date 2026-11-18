@@ -51,6 +51,11 @@ async fn failed_run_keeps_structured_outcome() {
     let outcome = agent.run_detailed("work", &mut output).await.unwrap();
     assert_eq!(outcome.status, protocol::RunStatus::Failed);
     assert!(!outcome.warnings.is_empty());
+    // The chat shows why: a refused model call used to end the turn with no
+    // reply and no error (TARS on gpt-6-luna, 2026-11-18).
+    let errors = output.errors();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("fatal fixture error"), "{errors:?}");
 }
 
 #[tokio::test]
