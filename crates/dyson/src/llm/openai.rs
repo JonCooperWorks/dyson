@@ -195,7 +195,17 @@ impl OpenAiClient {
             body["temperature"] = serde_json::json!(temp);
         }
 
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        // OpenAI's own models speak Responses end to end (see
+        // `openai_responses`); everything else stays on Chat Completions.
+        let responses = super::openai_responses::uses_responses(&config.model);
+        let (body, url) = if responses {
+            (
+                super::openai_responses::request(&body),
+                format!("{}/v1/responses", self.base_url),
+            )
+        } else {
+            (body, format!("{}/v1/chat/completions", self.base_url))
+        };
 
         tracing::debug!(
             model = config.model,
@@ -241,7 +251,16 @@ impl OpenAiClient {
             .and_then(|value| value.parse::<i64>().ok());
         let provider = provider_label(&self.base_url);
         let model = config.model.clone();
-        let mut response = crate::llm::build_stream_response(response, parser);
+        let mut response = if responses {
+            crate::llm::build_stream_response(
+                response,
+                crate::llm::sse_parser::BaseSseParser::new(
+                    super::openai_responses::ResponsesJsonParser::new(),
+                ),
+            )
+        } else {
+            crate::llm::build_stream_response(response, parser)
+        };
         if !wire.is_identity() {
             let mut inner = response.stream;
             response.stream = Box::pin(async_stream::stream! {

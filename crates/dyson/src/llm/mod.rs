@@ -42,6 +42,7 @@ pub mod dialects;
 pub mod gemini;
 pub mod openai;
 pub mod openai_compat;
+pub(crate) mod openai_responses;
 pub mod pricing;
 pub mod registry;
 pub(crate) mod sse_parser;
