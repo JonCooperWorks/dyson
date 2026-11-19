@@ -524,6 +524,15 @@ function FileBlock({ block }) {
       </a>
     );
   }
+  // Audio (the `speak` tool's speech): an inline player.
+  if ((block.mime || '').startsWith('audio/') && block.url) {
+    return (
+      <div className="fileblock audio">
+        <audio controls preload="metadata" src={block.url}/>
+        <a href={block.url} target="_blank" rel="noopener" className="dl mono">download</a>
+      </div>
+    );
+  }
   // Non-image: card with name, size, download link.  Local uploads
   // (block.local && !block.url) have no fetchable URL — just show the
   // metadata.

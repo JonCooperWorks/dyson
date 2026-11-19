@@ -69,14 +69,14 @@ pub async fn build_agent(
         .await
     };
 
-    let transcriber = crate::media::audio::create_transcriber(settings.transcriber.as_ref());
-
     let mut builder = crate::agent::Agent::builder(client, sandbox)
         .skills(skills)
         .settings(&agent_settings)
         .workspace(workspace)
-        .nudge_interval(nudge_interval)
-        .transcriber(transcriber);
+        .nudge_interval(nudge_interval);
+    if let Some(transcriber) = crate::media::audio::create_transcriber(settings) {
+        builder = builder.transcriber(transcriber);
+    }
 
     // Create advisor if smartest_model is configured.
     // Format: "provider_name/model" (e.g. "openrouter/glm-5", "claude/claude-opus-4-6").
@@ -163,6 +163,9 @@ fn build_public_agent(
             settings.web_search.as_ref(),
             ig_provider,
             settings.agent.image_generation_model.as_deref(),
+            // Public channels get no voice: `speak` spends the owner's
+            // money and is not on the public tool list anyway.
+            None,
             &filter,
         ))];
 

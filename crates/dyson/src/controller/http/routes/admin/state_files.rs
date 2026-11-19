@@ -132,7 +132,9 @@ fn restored_mtime(
     updated_at: Option<i64>,
     now: std::time::SystemTime,
 ) -> Option<std::time::SystemTime> {
-    let secs = u64::try_from(updated_at?).ok().filter(|s| *s > 1_000_000_000)?;
+    let secs = u64::try_from(updated_at?)
+        .ok()
+        .filter(|s| *s > 1_000_000_000)?;
     let at = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))?;
     (at <= now + std::time::Duration::from_secs(300)).then_some(at)
 }

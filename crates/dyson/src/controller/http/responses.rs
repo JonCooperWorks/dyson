@@ -529,6 +529,10 @@ pub(crate) fn mime_for_extension(path: &std::path::Path) -> String {
         "zip" => "application/zip",
         "tar" => "application/x-tar",
         "gz" => "application/gzip",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "m4a" => "audio/mp4",
         _ => "application/octet-stream",
     }
     .to_string()

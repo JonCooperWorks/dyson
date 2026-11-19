@@ -9,10 +9,10 @@
 //   - Audio   →  Transcriber trait  →  ContentBlock::Text
 //   - PDFs    →  text extract + base64  →  ContentBlock::Document
 //
-// The pipeline is intentionally local-first: images are processed in-process
-// via the `image` crate, PDFs via `pdf-extract`, and audio transcription
-// defaults to a local Whisper installation.  The `Transcriber` trait allows
-// plugging in alternative backends (cloud APIs, whisper.cpp, etc.).
+// Images are processed in-process via the `image` crate and PDFs via
+// `pdf-extract`.  Audio is transcribed by the voice provider (an
+// OpenAI-compatible audio API, the Swarm proxy on a managed Dyson) through
+// the `Transcriber` trait; see `audio.rs`.
 //
 // The public entry point is `resolve_attachment(Attachment, Option<transcriber>)`:
 // it takes raw bytes + MIME type and dispatches by MIME prefix.  Controllers

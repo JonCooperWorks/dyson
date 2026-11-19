@@ -92,6 +92,7 @@ impl BuiltinSkill {
         web_search_config: Option<&crate::config::WebSearchConfig>,
         image_provider_config: Option<&crate::config::ProviderConfig>,
         image_model_override: Option<&str>,
+        voice: Option<Arc<crate::media::audio::VoiceClient>>,
         filter: &[String],
     ) -> Self {
         let mut tools: Vec<Arc<dyn Tool>> = vec![
@@ -154,6 +155,10 @@ impl BuiltinSkill {
             }
         }
 
+        if let Some(voice) = voice {
+            tools.push(Arc::new(crate::tool::speak::SpeakTool::new(voice)));
+        }
+
         // Apply tool filter if specified.
         if !filter.is_empty() {
             tools.retain(|t| {
@@ -197,6 +202,7 @@ impl BuiltinSkill {
             web_search_config,
             image_provider_config,
             image_model_override,
+            None,
             &[],
         )
     }
@@ -257,7 +263,7 @@ mod tests {
     use super::*;
 
     fn default_skill() -> BuiltinSkill {
-        BuiltinSkill::new_filtered(None, None, None, &[])
+        BuiltinSkill::new_filtered(None, None, None, None, &[])
     }
 
     #[test]

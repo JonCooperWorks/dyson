@@ -156,6 +156,30 @@ impl BotApi {
 
     /// Send a document (file) by path.
     pub async fn send_document(&self, chat_id: ChatId, path: &Path) -> Result<Message, DysonError> {
+        self.send_upload(
+            chat_id,
+            path,
+            "sendDocument",
+            "document",
+            "application/octet-stream",
+        )
+        .await
+    }
+
+    /// Send an MP3 as an audio message, which Telegram plays inline.
+    pub async fn send_audio(&self, chat_id: ChatId, path: &Path) -> Result<Message, DysonError> {
+        self.send_upload(chat_id, path, "sendAudio", "audio", "audio/mpeg")
+            .await
+    }
+
+    async fn send_upload(
+        &self,
+        chat_id: ChatId,
+        path: &Path,
+        method: &str,
+        field: &'static str,
+        mime: &str,
+    ) -> Result<Message, DysonError> {
         let file_name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -165,17 +189,17 @@ impl BotApi {
 
         let part = reqwest::multipart::Part::bytes(file_bytes)
             .file_name(file_name)
-            .mime_str("application/octet-stream")
+            .mime_str(mime)
             .unwrap();
 
         let form = reqwest::multipart::Form::new()
             .text("chat_id", chat_id.0.to_string())
-            .part("document", part);
+            .part(field, part);
 
         let resp = self
             .authed(
                 crate::http::client()
-                    .post(format!("{}/sendDocument", self.base_url))
+                    .post(format!("{}/{method}", self.base_url))
                     .multipart(form),
             )
             .send()
@@ -185,7 +209,7 @@ impl BotApi {
         let api_resp: ApiResponse<Message> = resp.json().await.map_err(DysonError::Http)?;
         api_resp.result.ok_or_else(|| {
             DysonError::Llm(format!(
-                "sendDocument failed: {}",
+                "{method} failed: {}",
                 api_resp.description.unwrap_or_default()
             ))
         })

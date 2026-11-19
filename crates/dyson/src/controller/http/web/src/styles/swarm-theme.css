@@ -1798,6 +1798,14 @@ textarea {
   font-size: 11px;
   text-shadow: none;
 }
+.fileblock.audio {
+  gap: 8px;
+  padding: 6px 10px;
+}
+.fileblock.audio audio {
+  height: 36px;
+  max-width: 100%;
+}
 .fileblock.image {
   display: flex;
   flex-direction: column;

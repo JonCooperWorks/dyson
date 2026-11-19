@@ -6,6 +6,23 @@ use crate::config::{SkillConfig, SubagentAgentConfig, SubagentSkillConfig};
 static ANTHROPIC_KEY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
+fn voice_block_is_parsed_and_whisper_is_gone() {
+    let json =
+        r#"{ "voice": { "provider": "swarm", "speech_model": "openai/tts-1", "voice": "nova" } }"#;
+    let root: JsonRoot = serde_json::from_str(json).unwrap();
+    let mut settings = crate::config::Settings::default();
+    super::parsing::parse_voice(root.voice, &mut settings);
+    assert_eq!(settings.voice.provider.as_deref(), Some("swarm"));
+    assert_eq!(settings.voice.speech_model.as_deref(), Some("openai/tts-1"));
+    assert_eq!(settings.voice.voice.as_deref(), Some("nova"));
+    assert_eq!(settings.voice.transcription_model, None);
+    assert!(
+        serde_json::from_str::<JsonRoot>(r#"{ "transcriber": { "provider": "whisper-cli" } }"#)
+            .is_err()
+    );
+}
+
+#[test]
 fn parse_minimal_json() {
     let json = r#"{ "agent": { "model": "claude-opus-4-20250514" } }"#;
     let root: JsonRoot = serde_json::from_str(json).unwrap();

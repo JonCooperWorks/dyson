@@ -35,27 +35,30 @@ pub(super) struct JsonRoot {
     /// }
     /// ```
     pub(super) mcp_servers: Option<serde_json::Value>,
-    /// Audio transcriber configuration.
-    pub(super) transcriber: Option<JsonTranscriber>,
+    /// Voice: speech output (`speak`) and transcription of audio input.
+    pub(super) voice: Option<JsonVoice>,
     /// Web search provider configuration.
     pub(super) web_search: Option<JsonWebSearch>,
 }
 
-/// The `"transcriber"` object.
+/// The `"voice"` object. Every field is optional.
 ///
 /// ```json
-/// "transcriber": {
-///   "provider": "whisper-cli",
-///   "model": "small"
+/// "voice": {
+///   "provider": "swarm",
+///   "speech_model": "openai/gpt-4o-mini-tts",
+///   "voice": "alloy",
+///   "transcription_model": "openai/gpt-4o-transcribe"
 /// }
 /// ```
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct JsonTranscriber {
-    /// Transcriber provider: "whisper-cli" (default).
+pub(super) struct JsonVoice {
+    /// A provider from the `"providers"` map (OpenAI or OpenRouter type).
     pub(super) provider: Option<String>,
-    /// Model name/size for the provider.
-    pub(super) model: Option<String>,
+    pub(super) speech_model: Option<String>,
+    pub(super) voice: Option<String>,
+    pub(super) transcription_model: Option<String>,
 }
 
 /// The `"web_search"` object.

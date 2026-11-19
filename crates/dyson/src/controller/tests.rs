@@ -334,7 +334,7 @@ fn public_agent_has_workspace_and_web_tools() {
         .map(|s| (*s).to_string())
         .collect();
     let skills: Vec<Box<dyn crate::skill::Skill>> = vec![Box::new(
-        crate::skill::builtin::BuiltinSkill::new_filtered(None, None, None, &filter),
+        crate::skill::builtin::BuiltinSkill::new_filtered(None, None, None, None, &filter),
     )];
 
     let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =

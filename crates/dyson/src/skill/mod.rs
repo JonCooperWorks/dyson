@@ -197,6 +197,7 @@ pub async fn create_skills(
                     settings.web_search.as_ref(),
                     ig_provider,
                     settings.agent.image_generation_model.as_deref(),
+                    crate::media::audio::VoiceClient::from_settings(settings),
                     &cfg.tools,
                 )));
             }

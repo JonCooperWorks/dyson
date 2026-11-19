@@ -25,7 +25,7 @@ pub(super) fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegist
     parse_sandbox(root.sandbox, &mut settings);
     parse_workspace(root.workspace, secrets, &mut settings);
     parse_chat_history(root.chat_history, secrets, &mut settings);
-    parse_transcriber(root.transcriber, &mut settings);
+    parse_voice(root.voice, &mut settings);
     parse_web_search(root.web_search, secrets, &mut settings);
     parse_controllers(root.controllers, secrets, &mut settings);
 
@@ -474,17 +474,17 @@ pub(super) fn parse_chat_history(
     }
 }
 
-/// Parse transcriber configuration.
-pub(super) fn parse_transcriber(transcriber: Option<JsonTranscriber>, settings: &mut Settings) {
-    let t = match transcriber {
-        Some(t) => t,
-        None => return,
+/// Parse voice configuration.
+pub(super) fn parse_voice(voice: Option<JsonVoice>, settings: &mut Settings) {
+    let Some(v) = voice else {
+        return;
     };
-
-    settings.transcriber = Some(crate::config::TranscriberConfig {
-        provider: t.provider.unwrap_or_else(|| "whisper-cli".into()),
-        model: t.model,
-    });
+    settings.voice = crate::config::VoiceConfig {
+        provider: v.provider,
+        speech_model: v.speech_model,
+        voice: v.voice,
+        transcription_model: v.transcription_model,
+    };
 }
 
 /// Parse web search configuration.

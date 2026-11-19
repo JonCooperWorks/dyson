@@ -215,7 +215,7 @@ pub struct Agent {
 
     /// Optional audio transcriber for resolving media attachments.
     ///
-    /// Created from `Settings::transcriber` config at agent construction time.
+    /// Created from `Settings::voice` at agent construction time.
     /// When present, the agent can resolve audio attachments in
     /// `run_with_attachments()`.  Images and PDFs do not require a transcriber.
     transcriber: Option<std::sync::Arc<dyn crate::media::audio::Transcriber>>,

@@ -93,11 +93,9 @@ pub struct Settings {
     /// Chat history configuration (backend + connection string).
     pub chat_history: ChatHistoryConfig,
 
-    /// Audio transcriber configuration (provider + model).
-    ///
-    /// When present, the specified transcriber is used for audio.
-    /// When `None`, defaults to `whisper-cli` with the "base" model.
-    pub transcriber: Option<TranscriberConfig>,
+    /// Voice: speech output and transcription of audio input, through an
+    /// OpenAI-compatible audio API (see [`VoiceConfig`]).
+    pub voice: VoiceConfig,
 
     /// Web search configuration (provider + API key).
     ///
@@ -911,30 +909,35 @@ impl Default for ChatHistoryConfig {
 }
 
 // ---------------------------------------------------------------------------
-// TranscriberConfig
+// VoiceConfig
 // ---------------------------------------------------------------------------
 
-/// Configuration for the audio transcription backend.
+/// Voice: the `speak` tool and transcription of audio attachments, both
+/// through an OpenAI-compatible audio API (`/v1/audio/speech`,
+/// `/v1/audio/transcriptions`). Every field is optional.
 ///
-/// When present in settings, the specified transcriber is used for audio.
-/// When absent, defaults to `whisper-cli` with the "base" model.
+/// The provider is, in order: `provider` (a `"providers"` entry), the image
+/// generation provider, then the active chat provider; the first of OpenAI
+/// or OpenRouter type is used. A Swarm-managed Dyson's provider is the
+/// Swarm proxy, so voice is routed and billed by Swarm with no key of its
+/// own. With none, there is no `speak` tool and audio is refused.
 ///
 /// ```json
 /// {
-///   "transcriber": {
-///     "provider": "whisper-cli",
-///     "model": "small"
+///   "voice": {
+///     "provider": "swarm",
+///     "speech_model": "openai/gpt-4o-mini-tts",
+///     "voice": "alloy",
+///     "transcription_model": "openai/gpt-4o-transcribe"
 ///   }
 /// }
 /// ```
-#[derive(Debug, Clone)]
-pub struct TranscriberConfig {
-    /// Transcriber provider: "whisper-cli" (default).
-    pub provider: String,
-
-    /// Model name/size (e.g. "tiny", "base", "small", "medium", "large").
-    /// Provider-specific — for whisper-cli this is the Whisper model size.
-    pub model: Option<String>,
+#[derive(Debug, Clone, Default)]
+pub struct VoiceConfig {
+    pub provider: Option<String>,
+    pub speech_model: Option<String>,
+    pub voice: Option<String>,
+    pub transcription_model: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,7 +1064,7 @@ impl Default for Settings {
             sandbox: SandboxConfig::default(),
             workspace: WorkspaceConfig::default(),
             chat_history: ChatHistoryConfig::default(),
-            transcriber: None,
+            voice: VoiceConfig::default(),
             web_search: None,
             sandbox_bypass: None,
         }

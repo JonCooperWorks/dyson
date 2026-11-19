@@ -1,193 +1,301 @@
 // ===========================================================================
-// Audio transcription — pluggable speech-to-text via the Transcriber trait.
+// Voice — speech output and transcription through an OpenAI-compatible
+// audio API (`/v1/audio/speech`, `/v1/audio/transcriptions`).
 //
-// Architecture:
-//   media::resolve_attachment()
-//     └── Arc<dyn Transcriber> (trait)
-//           ├── WhisperCliTranscriber  (local `whisper` CLI)
-//           └── (future: cloud APIs, whisper.cpp, etc.)
+//   media::resolve_attachment()  ──► Arc<dyn Transcriber>  ─┐
+//   tool::speak::SpeakTool       ──► VoiceClient::speak()  ─┴─► provider
 //
-// The default implementation shells out to the `whisper` CLI (from
-// openai-whisper).  This keeps transcription local and private — no audio
-// data is sent to any external API.
-//
-// If Whisper is not installed, returns a descriptive error message as
-// text rather than failing the entire request.  This allows the system
-// to degrade gracefully.
+// The provider is an OpenAI or OpenRouter entry from `providers` (see
+// `config::VoiceConfig`). On a Swarm-managed Dyson that is the Swarm
+// proxy: the agent's own proxy token authenticates, and Swarm routes the
+// call (to the operator's OpenAI account for `openai/*` voice models),
+// meters it and bills the owner. Nothing is transcribed locally.
 // ===========================================================================
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::process::Command;
+
+use crate::config::{LlmProvider, Settings};
+use crate::error::{DysonError, Result};
+
+/// The most text one speech call reads aloud (OpenAI's limit).
+pub const MAX_SPEECH_CHARS: usize = 4096;
+
+/// The largest audio file sent for transcription (OpenAI's and Swarm's
+/// limit).
+pub const MAX_TRANSCRIPTION_BYTES: usize = 25 * 1024 * 1024;
+
+const DEFAULT_SPEECH_MODEL: &str = "gpt-4o-mini-tts";
+const DEFAULT_TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe";
+const DEFAULT_VOICE: &str = "alloy";
 
 // ---------------------------------------------------------------------------
-// Transcriber trait — pluggable speech-to-text backend.
+// Transcriber trait — what `media::resolve_attachment` asks of voice input.
 // ---------------------------------------------------------------------------
 
-/// A pluggable speech-to-text backend.
-///
-/// Implementations handle transcription for a specific engine or API.
-/// The `media::resolve_attachment()` function delegates to this trait and
-/// handles input/output formatting.
+/// Speech to text for audio attachments.
 // `#[async_trait]` emits a bare `#[must_use]` on boxed-future trait methods.
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Transcriber: Send + Sync {
-    /// Transcribe raw audio bytes to text.
-    ///
-    /// `data` is the raw audio file content and `mime_type` is its MIME
-    /// type (e.g. `"audio/ogg"`, `"audio/mpeg"`).
-    async fn transcribe(&self, data: &[u8], mime_type: &str) -> crate::Result<String>;
+    /// Transcribe raw audio bytes (`mime_type` e.g. `"audio/ogg"`) to text.
+    async fn transcribe(&self, data: &[u8], mime_type: &str) -> Result<String>;
 }
 
 // ---------------------------------------------------------------------------
-// WhisperCliTranscriber — shells out to local `whisper` binary.
+// VoiceClient
 // ---------------------------------------------------------------------------
 
-/// Transcribes audio by shelling out to the local `whisper` CLI.
-///
-/// Uses the openai-whisper Python package.  Install with:
-/// ```sh
-/// pip install openai-whisper
-/// ```
-///
-/// The `model` field controls which Whisper model to use (e.g. "tiny",
-/// "base", "small", "medium", "large").  Defaults to "base".
-pub struct WhisperCliTranscriber {
-    model: String,
+/// One OpenAI-compatible audio API: speaks text and transcribes audio.
+pub struct VoiceClient {
+    client: reqwest::Client,
+    api_key: crate::auth::Credential,
+    /// Base URL the client appends `/v1/audio/...` to, as the chat client
+    /// appends `/v1/chat/completions` (e.g. `https://openrouter.ai/api`,
+    /// or a Swarm proxy's `https://<host>/llm/openrouter`).
+    base_url: String,
+    speech_model: String,
+    transcription_model: String,
+    voice: String,
 }
 
-impl WhisperCliTranscriber {
-    pub fn new(model: Option<String>) -> Self {
-        Self {
-            model: model.unwrap_or_else(|| "base".into()),
+impl std::fmt::Debug for VoiceClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VoiceClient")
+            .field("base_url", &self.base_url)
+            .field("speech_model", &self.speech_model)
+            .field("transcription_model", &self.transcription_model)
+            .field("voice", &self.voice)
+            .finish_non_exhaustive()
+    }
+}
+
+impl VoiceClient {
+    /// The voice client `settings` configure, or `None` when no OpenAI or
+    /// OpenRouter provider is available for it.
+    pub fn from_settings(settings: &Settings) -> Option<Arc<Self>> {
+        let voice = &settings.voice;
+        let named = |name: &String| {
+            settings.providers.get(name).map(|p| {
+                (
+                    p.provider_type.clone(),
+                    p.api_key.clone(),
+                    p.base_url.clone(),
+                )
+            })
+        };
+        let candidates = [
+            voice.provider.as_ref().and_then(named),
+            settings
+                .agent
+                .image_generation_provider
+                .as_ref()
+                .and_then(named),
+            Some((
+                settings.agent.provider.clone(),
+                settings.agent.api_key.clone(),
+                settings.agent.base_url.clone(),
+            )),
+        ];
+        let (provider_type, api_key, base_url) = candidates
+            .into_iter()
+            .flatten()
+            .find(|(kind, key, _)| speaks_audio(kind) && !key.expose().is_empty())?;
+        let base_url = base_url.unwrap_or_else(|| default_base(&provider_type).to_owned());
+        let model = |configured: &Option<String>, default: &str| {
+            configured
+                .clone()
+                .filter(|m| !m.trim().is_empty())
+                .unwrap_or_else(|| qualified(&provider_type, default))
+        };
+        Some(Arc::new(Self {
+            client: crate::http::client().clone(),
+            api_key,
+            base_url,
+            speech_model: model(&voice.speech_model, DEFAULT_SPEECH_MODEL),
+            transcription_model: model(&voice.transcription_model, DEFAULT_TRANSCRIPTION_MODEL),
+            voice: voice
+                .voice
+                .clone()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_VOICE.to_owned()),
+        }))
+    }
+
+    fn url(&self, operation: &str) -> String {
+        format!(
+            "{}/v1/audio/{operation}",
+            self.base_url.trim_end_matches('/')
+        )
+    }
+
+    /// Read `text` aloud. Returns MP3 bytes.
+    pub async fn speak(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+        instructions: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        let mut body = serde_json::json!({
+            "model": self.speech_model,
+            "input": text,
+            "voice": voice.filter(|v| !v.trim().is_empty()).unwrap_or(&self.voice),
+            "response_format": "mp3",
+        });
+        if let Some(instructions) = instructions.filter(|i| !i.trim().is_empty()) {
+            body["instructions"] = serde_json::Value::String(instructions.to_owned());
         }
+        let response = self
+            .client
+            .post(self.url("speech"))
+            .bearer_auth(self.api_key.expose())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| DysonError::tool("speak", format!("request failed: {e}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(DysonError::tool(
+                "speak",
+                format!("speech failed ({status}): {}", error_text(response).await),
+            ));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| DysonError::tool("speak", format!("reading audio failed: {e}")))?;
+        if bytes.is_empty() {
+            return Err(DysonError::tool("speak", "the provider returned no audio"));
+        }
+        Ok(bytes.to_vec())
     }
 }
 
 #[async_trait]
-impl Transcriber for WhisperCliTranscriber {
-    async fn transcribe(&self, data: &[u8], mime_type: &str) -> crate::Result<String> {
-        // Determine file extension from MIME type.
-        let ext = match mime_type {
-            "audio/ogg" => "ogg",
-            "audio/mpeg" => "mp3",
-            "audio/mp4" => "m4a",
-            "audio/wav" | "audio/x-wav" => "wav",
-            "audio/webm" => "webm",
-            "audio/flac" => "flac",
-            _ => "ogg", // OGG is a common default for voice messages.
-        };
-
-        // Check if whisper is available.
-        let whisper_path = find_whisper().await.ok_or_else(|| {
-            crate::DysonError::Config(
-                "Whisper is not installed. Voice transcription requires the openai-whisper \
-                 package. Install it with: pip install openai-whisper"
-                    .to_string(),
-            )
-        })?;
-
-        // Write audio to a temp file.
-        let tmp_dir = std::env::temp_dir();
-        let file_id = format!("{:016x}", rand::random::<u64>());
-        let audio_path = tmp_dir.join(format!("dyson_audio_{file_id}.{ext}"));
-
-        tokio::fs::write(&audio_path, data)
-            .await
-            .map_err(crate::DysonError::Io)?;
-
-        // Run whisper.
-        let output = Command::new(&whisper_path)
-            .arg(&audio_path)
-            .arg("--model")
-            .arg(&self.model)
-            .arg("--output_format")
-            .arg("txt")
-            .arg("--output_dir")
-            .arg(&tmp_dir)
-            .output()
-            .await
-            .map_err(crate::DysonError::Io)?;
-
-        // Read the output transcript.
-        let txt_path = tmp_dir.join(format!("dyson_audio_{file_id}.txt"));
-
-        let transcript = if txt_path.exists() {
-            tokio::fs::read_to_string(&txt_path)
-                .await
-                .map_err(crate::DysonError::Io)?
-                .trim()
-                .to_string()
-        } else {
-            // If whisper failed, capture stderr for diagnostics.
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(
-                exit_code = ?output.status.code(),
-                stderr = %stderr,
-                "whisper transcription failed"
-            );
-            return Err(crate::DysonError::Config(format!(
-                "Whisper transcription failed: {stderr}"
+impl Transcriber for VoiceClient {
+    async fn transcribe(&self, data: &[u8], mime_type: &str) -> Result<String> {
+        if data.len() > MAX_TRANSCRIPTION_BYTES {
+            return Err(DysonError::Config(format!(
+                "audio too large to transcribe ({} MB; 25 MB at most)",
+                data.len() / (1024 * 1024)
             )));
-        };
-
-        // Clean up temp files.
-        let _ = tokio::fs::remove_file(&audio_path).await;
-        let _ = tokio::fs::remove_file(&txt_path).await;
-
+        }
+        let (extension, mime) = audio_format(mime_type);
+        let file = reqwest::multipart::Part::bytes(data.to_vec())
+            .file_name(format!("audio.{extension}"))
+            .mime_str(mime)
+            .map_err(|e| DysonError::Config(format!("audio type: {e}")))?;
+        let form = reqwest::multipart::Form::new()
+            .text("model", self.transcription_model.clone())
+            .text("response_format", "json")
+            .part("file", file);
+        let response = self
+            .client
+            .post(self.url("transcriptions"))
+            .bearer_auth(self.api_key.expose())
+            .multipart(form)
+            .send()
+            .await
+            .map_err(DysonError::Http)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(DysonError::Config(format!(
+                "transcription failed ({status}): {}",
+                error_text(response).await
+            )));
+        }
+        let body: serde_json::Value = response.json().await.map_err(DysonError::Http)?;
+        let transcript = body["text"].as_str().unwrap_or_default().trim().to_owned();
         tracing::info!(
             transcript_len = transcript.len(),
-            model = self.model.as_str(),
+            model = self.transcription_model.as_str(),
             "audio transcription complete"
         );
-
         Ok(transcript)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Factory — build a transcriber from config.
-// ---------------------------------------------------------------------------
-
-/// Create a transcriber from configuration.
-///
-/// If no config is provided, defaults to `WhisperCliTranscriber` with the
-/// "base" model — matching the previous hardcoded behavior.
-pub fn create_transcriber(
-    config: Option<&crate::config::TranscriberConfig>,
-) -> Arc<dyn Transcriber> {
-    match config {
-        Some(cfg) => match cfg.provider.as_str() {
-            "whisper" | "whisper-cli" => Arc::new(WhisperCliTranscriber::new(cfg.model.clone())),
-            other => {
-                tracing::warn!(
-                    provider = other,
-                    "unknown transcriber provider, falling back to whisper-cli"
-                );
-                Arc::new(WhisperCliTranscriber::new(cfg.model.clone()))
-            }
-        },
-        None => Arc::new(WhisperCliTranscriber::new(None)),
-    }
+/// The transcriber `settings` configure, if any.
+pub fn create_transcriber(settings: &Settings) -> Option<Arc<dyn Transcriber>> {
+    VoiceClient::from_settings(settings).map(|client| client as Arc<dyn Transcriber>)
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Find the whisper binary on the system.
-async fn find_whisper() -> Option<PathBuf> {
-    let output = Command::new("which").arg("whisper").output().await.ok()?;
+/// Provider types that speak the OpenAI audio API.
+fn speaks_audio(kind: &LlmProvider) -> bool {
+    matches!(kind, LlmProvider::OpenAi | LlmProvider::OpenRouter)
+}
 
-    if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
+fn default_base(kind: &LlmProvider) -> &'static str {
+    match kind {
+        LlmProvider::OpenRouter => "https://openrouter.ai/api",
+        _ => "https://api.openai.com",
+    }
+}
+
+/// A default model id in the provider's naming: OpenRouter (and the Swarm
+/// proxy behind it) namespaces OpenAI's models as `openai/<id>`.
+fn qualified(kind: &LlmProvider, model: &str) -> String {
+    match kind {
+        LlmProvider::OpenRouter => format!("openai/{model}"),
+        _ => model.to_owned(),
+    }
+}
+
+/// File extension and media type to upload audio of `mime_type` as.
+fn audio_format(mime_type: &str) -> (&'static str, &'static str) {
+    match mime_type.split(';').next().unwrap_or_default().trim() {
+        "audio/mpeg" | "audio/mp3" => ("mp3", "audio/mpeg"),
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => ("m4a", "audio/mp4"),
+        "audio/wav" | "audio/x-wav" | "audio/wave" => ("wav", "audio/wav"),
+        "audio/webm" => ("webm", "audio/webm"),
+        "audio/flac" => ("flac", "audio/flac"),
+        // Telegram voice notes are Ogg Opus; the most common default.
+        _ => ("ogg", "audio/ogg"),
+    }
+}
+
+/// An error response's message, short enough for a tool result.
+async fn error_text(response: reqwest::Response) -> String {
+    let body = response.text().await.unwrap_or_default();
+    let message = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/error/message")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or(body);
+    message.chars().take(500).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_models_follow_the_provider_naming() {
+        assert_eq!(
+            qualified(&LlmProvider::OpenRouter, DEFAULT_SPEECH_MODEL),
+            "openai/gpt-4o-mini-tts"
+        );
+        assert_eq!(
+            qualified(&LlmProvider::OpenAi, DEFAULT_TRANSCRIPTION_MODEL),
+            "gpt-4o-transcribe"
+        );
+        assert!(speaks_audio(&LlmProvider::OpenRouter));
+        assert!(!speaks_audio(&LlmProvider::Anthropic));
     }
 
-    None
+    #[test]
+    fn uploads_are_named_by_their_media_type() {
+        assert_eq!(audio_format("audio/ogg"), ("ogg", "audio/ogg"));
+        assert_eq!(audio_format("audio/mpeg"), ("mp3", "audio/mpeg"));
+        assert_eq!(audio_format("audio/x-wav; codecs=1"), ("wav", "audio/wav"));
+        assert_eq!(audio_format("application/weird"), ("ogg", "audio/ogg"));
+    }
 }

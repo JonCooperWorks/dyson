@@ -220,7 +220,23 @@ impl Output for TelegramOutput {
     }
 
     fn send_file(&mut self, path: &Path) -> Result<(), DysonError> {
-        let result = self.block_on(self.bot.send_document(self.chat_id, path));
+        // Speech (`speak`) is MP3: an audio message plays inline.
+        let is_mp3 = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("mp3"));
+        // A Bot API proxy that refuses sendAudio still takes a document.
+        let result = if is_mp3 {
+            match self.block_on(self.bot.send_audio(self.chat_id, path)) {
+                Ok(message) => Ok(message),
+                Err(error) => {
+                    tracing::warn!(error = %error, "sendAudio refused; sending the audio as a document");
+                    self.block_on(self.bot.send_document(self.chat_id, path))
+                }
+            }
+        } else {
+            self.block_on(self.bot.send_document(self.chat_id, path))
+        };
 
         // Mirror the file into the HTTP controller's artefact store so
         // the web UI's Artefacts tab shows it for the same chat id.

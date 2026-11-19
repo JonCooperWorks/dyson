@@ -309,18 +309,28 @@ providers are Brave Search and SearXNG:
 }
 ```
 
-Audio attachments use the local Whisper CLI transcriber. If the `transcriber`
-block is omitted, Dyson still builds the default `whisper-cli` transcriber when
-a controller needs audio support.
+Voice runs through an OpenAI-compatible audio API: the `speak` tool reads text
+aloud (`/v1/audio/speech`, delivered as MP3) and audio attachments such as
+Telegram voice notes are transcribed (`/v1/audio/transcriptions`). Nothing is
+transcribed locally. The provider is `voice.provider`, else the image generation
+provider, else the active provider, whichever is first of OpenAI or OpenRouter
+type. A Swarm-managed Dyson's provider is the Swarm proxy, so voice needs no
+configuration there. Without such a provider there is no `speak` tool and audio
+attachments are refused. Every field is optional:
 
 ```json
 {
-  "transcriber": {
-    "provider": "whisper-cli",
-    "model": "small"
+  "voice": {
+    "provider": "openrouter",
+    "speech_model": "openai/gpt-4o-mini-tts",
+    "voice": "alloy",
+    "transcription_model": "openai/gpt-4o-transcribe"
   }
 }
 ```
+
+Model ids default to `gpt-4o-mini-tts` and `gpt-4o-transcribe`, with an
+`openai/` prefix on an OpenRouter-type provider.
 
 ## Secret Values
 

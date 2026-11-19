@@ -61,7 +61,10 @@ fn suspended_at(
         .rev()
         .find(|e| {
             e.run_id == record.cursor.run_id
-                && matches!(e.kind, crate::agent::protocol::RunEventKind::RunSuspended { .. })
+                && matches!(
+                    e.kind,
+                    crate::agent::protocol::RunEventKind::RunSuspended { .. }
+                )
         })
         .and_then(|e| u64::try_from(e.unix_ms / 1000).ok())
 }

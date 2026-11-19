@@ -453,6 +453,12 @@ describe('turns.jsx — markdown + composer regressions', () => {
     expect(app).toContain('onFile:');
   });
 
+  it('FileBlock plays audio inline', () => {
+    // The `speak` tool sends MP3: it plays in the chat, not as a download card.
+    expect(turnsSrc).toContain("startsWith('audio/')");
+    expect(turnsSrc).toContain('<audio controls');
+  });
+
   it('Composer uses a real file input, not a fake chip', () => {
     // Regression for "paperclip pretends to attach a file".
     expect(turnsSrc).toContain('type="file"');
