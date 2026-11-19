@@ -214,6 +214,46 @@ mod tests {
         assert!(body.contains("OggS-voice-note"));
     }
 
+    /// Swarm refuses a `pt_` bearer without the pod's identity token
+    /// (`401 workload identity mismatch`, as TARS first got).
+    #[test]
+    fn a_swarm_bearer_carries_the_workload_identity() {
+        // Isolate the mounted-token override from concurrent tests.
+        const CHILD: &str = "DYSON_SPEAK_IDENTITY_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let test = std::thread::current().name().unwrap().to_owned();
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("token"), "pod-identity-jwt\n").unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test])
+                .env(CHILD, "1")
+                .env("DYSON_WORKLOAD_IDENTITY_FILE", dir.path().join("token"))
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/audio/speech"))
+                    .and(header(
+                        crate::auth::workload_identity::HEADER,
+                        "pod-identity-jwt",
+                    ))
+                    .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ID3".to_vec()))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let audio = client(&server.uri()).speak("hi", None, None).await.unwrap();
+                assert_eq!(audio, b"ID3");
+            });
+    }
+
     #[test]
     fn no_voice_without_an_openai_compatible_provider() {
         let mut settings = crate::config::Settings::default();

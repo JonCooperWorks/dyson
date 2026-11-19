@@ -110,7 +110,13 @@ impl VoiceClient {
                 .unwrap_or_else(|| qualified(&provider_type, default))
         };
         Some(Arc::new(Self {
-            client: crate::http::client().clone(),
+            // Through the Swarm proxy, follow no redirect: the bearer and
+            // the pod's identity token go to Swarm and nowhere else.
+            client: if crate::auth::workload_identity::is_swarm_credential(api_key.expose()) {
+                crate::http::no_redirect_client().clone()
+            } else {
+                crate::http::client().clone()
+            },
             api_key,
             base_url,
             speech_model: model(&voice.speech_model, DEFAULT_SPEECH_MODEL),
@@ -127,6 +133,16 @@ impl VoiceClient {
         format!(
             "{}/v1/audio/{operation}",
             self.base_url.trim_end_matches('/')
+        )
+    }
+
+    /// A request to `operation`, authenticated. A Swarm proxy bearer also
+    /// carries the pod's workload identity, which Swarm requires of it.
+    fn post(&self, operation: &str) -> reqwest::RequestBuilder {
+        let key = self.api_key.expose();
+        crate::auth::workload_identity::attach(
+            self.client.post(self.url(operation)).bearer_auth(key),
+            key,
         )
     }
 
@@ -147,9 +163,7 @@ impl VoiceClient {
             body["instructions"] = serde_json::Value::String(instructions.to_owned());
         }
         let response = self
-            .client
-            .post(self.url("speech"))
-            .bearer_auth(self.api_key.expose())
+            .post("speech")
             .json(&body)
             .send()
             .await
@@ -191,9 +205,7 @@ impl Transcriber for VoiceClient {
             .text("response_format", "json")
             .part("file", file);
         let response = self
-            .client
-            .post(self.url("transcriptions"))
-            .bearer_auth(self.api_key.expose())
+            .post("transcriptions")
             .multipart(form)
             .send()
             .await
