@@ -223,8 +223,15 @@ pub struct OpenRouterImageProvider {
 
 impl OpenRouterImageProvider {
     pub fn new(api_key: crate::auth::Credential, model: String, base_url: Option<String>) -> Self {
+        // Through the Swarm proxy, follow no redirect: the bearer and the
+        // pod's identity token go to Swarm and nowhere else.
+        let client = if crate::auth::workload_identity::is_swarm_credential(api_key.expose()) {
+            crate::http::no_redirect_client().clone()
+        } else {
+            crate::http::client().clone()
+        };
         Self {
-            client: crate::http::client().clone(),
+            client,
             api_key,
             model,
             base_url: base_url.unwrap_or_else(|| OPENROUTER_DEFAULT_BASE.into()),
@@ -257,14 +264,16 @@ impl ImageGenerationProvider for OpenRouterImageProvider {
         // Gemini provider does for the same reason.
         let mut images = Vec::new();
         for _ in 0..count.clamp(1, 4) {
-            let resp = self
-                .client
-                .post(&url)
-                .bearer_auth(self.api_key.expose())
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| DysonError::tool("image_generate", format!("request failed: {e}")))?;
+            // A Swarm proxy bearer must carry the pod's workload identity.
+            let key = self.api_key.expose();
+            let resp = crate::auth::workload_identity::attach(
+                self.client.post(&url).bearer_auth(key),
+                key,
+            )
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| DysonError::tool("image_generate", format!("request failed: {e}")))?;
 
             let status = resp.status();
             if !status.is_success() {
@@ -791,5 +800,57 @@ mod tests {
         for f in &result.files {
             let _ = std::fs::remove_file(f);
         }
+    }
+
+    /// Swarm refuses a `pt_` bearer without the pod's identity token
+    /// (`401 workload identity mismatch`).
+    #[test]
+    fn a_swarm_bearer_carries_the_workload_identity() {
+        // Isolate the mounted-token override from concurrent tests.
+        const CHILD: &str = "DYSON_IMAGE_IDENTITY_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let test = std::thread::current().name().unwrap().to_owned();
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("token"), "pod-identity-jwt\n").unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test])
+                .env(CHILD, "1")
+                .env("DYSON_WORKLOAD_IDENTITY_FILE", dir.path().join("token"))
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let server = MockServer::start().await;
+                let png = base64::engine::general_purpose::STANDARD.encode(tiny_png());
+                Mock::given(method("POST"))
+                    .and(path("/v1/chat/completions"))
+                    .and(header(
+                        crate::auth::workload_identity::HEADER,
+                        "pod-identity-jwt",
+                    ))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                        "choices": [{"message": {"images": [
+                            {"image_url": {"url": format!("data:image/png;base64,{png}")}}
+                        ]}}]
+                    })))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let provider = OpenRouterImageProvider::new(
+                    crate::auth::Credential::new("pt_test".into()),
+                    "img".into(),
+                    Some(server.uri()),
+                );
+                let images = provider.generate("a robot", 1, "1K").await.unwrap();
+                assert_eq!(images.len(), 1);
+            });
     }
 }

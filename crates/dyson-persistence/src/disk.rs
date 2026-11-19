@@ -373,7 +373,10 @@ impl ChatHistory for DiskChatHistory {
         let modified = std::fs::metadata(self.transcript_path(chat_id))
             .and_then(|m| m.modified())
             .ok()?;
-        let secs = modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+        let secs = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
         i64::try_from(secs).ok()
     }
 
@@ -556,7 +559,10 @@ fn newest_run_event_secs(path: &Path) -> Option<i64> {
         let start = len.saturating_sub(window);
         file.seek(std::io::SeekFrom::Start(start)).ok()?;
         let mut bytes = Vec::with_capacity((len - start) as usize);
-        file.by_ref().take(len - start).read_to_end(&mut bytes).ok()?;
+        file.by_ref()
+            .take(len - start)
+            .read_to_end(&mut bytes)
+            .ok()?;
         let mut lines: Vec<&[u8]> = bytes.split(|b| *b == b'\n').collect();
         if start > 0 && !lines.is_empty() {
             // The window began mid-record.

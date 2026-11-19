@@ -630,8 +630,17 @@ async fn create_then_list_returns_chat_with_only_real_fields() {
     sorted.sort();
     assert_eq!(
         sorted,
-        vec!["has_artefacts", "id", "live", "source", "title"]
+        vec![
+            "has_artefacts",
+            "id",
+            "live",
+            "source",
+            "title",
+            "updated_at"
+        ]
     );
+    // When the transcript last changed (the list's sort key), in seconds.
+    assert!(only["updated_at"].as_i64().is_some_and(|t| t > 0), "{only}");
 }
 
 #[tokio::test]
