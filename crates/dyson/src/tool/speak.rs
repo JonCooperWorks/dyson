@@ -60,6 +60,21 @@ impl Tool for SpeakTool {
         })
     }
 
+    /// Speech changes nothing in the workspace, so it is not a mutation: a
+    /// turn that only speaks finishes as completed, not partial (the
+    /// default exclusive plan counts as a write). Not retryable: a
+    /// recovered call would speak, and bill, twice.
+    fn execution_plan(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> crate::tool::ToolExecutionPlan {
+        crate::tool::ToolExecutionPlan {
+            idempotency: crate::tool::Idempotency::Unsafe,
+            ..crate::tool::ToolExecutionPlan::read("voice:speech")
+        }
+    }
+
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let text = input["text"].as_str().unwrap_or_default().trim();
         if text.is_empty() {
@@ -252,6 +267,19 @@ mod tests {
                 let audio = client(&server.uri()).speak("hi", None, None).await.unwrap();
                 assert_eq!(audio, b"ID3");
             });
+    }
+
+    #[test]
+    fn speaking_is_not_a_workspace_mutation() {
+        let tool = SpeakTool::new(client("http://127.0.0.1:9"));
+        let ctx = ToolContext::from_cwd().unwrap();
+        let plan = tool.execution_plan(&json!({"text": "hi"}), &ctx);
+        assert!(
+            plan.resources
+                .iter()
+                .all(|r| r.access == crate::tool::ResourceAccess::Read)
+        );
+        assert_eq!(plan.idempotency, crate::tool::Idempotency::Unsafe);
     }
 
     #[test]
