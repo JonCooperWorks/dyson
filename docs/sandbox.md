@@ -317,15 +317,6 @@ host access as the Dyson process. See [Known Limitations](#known-limitations).
 
 The primary sandbox. Enforces per-tool capability policies at both the
 application level (for Rust-native tools) and OS level (for bash).
-Subsumes the old `OsSandbox` behavior.
-
-### OsSandbox (legacy, still available)
-
-The original bash-only sandbox. Still available for direct use, but
-`PolicySandbox` handles bash sandboxing now via the same underlying
-`build_bwrap_command_from_policy()` / `build_container_command_from_policy()`
-functions. The profile-based API (`"default"`, `"strict"`, `"permissive"`)
-is preserved for backward compatibility.
 
 ### CedarSandbox (`cedar` cargo feature, on by default)
 

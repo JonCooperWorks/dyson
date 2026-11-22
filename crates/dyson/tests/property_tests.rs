@@ -5,8 +5,8 @@
 use proptest::prelude::*;
 
 use dyson::auth::Credential;
-use dyson::message::{ContentBlock, Message};
 use dyson::tool::kb_status::format_bytes;
+use dyson_core::message::{ContentBlock, Message};
 
 // -----------------------------------------------------------------------
 // format_bytes never panics on any input.

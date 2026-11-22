@@ -46,15 +46,15 @@ pub fn format_background_result(id: u64, result: &std::result::Result<String, St
 /// vector so callers with a live in-memory agent can refresh its state in
 /// lock-step with the on-disk copy.
 pub fn persist_background_result(
-    store: &dyn crate::chat_history::ChatHistory,
+    store: &dyn dyson_persistence::ChatHistory,
     chat_key: &str,
     id: u64,
     result: &std::result::Result<String, String>,
-) -> crate::error::Result<Vec<crate::message::Message>> {
+) -> dyson_core::error::Result<Vec<dyson_core::message::Message>> {
     let mut msgs = store.load(chat_key)?;
-    msgs.push(crate::message::Message::user(&format_background_result(
-        id, result,
-    )));
+    msgs.push(dyson_core::message::Message::user(
+        &format_background_result(id, result),
+    ));
     store.save(chat_key, &msgs)?;
     Ok(msgs)
 }
@@ -112,8 +112,7 @@ pub(crate) async fn spawn_background_agent(
     // Attach chat history so the conversation is persisted through the
     // existing chat store (same backend as Telegram / other controllers).
     if let Ok(store) = crate::chat_history::create_chat_history(&settings.chat_history) {
-        let store: std::sync::Arc<dyn crate::chat_history::ChatHistory> =
-            std::sync::Arc::from(store);
+        let store: std::sync::Arc<dyn dyson_persistence::ChatHistory> = std::sync::Arc::from(store);
         bg_agent.set_chat_history(store, chat_id.clone());
     }
 

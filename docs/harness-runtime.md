@@ -6,8 +6,8 @@ separate from UI events and provider-specific stream formats.
 
 The protocol, execution declarations, scheduler, replay logic, and
 deterministic grader are owned by the standalone `dyson-harness` crate.
-Provider/controller code depends on that crate through the compatibility
-façade at `dyson::agent`; the harness never depends back on the application.
+Provider/controller code imports it directly (`dyson_harness::protocol`,
+`dyson_harness::scheduler`); the harness never depends back on the application.
 
 ## Run outcomes
 
@@ -46,8 +46,7 @@ The HTTP API exposes these authenticated, CSRF-protected controls:
 |---|---|
 | `GET /api/conversations/:id/run` | Current saved run, phase, pending tool names, and human question |
 | `POST /api/conversations/:id/pause` | `{"run_id":"run-…"}`; request pause at the next boundary |
-| `POST /api/conversations/:id/resume` | `{"run_id":"run-…"}`; resume the same saved run |
-| `POST /api/conversations/:id/signal` | Run ID plus `answer` below; persist the answer and resume |
+| `POST /api/conversations/:id/resume` | `{"run_id":"run-…"}`, optionally with `answer` below; persist the answer and resume the same saved run |
 | `POST /api/conversations/:id/cancel` | Cancel active or suspended work |
 
 For example, answering the default text form:
@@ -67,7 +66,7 @@ For example, answering the default text form:
 primitive fields, enums, required fields, string lengths, and numeric bounds.
 It saves the request and yields without holding a worker or a five-minute
 timer. The existing elicitation UI lists these requests alongside MCP forms,
-and answering a durable form uses the same signal path. Answers are validated
+and answering a durable form uses the same resume path. Answers are validated
 on the server and persisted before acknowledgement. Duplicate or stale answers
 cannot launch another run. Declining/cancelling a question withholds the rest
 of its selected tool batch, allowing the model to reconsider the plan.
@@ -77,7 +76,7 @@ Controllers using `run_detailed` with attached history also accept `/resume`,
 turn, reset usage/iteration limits, or allocate a new run ID. Existing elapsed
 task budgets continue to apply, including time spent paused. Changed model,
 prompt, tool schemas, or working directory must be restored before resumption.
-No boot-time auto-execution is performed: a caller supplies a resume/signal.
+No boot-time auto-execution is performed: a caller supplies a resume.
 An acknowledged answer survives a crash before dispatch and can be continued
 with `/resume` without answering again.
 

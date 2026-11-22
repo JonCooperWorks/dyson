@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::error::Result;
-use crate::message::ArtefactKind;
 use crate::tool::artefacts::{
     ArtefactLookup, ArtefactReader, ArtefactRecord, ArtefactSummary, safe_store_id,
 };
+use dyson_core::error::Result;
+use dyson_core::message::ArtefactKind;
 
 use super::stores::{ArtefactEntry, ArtefactStore};
 

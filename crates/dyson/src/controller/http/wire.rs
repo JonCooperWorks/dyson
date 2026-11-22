@@ -9,8 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::message::MessageCostMetadata;
 use crate::tool::view::ToolView;
+use dyson_core::message::MessageCostMetadata;
 
 #[derive(Serialize)]
 pub(crate) struct ConversationDto {
@@ -80,15 +80,15 @@ pub enum BlockDto {
     },
     /// Reference to an artefact rendered in the Artefacts tab.  The body
     /// lives in `HttpState.artefacts` and is fetched via
-    /// `/api/artefacts/<id>` — not inlined here to keep history payloads
+    /// `/api/conversations/<chat>/artefacts/<id>` — not inlined here to keep history payloads
     /// small when a chat has produced multiple long reports.
     Artefact {
         id: String,
-        kind: crate::message::ArtefactKind,
+        kind: dyson_core::message::ArtefactKind,
         title: String,
         /// `/#/artefacts/<id>` — an SPA deep-link that opens the reader
         /// directly.  We intentionally do NOT hand out the raw
-        /// `/api/artefacts/<id>` bytes URL here: cmd-click / copy-paste
+        /// `/api/conversations/<chat>/artefacts/<id>` bytes URL here: cmd-click / copy-paste
         /// of the chip should land in a viewer, not on raw markdown.
         /// The reader still fetches the body through the API endpoint;
         /// the client constructs that URL itself from the id.
@@ -199,7 +199,7 @@ pub(crate) const MAX_MIND_BODY: usize = 4 * 1024 * 1024;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseEvent {
     RunOutcome {
-        outcome: crate::agent::protocol::RunOutcome,
+        outcome: dyson_harness::protocol::RunOutcome,
     },
     Text {
         delta: String,
@@ -236,7 +236,7 @@ pub enum SseEvent {
         text: String,
     },
     /// An agent-produced file the UI can preview/download — points at
-    /// `/api/files/<id>` served from the controller's in-memory file
+    /// `/api/conversations/<chat>/files/<id>` served from the controller's in-memory file
     /// store.  `inline_image` is `true` for images so the UI can render
     /// `<img>` directly instead of a download link.
     File {
@@ -255,11 +255,11 @@ pub enum SseEvent {
     },
     /// An agent-produced artefact (e.g. a security-review report) ready
     /// for full-page markdown rendering.  The body is served at
-    /// `/api/artefacts/<id>` and the metadata list at
+    /// `/api/conversations/<chat>/artefacts/<id>` and the metadata list at
     /// `/api/conversations/<chat>/artefacts`.
     Artefact {
         id: String,
-        kind: crate::message::ArtefactKind,
+        kind: dyson_core::message::ArtefactKind,
         title: String,
         url: String,
         bytes: usize,
@@ -341,12 +341,12 @@ pub enum AuthMode {
 
 /// Wire shape for `GET /api/conversations/<chat>/artefacts`.  One entry
 /// per artefact emitted for this chat, ordered newest first.  The
-/// reader fetches the body separately from `/api/artefacts/<id>` so the
+/// reader fetches the body separately from `/api/conversations/<chat>/artefacts/<id>` so the
 /// list is cheap to render even when reports are multi-KB.
 #[derive(Clone, Serialize)]
 pub(crate) struct ArtefactDto {
     pub(crate) id: String,
-    pub(crate) kind: crate::message::ArtefactKind,
+    pub(crate) kind: dyson_core::message::ArtefactKind,
     pub(crate) title: String,
     pub(crate) bytes: usize,
     pub(crate) created_at: u64,

@@ -235,7 +235,7 @@ COPY --chmod=0755 dyson-warm-hold /usr/local/bin/dyson-warm-hold
 
 # Workspace lives at /var/lib/dyson; the swarm subcommand creates it on
 # first boot. Pre-create with the right perms so the agent can write
-# IDENTITY.md / TASK.md without elevating.
+# IDENTITY.md without elevating.
 RUN mkdir -p /var/lib/dyson && chmod 0755 /var/lib/dyson
 
 # jemalloc decay tuning recommended by the dyson README for memory-budgeted
@@ -251,8 +251,7 @@ EXPOSE 80
 #
 # The `dyson swarm` subcommand hardcodes dangerous-no-sandbox internally
 # (the pod's Kata VM already provides the sandbox boundary; nesting
-# another sandbox inside it is paranoia + a debug nightmare).  Pre-CLI-restructure the
-# flag was a top-level `dyson --dangerous-no-sandbox swarm`; the newer
-# CLI rejects unknown top-level flags, so the flag is gone from here.
+# another sandbox inside it is paranoia + a debug nightmare), so no
+# sandbox flag is passed here.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/dyson-warm-hold", "--", "/usr/local/bin/dyson-swarm-entrypoint"]
 CMD ["swarm"]

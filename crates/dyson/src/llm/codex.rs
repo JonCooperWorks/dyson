@@ -79,13 +79,13 @@ use std::process::Stdio;
 use async_trait::async_trait;
 use tokio::io::AsyncWriteExt as _;
 
-use crate::error::{DysonError, Result};
 use crate::llm::cli_subprocess::{self, CliLineParser, cli_event_stream};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
-use crate::message::Message;
 use crate::tool::Tool;
 use crate::workspace::WorkspaceHandle;
+use dyson_core::error::{DysonError, Result};
+use dyson_core::message::Message;
 
 // ---------------------------------------------------------------------------
 // CodexClient
@@ -992,7 +992,7 @@ mod tests {
             &self,
             _input: &serde_json::Value,
             _ctx: &crate::tool::ToolContext,
-        ) -> crate::error::Result<crate::tool::ToolOutput> {
+        ) -> dyson_core::error::Result<crate::tool::ToolOutput> {
             Ok(crate::tool::ToolOutput::success(
                 "DYSON_CODEX_FORWARDED_MCP_LIVE_OK",
             ))

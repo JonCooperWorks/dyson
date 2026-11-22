@@ -20,10 +20,10 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::ChildStdout;
 
-use crate::error::{DysonError, Result};
 use crate::llm::stream::StreamEvent;
 use crate::llm::{StreamResponse, ToolDefinition, ToolMode};
 use crate::tool::Tool;
+use dyson_core::error::{DysonError, Result};
 
 /// Trait for JSONL line parsers used by CLI subprocess clients.
 ///
@@ -220,7 +220,7 @@ mod tests {
             &self,
             _input: &serde_json::Value,
             _ctx: &crate::tool::ToolContext,
-        ) -> crate::Result<crate::tool::ToolOutput> {
+        ) -> dyson_core::error::Result<crate::tool::ToolOutput> {
             Ok(crate::tool::ToolOutput::success("ok"))
         }
     }

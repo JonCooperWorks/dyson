@@ -13,8 +13,8 @@ use std::fmt::Write;
 
 use crate::config::CompactionConfig;
 use crate::controller::Output;
-use crate::error::Result;
-use crate::message::{ContentBlock, Message};
+use dyson_core::error::Result;
+use dyson_core::message::{ContentBlock, Message};
 
 impl super::Agent {
     /// Compact the conversation using the five-phase Hermes-style algorithm.
@@ -175,7 +175,7 @@ impl super::Agent {
             new_messages = self.conversation.messages.len(),
             "context compacted"
         );
-        self.emit_run_event(super::protocol::RunEventKind::ContextCompacted {
+        self.emit_run_event(dyson_harness::protocol::RunEventKind::ContextCompacted {
             old_messages: old_count,
             new_messages: self.conversation.messages.len(),
         });
@@ -365,7 +365,7 @@ impl super::Agent {
     /// for the messages appended since the previous iteration instead of
     /// rescanning the entire history.
     pub(super) fn estimate_context_tokens(&mut self, system_prompt: &str) -> usize {
-        let system_tokens = crate::message::estimate_text_tokens(system_prompt);
+        let system_tokens = dyson_core::message::estimate_text_tokens(system_prompt);
         let message_tokens = self.conversation.estimated_message_tokens();
         system_tokens + message_tokens + self.tool_registry.cached_tokens
     }

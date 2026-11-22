@@ -42,7 +42,7 @@ pub(super) async fn handle_per_chat_command(
     entry: &Arc<ChatEntry>,
     settings: &Settings,
     config_path: Option<&std::path::Path>,
-    chat_store: &dyn crate::chat_history::ChatHistory,
+    chat_store: &dyn dyson_persistence::ChatHistory,
     registry: &crate::controller::ClientRegistry,
 ) {
     // Extract agent from the mutex so execute_agent_command (which may do an
@@ -141,7 +141,7 @@ pub(super) async fn handle_instant_command(
     registry: &crate::controller::ClientRegistry,
     bg_registry: &std::sync::Arc<crate::controller::background::BackgroundAgentRegistry>,
     agents: &Arc<tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>>,
-    chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
+    chat_store: &Arc<dyn dyson_persistence::ChatHistory>,
 ) -> bool {
     // Telegram-only commands not in the shared dispatcher.
     if text == "/memory" {
@@ -240,11 +240,11 @@ pub(super) async fn handle_instant_command(
 /// entry will restore from disk when it's lazily created.
 async fn append_background_result_to_chat(
     agents: &tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>,
-    chat_store: &dyn crate::chat_history::ChatHistory,
+    chat_store: &dyn dyson_persistence::ChatHistory,
     chat_id: ChatId,
     id: u64,
     result: &std::result::Result<String, String>,
-) -> crate::Result<()> {
+) -> dyson_core::error::Result<()> {
     let chat_key = chat_id.0.to_string();
     let entry = agents.read().await.get(&chat_id.0).cloned();
     let Some(entry) = entry else {
@@ -255,7 +255,7 @@ async fn append_background_result_to_chat(
     let mut ca = entry.agent.lock().await;
     let msgs = if let Some(agent) = ca.agent.as_mut() {
         let mut msgs = agent.messages().to_vec();
-        msgs.push(crate::message::Message::user(
+        msgs.push(dyson_core::message::Message::user(
             &crate::controller::format_background_result(id, result),
         ));
         agent.set_messages(msgs.clone());
@@ -467,7 +467,7 @@ pub(super) fn truncate_chars(s: &str, max: usize) -> String {
 }
 
 /// Save a note to the workspace MEMORY.md file.
-fn save_memory_note(settings: &Settings, note: &str) -> crate::Result<()> {
+fn save_memory_note(settings: &Settings, note: &str) -> dyson_core::error::Result<()> {
     let mut workspace = crate::workspace::create_workspace(&settings.workspace)?;
 
     let today = crate::workspace::FilesystemWorkspace::today_date();

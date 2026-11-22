@@ -18,8 +18,8 @@ mod rename;
 
 use async_trait::async_trait;
 
-use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use dyson_core::error::{DysonError, Result};
 
 pub struct BulkEditTool;
 

@@ -1,5 +1,5 @@
 use crate::controller::Output;
-use crate::message::Message;
+use dyson_core::message::Message;
 
 use super::Agent;
 

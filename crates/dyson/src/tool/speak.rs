@@ -12,9 +12,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::error::Result;
 use crate::media::audio::{MAX_SPEECH_CHARS, VoiceClient};
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use dyson_core::error::Result;
 
 pub struct SpeakTool {
     voice: Arc<VoiceClient>,

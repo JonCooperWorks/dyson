@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::error::{DysonError, Result};
 use crate::skill::local::manifest::{ScriptExecution, resolved_entrypoint};
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use dyson_core::error::{DysonError, Result};
 
 const MAX_READ_BYTES: u64 = 5 * 1024 * 1024;
 

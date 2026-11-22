@@ -7,7 +7,7 @@ Reactive client-side state built on `createStore` from `dyson-common-ui`. `app.j
 - `app` store and mutators: `setLive`, `setConversations`, `upsertConversation`, `removeConversation`, `markConversationHasArtefacts`, `setProviders`, `setCommands`, `switchProviderModel`, `setMind`, `setAgentName`, `mergeMcpProbes`, `setSkills`, `setAgentInfo`, `setActivity`, `setTool`, `mergeTools`, `updateTool`, `requestOpenArtefact`, `clearPendingArtefact`, `requestToggleArtefactsDrawer` [app.js:app]
 - `sessions` store and accessors: `makeSession`, `getSession`, `ensureSession`, `updateSession`, `deleteSession`, `getResources`, `mintToolRef` [sessions.js:sessions]
 - Session reducers: `mapLastTurn`, `appendBlock`, `lastAgentIndex`, `mapAgentTail`, `appendAgentBlock`, `settleRun`, `pushUserMessage`, `admitUserMessage`, `openPanel`, `closePanel`, `closeAllPanels`, `setComposerDraft`, `clearComposerDraft`, `setQueueMode`, `setNextRunModel` [sessions.js:pushUserMessage]
-- `FALLBACK_SLASH_COMMANDS` / `SLASH_COMMANDS` [constants.js:FALLBACK_SLASH_COMMANDS]
+- `FALLBACK_SLASH_COMMANDS` [constants.js:FALLBACK_SLASH_COMMANDS]
 - Test-only resets: `__resetAppStoreForTests`, `__resetSessionsForTests` [app.js:__resetAppStoreForTests, sessions.js:__resetSessionsForTests]
 
 ## Invariants

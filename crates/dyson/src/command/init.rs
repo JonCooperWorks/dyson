@@ -5,8 +5,7 @@
 //
 // What this file does:
 //   Creates the Dyson directory structure, writes a default config file,
-//   optionally imports an existing filesystem workspace, installs the binary
-//   to PATH, and optionally sets up a systemd service.
+//   installs the binary to PATH, and optionally sets up a systemd service.
 //
 // Directory layout (~/.dyson/):
 //
@@ -29,18 +28,17 @@ use std::path::{Path, PathBuf};
 pub fn run(
     noinput: bool,
     daemonize: bool,
-    import_filesystem: Option<PathBuf>,
     path: Option<PathBuf>,
     env_vars: Vec<String>,
     dangerous_no_sandbox: bool,
-) -> dyson::error::Result<()> {
+) -> dyson_core::error::Result<()> {
     let home = std::env::var("HOME").map_err(|_| {
-        dyson::error::DysonError::Config("HOME environment variable not set".into())
+        dyson_core::error::DysonError::Config("HOME environment variable not set".into())
     })?;
     let base = path.unwrap_or_else(|| PathBuf::from(&home).join(".dyson"));
 
     if !noinput {
-        return Err(dyson::error::DysonError::Config(
+        return Err(dyson_core::error::DysonError::Config(
             "interactive init not yet implemented.  Use --noinput for defaults.\n\
              Usage: dyson init --noinput"
                 .into(),
@@ -57,31 +55,7 @@ pub fn run(
     // Write default config.
     let config_path = base.join("dyson.json");
     if !config_path.exists() {
-        let default_config = serde_json::json!({
-            "config_version": dyson::config::migrate::CURRENT_VERSION,
-            "providers": {
-                "default": {
-                    "type": "claude-code",
-                    "model": "sonnet"
-                }
-            },
-            "agent": {
-                "provider": "default",
-                "max_iterations": 80,
-                "max_tokens": 16384
-            },
-            "workspace": {
-                "path": workspace_dir.to_string_lossy()
-            },
-            "controllers": [
-                { "type": "terminal" }
-            ],
-            "skills": {
-                "builtin": {
-                    "tools": ["bash"]
-                }
-            }
-        });
+        let default_config = default_config(&workspace_dir);
 
         let json = serde_json::to_string_pretty(&default_config)?;
         std::fs::write(&config_path, format!("{json}\n"))?;
@@ -96,15 +70,8 @@ pub fn run(
         eprintln!("  {} already exists — skipping", config_path.display());
     }
 
-    // Import filesystem workspace if requested.
-    if let Some(ref source) = import_filesystem {
-        import_filesystem_workspace(source, &workspace_dir)?;
-    } else if is_filesystem_workspace(&workspace_dir) {
-        eprintln!("  detected existing filesystem workspace — migrating in place");
-    }
-
-    // Load workspace — runs migrations (v0 → current), then creates
-    // default files for anything missing (USER.md, HEARTBEAT.md, etc.).
+    // Load the workspace, creating default files for anything missing
+    // (USER.md, HEARTBEAT.md, etc.).
     let _ = dyson::workspace::FilesystemWorkspace::load(
         &workspace_dir,
         dyson::config::MemoryConfig::default(),
@@ -128,68 +95,34 @@ pub fn run(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// filesystem detection and import
-// ---------------------------------------------------------------------------
-
-/// Check if a directory looks like an existing filesystem workspace.
-///
-/// Returns `true` if it contains at least SOUL.md and IDENTITY.md.
-/// These are the two files every filesystem/TARS workspace has.
-fn is_filesystem_workspace(path: &Path) -> bool {
-    path.join("SOUL.md").exists() && path.join("IDENTITY.md").exists()
-}
-
-/// Copy an filesystem workspace directory into the Dyson workspace.
-///
-/// Copies all .md files from the source root and the memory/ subdirectory.
-/// Existing files in the destination are overwritten.
-fn import_filesystem_workspace(source: &Path, dest: &Path) -> dyson::error::Result<()> {
-    if !source.exists() {
-        return Err(dyson::error::DysonError::Config(format!(
-            "filesystem workspace not found: {}",
-            source.display()
-        )));
-    }
-
-    eprintln!(
-        "  importing filesystem workspace from {}...",
-        source.display()
-    );
-
-    let mut count = 0;
-
-    // Copy top-level .md files.
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".md") {
-                std::fs::copy(entry.path(), dest.join(&name))?;
-                count += 1;
+/// The dyson.json `dyson init` writes, in the current config shape.
+fn default_config(workspace_dir: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "config_version": dyson::config::CONFIG_VERSION,
+        "providers": {
+            "default": {
+                "type": "claude-code",
+                "models": ["sonnet"]
+            }
+        },
+        "agent": {
+            "provider": "default",
+            "max_iterations": 80,
+            "max_tokens": 16384
+        },
+        "workspace": {
+            "backend": "filesystem",
+            "connection_string": workspace_dir.to_string_lossy()
+        },
+        "controllers": [
+            { "type": "terminal" }
+        ],
+        "skills": {
+            "builtin": {
+                "tools": ["bash"]
             }
         }
-    }
-
-    // Copy memory/ directory.
-    let source_memory = source.join("memory");
-    if source_memory.exists() {
-        let dest_memory = dest.join("memory");
-        std::fs::create_dir_all(&dest_memory)?;
-        for entry in std::fs::read_dir(&source_memory)? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.ends_with(".md") {
-                    std::fs::copy(entry.path(), dest_memory.join(&name))?;
-                    count += 1;
-                }
-            }
-        }
-    }
-
-    eprintln!("  imported {count} files");
-    Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +136,7 @@ fn import_filesystem_workspace(source: &Path, dest: &Path) -> dyson::error::Resu
 /// systemd's user environment) and on macOS if the user has it configured.
 /// If ~/.local/bin/ doesn't exist, we create it — the user may need to
 /// add it to PATH manually (we print instructions).
-fn install_to_path(base: &Path) -> dyson::error::Result<()> {
+fn install_to_path(base: &Path) -> dyson_core::error::Result<()> {
     let current_exe = std::env::current_exe()?;
 
     // Copy binary into ~/.dyson/bin/.
@@ -273,7 +206,7 @@ fn install_systemd_service(
     config_path: &Path,
     env_vars: &[String],
     dangerous_no_sandbox: bool,
-) -> dyson::error::Result<()> {
+) -> dyson_core::error::Result<()> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (base, config_path, env_vars, dangerous_no_sandbox);
@@ -430,4 +363,36 @@ fn run_systemctl(program: &str, prefix_args: &[&str]) -> bool {
         }
     }
     ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_current_shape_and_loads() {
+        let dir = std::env::temp_dir().join(format!(
+            "dyson-init-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let workspace_dir = dir.join("workspace");
+        let config = default_config(&workspace_dir);
+
+        let path = dir.join("dyson.json");
+        let written = format!("{}\n", serde_json::to_string_pretty(&config).unwrap());
+        std::fs::write(&path, &written).unwrap();
+        let settings = dyson::config::loader::load_settings(Some(&path)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
+        assert_eq!(
+            settings.workspace.connection_string.expose(),
+            workspace_dir.to_string_lossy()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

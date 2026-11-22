@@ -1054,11 +1054,8 @@ function streamCallbacks(conv) {
 }
 
 // -- Transcript hydration ----------------------------------------------
-// Consumes the /api/conversations/:id response, seeds the session store
-// and the tool view dict, and handles the retroactive image-artefact
-// pairing legacy chats need (image artefacts emitted before the server
-// tracked tool_use_id get paired positionally with image_generate tool
-// panels).
+// Consumes the /api/conversations/:id response and seeds the session
+// store and the tool view dict.
 function hydrateTranscript(conv, data) {
   const mintCounter = () => { const r = getResources(conv); r.counter += 1; return r.counter; };
   const tools = {};
@@ -1108,37 +1105,12 @@ function hydrateTranscript(conv, data) {
     }))
     .filter(t => t.blocks.length > 0);
 
-  // Retroactive pairing: pre-tool_use_id chats have orphan image
-  // artefacts.  Pair by position with unfilled image_generate panels.
   const allBlocks = liveTurns.flatMap(t => t.blocks);
-  const orphans = allBlocks.filter(b => b.type === 'artefact' && b.kind === 'image' && !b.tool_use_id);
-  const unfilled = allBlocks.filter(b => b.type === 'tool' && tools[b.ref]?.name === 'image_generate' && tools[b.ref]?.kind !== 'image');
-  const pending = [];
-  for (let i = 0; i < Math.min(orphans.length, unfilled.length); i += 1) {
-    const art = orphans[i], tool = tools[unfilled[i].ref];
-    tool.kind = 'image';
-    tool.body = {
-      url: art.metadata?.file_url || '',
-      name: art.metadata?.file_name || art.title,
-      mime: 'image/*',
-    };
-    if (!tool.body.url) pending.push({ ref: unfilled[i].ref, url: art.url });
-  }
-
   mergeTools(tools);
   const artefacts = allBlocks
     .filter(b => b.type === 'artefact')
     .map(b => ({ id: b.id, kind: b.kind, title: b.title, bytes: b.bytes, created_at: 0, metadata: b.metadata }));
   updateSession(conv, s => ({ ...s, liveTurns, artefacts }));
-
-  // Resolve orphan image URLs out-of-band (older chats store the file
-  // URL as the artefact body text).
-  for (const { ref, url } of pending) {
-    fetch(url)
-      .then(r => r.ok ? r.text() : Promise.reject(r.status))
-      .then(text => updateTool(ref, t => ({ ...t, body: { ...t.body, url: text.trim() } })))
-      .catch(() => {});
-  }
 }
 
 // Open the SSE stream for an in-flight chat without POSTing a turn,

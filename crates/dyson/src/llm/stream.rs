@@ -35,7 +35,7 @@
 // keeps the stream handler simple: it just pattern-matches on events.
 // ===========================================================================
 
-use crate::error::DysonError;
+use dyson_core::error::DysonError;
 
 // ---------------------------------------------------------------------------
 // StopReason

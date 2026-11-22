@@ -84,29 +84,29 @@ export function MindView({ showSide, onHideSide, path, setPath }) {
     <div className={`mind${showSide ? ' show-side' : ''}`}>
       {showSide && <div className="mind-scrim" onClick={onHideSide}/>}
       <aside className="mind-side">
-        <div style={{padding:'10px 14px', borderBottom:'1px solid var(--line)'}}>
+        <div style={{padding:'10px 14px', borderBottom:'1px solid var(--border)'}}>
           <div className="eyebrow">workspace</div>
           {m.backend && <div style={{fontSize:13, color:'var(--fg)', marginTop:4}}><span className="mono">{m.backend}</span> backend</div>}
         </div>
         <div style={{overflowY:'auto', flex:1, padding:'6px 0'}}>
-          {(m.files.length === 0) && <div style={{padding:'14px', color:'var(--mute)', fontSize:12}}>No workspace files.</div>}
+          {(m.files.length === 0) && <div style={{padding:'14px', color:'var(--fg-faint)', fontSize:12}}>No workspace files.</div>}
           {m.files.map(f => (
             <div key={f.path} onClick={() => { setSelected(f.path); onHideSide && onHideSide(); }}
                  style={{display:'flex', alignItems:'center', gap:8, padding:'6px 14px', cursor:'pointer',
-                         background: selected === f.path ? 'var(--panel)' : 'transparent',
+                         background: selected === f.path ? 'var(--bg-1)' : 'transparent',
                          borderLeft: selected === f.path ? '2px solid var(--accent)' : '2px solid transparent'}}>
-              <Icon name="file" size={11} style={{color:'var(--mute)'}}/>
-              <span className="mono" style={{fontSize:12, color:'var(--fg-dim)', flex:1, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{f.path}</span>
-              {f.size && <span className="mono" style={{fontSize:10, color:'var(--mute)'}}>{f.size}</span>}
+              <Icon name="file" size={11} style={{color:'var(--fg-faint)'}}/>
+              <span className="mono" style={{fontSize:12, color:'var(--fg-muted)', flex:1, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{f.path}</span>
+              {f.size && <span className="mono" style={{fontSize:10, color:'var(--fg-faint)'}}>{f.size}</span>}
             </div>
           ))}
         </div>
       </aside>
       <section className="mind-pane">
-        <div style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px', borderBottom:'1px solid var(--line)', background:'var(--bg)', flexWrap:'wrap'}}>
+        <div style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px', borderBottom:'1px solid var(--border)', background:'var(--bg)', flexWrap:'wrap'}}>
           <span className="mono" style={{fontSize:13, color:'var(--fg)'}}>{selected || '—'}</span>
           {dirty && <span className="chip" style={{color:'var(--warn)'}}>unsaved</span>}
-          {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
+          {err && <span className="chip" style={{color:'var(--danger)'}}>{err}</span>}
           <span style={{flex:1}}/>
           {dirty && <button className="btn sm ghost" onClick={() => setDraft(loaded)} disabled={saving}>revert</button>}
           <button className="btn sm primary" onClick={save} disabled={!dirty || saving || !selected}>
@@ -163,7 +163,7 @@ export function ActivityView() {
           Background lanes{running > 0 && ` · ${running} running`}
         </div>
         {grouped.length === 0 && (
-          <div style={{color:'var(--mute)', fontSize:13, padding:'18px 0'}}>
+          <div style={{color:'var(--fg-faint)', fontSize:13, padding:'18px 0'}}>
             No background agents or dreams running.
           </div>
         )}
@@ -174,14 +174,14 @@ export function ActivityView() {
           const runningItems = items.filter(a => a.status === 'running');
           const finishedItems = items.filter(a => a.status !== 'running');
           const row = (a, i, dim) => (
-            <div key={i} style={{display:'flex', alignItems:'center', gap:14, padding:'10px 14px', background:'var(--bg)', border:'1px solid var(--line)', borderRadius:6, opacity: dim ? 0.72 : 1}}>
+            <div key={i} style={{display:'flex', alignItems:'center', gap:14, padding:'10px 14px', background:'var(--bg)', border:'1px solid var(--border)', borderRadius:6, opacity: dim ? 0.72 : 1}}>
               <span style={{width:6, height:6, borderRadius:'50%',
-                            background: a.status === 'running' ? 'var(--accent)' : a.status === 'ok' ? 'var(--ok)' : 'var(--err)',
+                            background: a.status === 'running' ? 'var(--accent)' : a.status === 'ok' ? 'var(--ok)' : 'var(--danger)',
                             animation: a.status === 'running' ? 'pulse 1.4s infinite' : ''}}/>
               <span className="mono" style={{fontSize:12.5, color:'var(--fg)', minWidth:200}}>{a.name}</span>
-              <span style={{fontSize:12.5, color:'var(--fg-dim)', flex:1}}>{a.note}</span>
-              {a.chat_id && <span className="mono" style={{fontSize:10.5, color:'var(--mute-2)', opacity:0.75}}>{a.chat_id}</span>}
-              <span className="mono" style={{fontSize:11, color:'var(--mute-2)'}}>{fmtDuration(a)}</span>
+              <span style={{fontSize:12.5, color:'var(--fg-muted)', flex:1}}>{a.note}</span>
+              {a.chat_id && <span className="mono" style={{fontSize:10.5, color:'var(--fg-muted)', opacity:0.75}}>{a.chat_id}</span>}
+              <span className="mono" style={{fontSize:11, color:'var(--fg-muted)'}}>{fmtDuration(a)}</span>
             </div>
           );
           return (
@@ -194,7 +194,7 @@ export function ActivityView() {
               )}
               {finishedItems.length > 0 && (
                 <div style={{marginTop: runningItems.length > 0 ? 14 : 0}}>
-                  <div className="eyebrow" style={{margin:'0 0 6px', fontSize:10.5, color:'var(--mute-2)'}}>
+                  <div className="eyebrow" style={{margin:'0 0 6px', fontSize:10.5, color:'var(--fg-muted)'}}>
                     Finished · {finishedItems.length}
                   </div>
                   <div style={{display:'flex', flexDirection:'column', gap:6}}>
@@ -266,25 +266,25 @@ function AuditRow({ r }) {
   const badgeColor = costBadge === 'reconciled' ? 'var(--accent)'
                    : costBadge === 'provider' ? 'var(--ok)'
                    : costBadge === 'estimated' ? 'var(--warn, #c08a2a)'
-                   : 'var(--mute-2)';
+                   : 'var(--fg-muted)';
   return (
-    <div style={{border:'1px solid var(--line)', borderRadius:6, background:'var(--bg)', overflow:'hidden'}}>
+    <div style={{border:'1px solid var(--border)', borderRadius:6, background:'var(--bg)', overflow:'hidden'}}>
       <div onClick={() => setOpen(o => !o)}
            style={{display:'flex', alignItems:'center', gap:12, padding:'9px 12px', cursor:'pointer'}}>
         <span style={{width:6, height:6, borderRadius:'50%', flexShrink:0,
-                      background: statusOk ? 'var(--ok)' : 'var(--err)',
+                      background: statusOk ? 'var(--ok)' : 'var(--danger)',
                       animation: live ? 'pulse 1.4s infinite' : ''}}/>
         <span className="mono" style={{fontSize:12, color:'var(--fg)', minWidth:170, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
           {r.model || r.provider}
         </span>
-        <span style={{fontSize:11, color:'var(--mute-2)', minWidth:78}}>{r.provider}</span>
-        <span className="mono" style={{fontSize:11.5, color:'var(--fg-dim)', minWidth:96}}>
+        <span style={{fontSize:11, color:'var(--fg-muted)', minWidth:78}}>{r.provider}</span>
+        <span className="mono" style={{fontSize:11.5, color:'var(--fg-muted)', minWidth:96}}>
           {fmtNum(r.input_tokens)}→{fmtNum(r.output_tokens)}
         </span>
-        <span className="mono" style={{fontSize:11.5, color: r.tok_per_sec != null ? 'var(--fg)' : 'var(--mute-2)', minWidth:78}}>
+        <span className="mono" style={{fontSize:11.5, color: r.tok_per_sec != null ? 'var(--fg)' : 'var(--fg-muted)', minWidth:78}}>
           {fmtToks(r.tok_per_sec)}
         </span>
-        <span className="mono" style={{fontSize:11, color:'var(--mute-2)', minWidth:54}} title="time to first token">
+        <span className="mono" style={{fontSize:11, color:'var(--fg-muted)', minWidth:54}} title="time to first token">
           {fmtMs(r.ttft_ms)}
         </span>
         <span style={{flex:1}}/>
@@ -294,19 +294,19 @@ function AuditRow({ r }) {
         <span className="mono" style={{fontSize:12, color:'var(--fg)', minWidth:62, textAlign:'right'}}>
           {fmtUsd(r.cost_usd)}
         </span>
-        {!statusOk && <span className="mono" style={{fontSize:10.5, color:'var(--err)'}}>{r.status_code}</span>}
-        <span className="mono" style={{fontSize:10.5, color:'var(--mute-2)', minWidth:62, textAlign:'right'}}>{fmtAgo(r.occurred_at)}</span>
+        {!statusOk && <span className="mono" style={{fontSize:10.5, color:'var(--danger)'}}>{r.status_code}</span>}
+        <span className="mono" style={{fontSize:10.5, color:'var(--fg-muted)', minWidth:62, textAlign:'right'}}>{fmtAgo(r.occurred_at)}</span>
       </div>
       {open && (
-        <div style={{padding:'4px 12px 11px 24px', display:'grid', gridTemplateColumns:'auto 1fr', columnGap:14, rowGap:3, fontSize:11.5, color:'var(--fg-dim)', borderTop:'1px solid var(--line)'}}>
-          <span style={{color:'var(--mute-2)'}}>key source</span><span className="mono">{r.key_source}</span>
-          <span style={{color:'var(--mute-2)'}}>status</span><span className="mono">{r.status_code}</span>
-          <span style={{color:'var(--mute-2)'}}>tokens</span><span className="mono">in {fmtNum(r.input_tokens)} · out {fmtNum(r.output_tokens)}{r.native_output_tokens != null ? ` · native ${fmtNum(r.native_output_tokens)}` : ''}</span>
-          <span style={{color:'var(--mute-2)'}}>latency</span><span className="mono">ttft {fmtMs(r.ttft_ms)} · stream {fmtMs(r.stream_ms)}{r.gen_time_ms != null ? ` · gen ${fmtMs(r.gen_time_ms)}` : ''}</span>
-          <span style={{color:'var(--mute-2)'}}>throughput</span><span className="mono">{fmtToks(r.tok_per_sec)}{reconciled ? ' (reconciled)' : r.stream_ms != null ? ' (local)' : ''}</span>
-          <span style={{color:'var(--mute-2)'}}>cost source</span><span className="mono">{r.cost_source}{reconciled ? ` · reconciled ${fmtAgo(r.reconciled_at)}` : ''}</span>
-          {r.upstream_generation_id && (<><span style={{color:'var(--mute-2)'}}>generation</span><span className="mono" style={{wordBreak:'break-all'}}>{r.upstream_generation_id}</span></>)}
-          <span style={{color:'var(--mute-2)'}}>audit id</span><span className="mono">{r.audit_id}</span>
+        <div style={{padding:'4px 12px 11px 24px', display:'grid', gridTemplateColumns:'auto 1fr', columnGap:14, rowGap:3, fontSize:11.5, color:'var(--fg-muted)', borderTop:'1px solid var(--border)'}}>
+          <span style={{color:'var(--fg-muted)'}}>key source</span><span className="mono">{r.key_source}</span>
+          <span style={{color:'var(--fg-muted)'}}>status</span><span className="mono">{r.status_code}</span>
+          <span style={{color:'var(--fg-muted)'}}>tokens</span><span className="mono">in {fmtNum(r.input_tokens)} · out {fmtNum(r.output_tokens)}{r.native_output_tokens != null ? ` · native ${fmtNum(r.native_output_tokens)}` : ''}</span>
+          <span style={{color:'var(--fg-muted)'}}>latency</span><span className="mono">ttft {fmtMs(r.ttft_ms)} · stream {fmtMs(r.stream_ms)}{r.gen_time_ms != null ? ` · gen ${fmtMs(r.gen_time_ms)}` : ''}</span>
+          <span style={{color:'var(--fg-muted)'}}>throughput</span><span className="mono">{fmtToks(r.tok_per_sec)}{reconciled ? ' (reconciled)' : r.stream_ms != null ? ' (local)' : ''}</span>
+          <span style={{color:'var(--fg-muted)'}}>cost source</span><span className="mono">{r.cost_source}{reconciled ? ` · reconciled ${fmtAgo(r.reconciled_at)}` : ''}</span>
+          {r.upstream_generation_id && (<><span style={{color:'var(--fg-muted)'}}>generation</span><span className="mono" style={{wordBreak:'break-all'}}>{r.upstream_generation_id}</span></>)}
+          <span style={{color:'var(--fg-muted)'}}>audit id</span><span className="mono">{r.audit_id}</span>
         </div>
       )}
     </div>
@@ -347,7 +347,7 @@ export function AuditView() {
 
   const stat = (label, value, color) => (
     <div style={{display:'flex', flexDirection:'column', gap:2}}>
-      <span className="eyebrow" style={{fontSize:10, color:'var(--mute-2)'}}>{label}</span>
+      <span className="eyebrow" style={{fontSize:10, color:'var(--fg-muted)'}}>{label}</span>
       <span className="mono" style={{fontSize:15, color: color || 'var(--fg)'}}>{value}</span>
     </div>
   );
@@ -364,25 +364,25 @@ export function AuditView() {
             {AUDIT_RANGES.map(r => (
               <button key={r.id} onClick={() => setRange(r.id)}
                       style={{fontSize:11.5, padding:'3px 10px', borderRadius:5, cursor:'pointer',
-                              border:'1px solid var(--line)',
+                              border:'1px solid var(--border)',
                               background: range === r.id ? 'var(--accent)' : 'transparent',
-                              color: range === r.id ? '#fff' : 'var(--fg-dim)'}}>
+                              color: range === r.id ? '#fff' : 'var(--fg-muted)'}}>
                 {r.label}
               </button>
             ))}
           </div>
         </div>
 
-        <div style={{display:'flex', gap:30, padding:'14px 16px', marginBottom:16, border:'1px solid var(--line)', borderRadius:8, background:'var(--bg)', flexWrap:'wrap'}}>
+        <div style={{display:'flex', gap:30, padding:'14px 16px', marginBottom:16, border:'1px solid var(--border)', borderRadius:8, background:'var(--bg)', flexWrap:'wrap'}}>
           {stat('Requests', String(rows.length))}
           {stat('Spend', fmtUsd(totals.cost))}
           {stat('Tokens', fmtNum(totals.tokens))}
           {stat('Avg throughput', avgTps != null ? fmtToks(avgTps) : '—')}
-          {stat('Errors', String(totals.errors), totals.errors > 0 ? 'var(--err)' : 'var(--fg)')}
+          {stat('Errors', String(totals.errors), totals.errors > 0 ? 'var(--danger)' : 'var(--fg)')}
         </div>
 
         {source !== 'swarm' && (
-          <div style={{color:'var(--mute)', fontSize:12.5, padding:'10px 0 16px'}}>
+          <div style={{color:'var(--fg-faint)', fontSize:12.5, padding:'10px 0 16px'}}>
             {source === 'unavailable'
               ? 'Per-request audit is served by Swarm. This Dyson is running standalone, so no rows are available.'
               : 'Could not reach Swarm for audit data. Showing nothing rather than stale numbers.'}
@@ -390,7 +390,7 @@ export function AuditView() {
         )}
 
         {loaded && rows.length === 0 && source === 'swarm' && (
-          <div style={{color:'var(--mute)', fontSize:13, padding:'18px 0'}}>No LLM requests in this range yet.</div>
+          <div style={{color:'var(--fg-faint)', fontSize:13, padding:'18px 0'}}>No LLM requests in this range yet.</div>
         )}
 
         <div style={{display:'flex', flexDirection:'column', gap:5}}>
@@ -543,7 +543,7 @@ export function ArtefactsView({ conv, setConv }) {
       <aside className="mind-side">
         <div className="artefact-tree-head">
           <div className="eyebrow">artifacts</div>
-          <div style={{fontSize:12, color:'var(--fg-dim)', marginTop:4}}>
+          <div style={{fontSize:12, color:'var(--fg-muted)', marginTop:4}}>
             {hasChats
               ? `${chats.length} chat${chats.length === 1 ? '' : 's'} with reports`
               : 'Full-page reports emitted by agents.'}
@@ -551,7 +551,7 @@ export function ArtefactsView({ conv, setConv }) {
         </div>
         {showDeepLinkPlaceholder ? (
           <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center', padding:'24px'}}>
-            <div style={{color:'var(--fg-dim)', fontSize:13, lineHeight:1.6, textAlign:'center', maxWidth:'320px'}}>
+            <div style={{color:'var(--fg-muted)', fontSize:13, lineHeight:1.6, textAlign:'center', maxWidth:'320px'}}>
               Loading conversation context…
             </div>
           </div>
@@ -569,7 +569,7 @@ export function ArtefactsView({ conv, setConv }) {
           </div>
         ) : (
           <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center', padding:'24px'}}>
-            <div style={{color:'var(--fg-dim)', fontSize:13, lineHeight:1.6, textAlign:'center', maxWidth:'320px'}}>
+            <div style={{color:'var(--fg-muted)', fontSize:13, lineHeight:1.6, textAlign:'center', maxWidth:'320px'}}>
               No artifacts yet.
             </div>
           </div>
@@ -599,7 +599,7 @@ function ChatBranch({ chat, isActive, open, onToggle, selected, selectedChatId, 
       </div>
       {open && (
         items.length === 0 ? (
-          <div style={{padding:'6px 14px 10px 32px', color:'var(--fg-dim)', fontSize:11.5}}>
+          <div style={{padding:'6px 14px 10px 32px', color:'var(--fg-muted)', fontSize:11.5}}>
             No artifacts loaded.
           </div>
         ) : (
@@ -608,7 +608,7 @@ function ChatBranch({ chat, isActive, open, onToggle, selected, selectedChatId, 
                  className="artefact-row"
                  data-selected={selected === a.id && selectedChatId === chat.id ? 'true' : 'false'}
                  onClick={() => onPick(a.id)}>
-              <Icon name="file" size={11} style={{color:'var(--mute)'}}/>
+              <Icon name="file" size={11} style={{color:'var(--fg-faint)'}}/>
               <span className="title">{a.title}</span>
               <span className="mono size">{prettySize(a.bytes || 0)}</span>
               <ArtefactRowShareControl artefact={a} chatId={chat.id}/>
@@ -775,11 +775,11 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
       <section className="mind-pane">
         <div className="artefact-reader-head"
              style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
-                     borderBottom:'1px solid var(--line)', background:'var(--bg)'}}>
-          <span className="artefact-reader-title" style={{fontSize:13, color:'var(--fg-dim)'}}>Artifacts</span>
+                     borderBottom:'1px solid var(--border)', background:'var(--bg)'}}>
+          <span className="artefact-reader-title" style={{fontSize:13, color:'var(--fg-muted)'}}>Artifacts</span>
         </div>
         <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center',
-                     color:'var(--fg-dim)', fontSize:13}}>
+                     color:'var(--fg-muted)', fontSize:13}}>
           Select an artifact to read.
         </div>
       </section>
@@ -818,16 +818,15 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
   // Markdown/text files use an inline reader. Other files (binary,
   // archives, images handled above) get a download-only card.
   const isBinaryFile = isFile && !isPreviewableFile;
-  // Structured security-report artefacts carry a workspace path to the
-  // per-run report document.  Keyed on the metadata field, NOT on
-  // kind === 'security_review': legacy report artefacts have that kind
-  // but no document and must keep rendering as markdown.  `meta` can be
-  // null on cold deep-links — the branch falls through to markdown until
-  // it hydrates, then upgrades.
+  // Structured report artefacts carry a workspace path to the per-run
+  // report document.  Keyed on the metadata field, NOT on
+  // kind === 'security_review': a review whose report document failed to
+  // write has that kind but no document and renders as markdown.  `meta`
+  // can be null on cold deep-links — the branch falls through to markdown
+  // until it hydrates, then upgrades.
   const reportPath = typeof metaData.report_path === 'string' ? metaData.report_path : '';
-  // `report_kind` discriminates which structured reader renders the document
-  // (absent ⇒ "security" for back-compat, since the card contract keyed on bare
-  // `report_path` before evals existed).
+  // `report_kind` picks the structured reader: evals set "eval"; security
+  // reviews leave it unset.
   const reportKind = metaData.report_kind === 'eval' ? 'eval' : 'security';
 
   const download = () => {
@@ -899,10 +898,10 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
     <section className="mind-pane">
       <div className="artefact-reader-head"
            style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
-                   borderBottom:'1px solid var(--line)', background:'var(--bg)', flexWrap:'wrap'}}>
+                   borderBottom:'1px solid var(--border)', background:'var(--bg)', flexWrap:'wrap'}}>
         <span className="artefact-reader-title" style={{fontSize:13, color:'var(--fg)', fontWeight:500}}>{(meta && meta.title) || 'Artifact'}</span>
         {meta && meta.kind && <span className="chip mono">{meta.kind.replace(/_/g, ' ')}</span>}
-        {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
+        {err && <span className="chip" style={{color:'var(--danger)'}}>{err}</span>}
         <span className="artefact-reader-spacer" style={{flex:1}}/>
         <ShareMenu canShare={canShare} busy={shareBusy} onMint={mintShare}/>
         <button className="btn sm ghost" onClick={copy} disabled={isImage ? !imageUrl : isBinaryFile ? !fileUrl : isPreviewableFile ? !previewBody : !body}>
@@ -958,12 +957,12 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
             ? <img src={imageUrl} alt={(meta && meta.title) || 'image'}
                    style={{maxWidth:'100%', maxHeight:'100%', objectFit:'contain',
                            borderRadius:4, boxShadow:'0 2px 10px rgba(0,0,0,0.1)'}}/>
-            : <div style={{color:'var(--mute)', fontSize:13}}>Image no longer available.</div>}
+            : <div style={{color:'var(--fg-faint)', fontSize:13}}>Image no longer available.</div>}
         </div>
       ) : isBinaryFile ? (
         <div className="artefact-file-card"
              style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center',
-                     padding:'40px 24px', textAlign:'center', color:'var(--fg-dim)', fontSize:13}}>
+                     padding:'40px 24px', textAlign:'center', color:'var(--fg-muted)', fontSize:13}}>
           <div>
             <div style={{fontSize:14, color:'var(--fg)', marginBottom:6}}>{fileName}</div>
             <div style={{marginBottom:18, fontSize:12}}>

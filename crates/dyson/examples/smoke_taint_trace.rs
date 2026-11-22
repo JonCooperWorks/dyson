@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
-use dyson::ast::{self, taint};
+use dyson_ast::taint;
 
 struct Target {
     /// `org/repo` on github.com.
@@ -345,7 +345,7 @@ fn shallow_clone(slug: &str, dest: &Path) -> Result<(), String> {
 }
 
 async fn run_repo(language: &'static str, path: &Path, totals: &mut Totals) -> Result<(), String> {
-    let config = ast::config_for_language_name(language)
+    let config = dyson_ast::config_for_language_name(language)
         .ok_or_else(|| format!("unknown language: {language}"))?;
 
     let started = Instant::now();
@@ -414,7 +414,7 @@ struct Probe {
 
 async fn run_probe(
     index: &taint::SymbolIndex,
-    config: &'static ast::LanguageConfig,
+    config: &'static dyson_ast::LanguageConfig,
     working_dir: &Path,
     probe: Probe,
 ) -> Result<bool, String> {

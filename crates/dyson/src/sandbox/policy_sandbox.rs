@@ -40,7 +40,6 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use crate::error::Result;
 #[cfg(target_os = "linux")]
 use crate::sandbox::os::build_bwrap_command_from_policy;
 #[cfg(target_os = "macos")]
@@ -48,6 +47,7 @@ use crate::sandbox::os::build_container_command_from_policy;
 use crate::sandbox::policy::{Access, PathAccess, PolicyTable, SandboxPolicy, ToolPolicyConfig};
 use crate::sandbox::{Sandbox, SandboxDecision};
 use crate::tool::{ToolContext, ToolOutput};
+use dyson_core::error::Result;
 
 use super::MAX_OUTPUT_CHARS;
 

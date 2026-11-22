@@ -14,7 +14,7 @@ Its build script compiles the web UI and embeds the bundle into the binary.
 - [examples](./examples/EGM.md) - AST/taint smoke tests, live security-review runs, benchmark scorer
 - Feature `cedar` (default) - Cedar policy layer over the tool sandbox [Cargo.toml:features]
 - Build script inputs: `src/controller/http/web/{index.html,package.json,package-lock.json,vite.config.js,src/**}` [build.rs:watch_inputs]
-- Generated `$OUT_DIR/web_assets.rs`: `ASSETS` slice and `lookup_asset(key)` [build.rs:generate_asset_table]
+- Generated `$OUT_DIR/web_assets.rs`: `lookup_asset(key)` [build.rs:generate_asset_table]
 
 ## Invariants
 

@@ -6,16 +6,17 @@
 //   - SWARM_BEARER_TOKEN — auth secret the dyson_proxy stamps on every
 //     forwarded request
 //   - SWARM_PROXY_URL    — base URL of swarm's /llm provider proxy
-//   - SWARM_PROXY_TOKEN  — bearer for that proxy
 //   - SWARM_MODEL        — model id the agent talks to (e.g.
 //                            "anthropic/claude-sonnet-4-5",
 //                            "openai/gpt-4o"). No default — empty in
 //                            warmup mode, required at instance boot.
-//   - SWARM_TASK         — free-text task description (seeded into
-//                            workspace/TASK.md)
+//   - SWARM_TASK         — free-text task description (baked into
+//                            workspace/IDENTITY.md)
 //   - SWARM_NAME         — human-readable label
 //   - SWARM_INSTANCE_ID  — swarm-side instance id
-//   - SWARM_STATE_SYNC_* — optional parent-swarm state mirror target
+//
+// Runtime tokens (proxy, ingest, state sync) never ship in the env; Swarm
+// pushes them through /api/admin/configure after boot.
 //
 // Provider shape: swarm's /llm proxy fronts upstream LLM APIs. We
 // configure the dyson agent as an `openai`-compatible client pointed at
@@ -35,11 +36,11 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use dyson_common::state_sync::{ENV_INSTANCE_ID, ENV_PROXY_TOKEN, ENV_PROXY_URL};
+use dyson_common::state_sync::{ENV_INSTANCE_ID, ENV_PROXY_URL};
 use serde_json::json;
 
 use dyson::auth::HashedBearerAuth;
-use dyson::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 fn swarm_http_auth(home: &Path, bearer: &str) -> Result<serde_json::Value> {
     if !bearer.is_empty() {
@@ -95,13 +96,10 @@ pub async fn run() -> Result<()> {
     let bind = std::env::var("DYSON_BIND").unwrap_or_else(|_| DEFAULT_BIND.into());
     let home = std::env::var("DYSON_HOME").unwrap_or_else(|_| DEFAULT_DYSON_HOME.into());
     let proxy_url = std::env::var(ENV_PROXY_URL).unwrap_or_default();
-    let proxy_token = std::env::var(ENV_PROXY_TOKEN).unwrap_or_default();
     let task = std::env::var("SWARM_TASK").unwrap_or_default();
     let name = std::env::var("SWARM_NAME").unwrap_or_default();
     let instance_id = std::env::var(ENV_INSTANCE_ID).unwrap_or_default();
     let model = std::env::var("SWARM_MODEL").unwrap_or_default();
-    let state_sync = dyson::swarm_state_sync::config_from_env();
-    dyson::swarm_cost::set_runtime_config_from_parts(&proxy_url, &proxy_token);
     // Optional builtin-tool allowlist.  Swarm only stamps this on the
     // env envelope when the operator picked a strict subset (or asked
     // for zero tools); when unset, dyson registers every builtin.
@@ -122,8 +120,6 @@ pub async fn run() -> Result<()> {
     // "## IDENTITY" section of the agent's system prompt — so this is
     // the file the model actually reads on every turn.  Bake the task
     // in here too so the agent has its mission alongside its name.
-    // (TASK.md isn't read by the workspace prompt builder, so writing
-    // it separately would be a dead drop.)
     if !name.is_empty() || !instance_id.is_empty() || !task.is_empty() {
         let identity = workspace.join("IDENTITY.md");
         if !identity.exists() {
@@ -145,22 +141,17 @@ pub async fn run() -> Result<()> {
     let auth_block = swarm_http_auth(&home_path, &bearer)?;
 
     // Provider config — swarm's /llm proxy fronts the upstream LLM APIs.
-    // For the smoke test the agent is never invoked; the provider just
-    // needs to parse cleanly so `listen` can come up. Dyson's loader
-    // refuses base_url with an empty api_key (defends against env-var
-    // fallback to a non-default endpoint) — supply a placeholder when
-    // swarm hasn't set the proxy token (warmup).
+    // The proxy token never ships in the env: Swarm delivers it through
+    // /api/admin/configure. Until then the provider carries a placeholder
+    // key, because Dyson's loader refuses base_url with an empty api_key
+    // (defends against env-var fallback to a non-default endpoint).
     //
     // Dyson's loader also refuses to boot with no model set (validate_agent_model).
     // In warmup the agent never runs, so a placeholder model is fine; at
     // instance boot the operator must supply SWARM_MODEL via the create
     // request's env (swarm refuses the create otherwise — see the
     // orchestrator's instance.rs).
-    let api_key = if proxy_token.is_empty() {
-        dyson::controller::WARMUP_PLACEHOLDER.to_string()
-    } else {
-        proxy_token
-    };
+    let api_key = dyson::controller::WARMUP_PLACEHOLDER.to_string();
     let model_id = if model.is_empty() {
         dyson::controller::WARMUP_PLACEHOLDER.to_string()
     } else {
@@ -217,7 +208,7 @@ pub async fn run() -> Result<()> {
     // harmless no-op.
     dyson::skill::mcp::elicitation::enable_ui();
 
-    dyson::swarm_state_sync::spawn_worker(workspace.clone(), chats.clone(), state_sync);
+    dyson::swarm_state_sync::spawn_worker(workspace.clone(), chats.clone());
 
     tracing::info!(
         bind = %bind,
@@ -236,15 +227,11 @@ pub async fn run() -> Result<()> {
     super::listen::run(Some(cfg_path), sandbox_bypass, None, None, None).await
 }
 
-/// Write the box's SSH keypair into `$HOME/.ssh` from the swarm env
-/// envelope (`SWARM_SSH_PRIVATE_KEY_B64` is base64 of an OpenSSH private
-/// key; `SWARM_SSH_PUBLIC_KEY` is the public line). Mirrors the sidecar's
-/// `seed_ssh_key_from_env`. Idempotent: never clobbers an existing key.
+/// Write the box's SSH keypair into `$HOME/.ssh`: the private key (base64
+/// of an OpenSSH private key) from the 0400 secrets file, the public line
+/// from `SWARM_SSH_PUBLIC_KEY`. Idempotent: never clobbers an existing key.
 fn seed_ssh_key_from_env() -> std::io::Result<()> {
-    let private_b64 = private_key_b64(
-        std::env::var("SWARM_SSH_PRIVATE_KEY_B64").ok(),
-        std::env::var("SWARM_SECRETS_DIR").ok(),
-    );
+    let private_b64 = private_key_b64(std::env::var("SWARM_SECRETS_DIR").ok());
     if private_b64.trim().is_empty() {
         return Ok(());
     }
@@ -254,14 +241,10 @@ fn seed_ssh_key_from_env() -> std::io::Result<()> {
     seed_ssh_key(Path::new(&home), &private_b64, &public)
 }
 
-/// The SSH private key, base64. The env envelope wins when it carries
-/// the key; when it is absent, a Kubernetes sandbox mounts it as a 0400
-/// file named after the variable under `SWARM_SECRETS_DIR`, so it never
-/// sits in every process's env. Only that one fixed file name is read.
-fn private_key_b64(env_value: Option<String>, secrets_dir: Option<String>) -> String {
-    if let Some(value) = env_value.filter(|v| !v.trim().is_empty()) {
-        return value;
-    }
+/// The SSH private key, base64. Swarm mounts it as a 0400 file named
+/// `SWARM_SSH_PRIVATE_KEY_B64` under `SWARM_SECRETS_DIR`, so it never sits
+/// in every process's env. Only that one fixed file name is read.
+fn private_key_b64(secrets_dir: Option<String>) -> String {
     secrets_dir
         .map(|dir| dir.trim().to_owned())
         .filter(|dir| !dir.is_empty())
@@ -423,7 +406,7 @@ fn build_swarm_config(inputs: SwarmConfigInputs<'_>) -> serde_json::Value {
     });
 
     let mut cfg = json!({
-        "config_version": dyson::config::migrate::CURRENT_VERSION,
+        "config_version": dyson::config::CONFIG_VERSION,
         "providers": providers,
         "agent": agent,
         "controllers": [
@@ -535,22 +518,16 @@ mod tests {
     }
 
     #[test]
-    fn private_key_prefers_env_and_falls_back_to_the_secrets_file() {
+    fn private_key_is_read_from_the_secrets_file() {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path().to_str().unwrap().to_owned();
-        // No env, no dir: nothing.
-        assert_eq!(private_key_b64(None, None), "");
-        // No env, dir without the file: nothing.
-        assert_eq!(private_key_b64(None, Some(d.clone())), "");
+        // No dir: nothing.
+        assert_eq!(private_key_b64(None), "");
+        // Dir without the file: nothing.
+        assert_eq!(private_key_b64(Some(d.clone())), "");
         std::fs::write(dir.path().join("SWARM_SSH_PRIVATE_KEY_B64"), "ZmlsZQ==\n").unwrap();
-        // File fallback (trimmed).
-        assert_eq!(private_key_b64(None, Some(d.clone())), "ZmlsZQ==");
-        assert_eq!(
-            private_key_b64(Some("  ".into()), Some(d.clone())),
-            "ZmlsZQ=="
-        );
-        // Env wins when both are present.
-        assert_eq!(private_key_b64(Some("ZW52".into()), Some(d)), "ZW52");
+        // Trimmed file contents.
+        assert_eq!(private_key_b64(Some(d)), "ZmlsZQ==");
     }
 
     #[test]

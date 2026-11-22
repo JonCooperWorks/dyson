@@ -19,11 +19,11 @@ use std::fmt::Write;
 use async_trait::async_trait;
 use tree_sitter::Node;
 
-use crate::ast::nodes;
-use crate::ast::{self, LanguageConfig};
-use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::MAX_OUTPUT_BYTES;
+use dyson_ast::LanguageConfig;
+use dyson_ast::nodes;
+use dyson_core::error::{DysonError, Result};
 
 /// Maximum entry points to collect.
 const MAX_ENTRIES: usize = 500;
@@ -231,10 +231,10 @@ fn scan_attack_surface(
     let mut total_bytes = 0usize;
     let mut file_count = 0usize;
 
-    for entry in ast::walk_dir_filtered(search_dir, include_glob).flatten() {
+    for entry in dyson_ast::walk_dir_filtered(search_dir, include_glob).flatten() {
         if total_entries >= MAX_ENTRIES
             || total_bytes >= MAX_OUTPUT_BYTES
-            || file_count >= ast::MAX_FILES
+            || file_count >= dyson_ast::MAX_FILES
         {
             break;
         }
@@ -244,7 +244,7 @@ fn scan_attack_surface(
             continue;
         }
 
-        let parsed = match ast::try_parse_file(path, working_dir_canon, false) {
+        let parsed = match dyson_ast::try_parse_file(path, working_dir_canon, false) {
             Ok(Some(pair)) => pair,
             _ => continue,
         };
@@ -318,7 +318,7 @@ fn scan_node(
                 // `"main"` matched `domain`, `remain`, `maintenance`.
                 if ident.eq_ignore_ascii_case(pattern) {
                     let line = node.start_position().row + 1;
-                    let enclosing = ast::find_enclosing_function(node, config, source_bytes)
+                    let enclosing = dyson_ast::find_enclosing_function(node, config, source_bytes)
                         .and_then(|n| nodes::extract_definition_name(&n, source_bytes));
                     let context = enclosing.as_deref().unwrap_or("<top-level>");
 

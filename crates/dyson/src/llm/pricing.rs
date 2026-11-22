@@ -111,10 +111,10 @@ fn normalize(model: &str) -> String {
 // ---------------------------------------------------------------------------
 
 const ANTHROPIC: &[(&str, ModelPricing)] = &[
-    // Claude 4.x family — current flagship line.  Opus list price dropped to
-    // $5/$25 with the 4.5 refresh (4.5 through 4.8); 4.0 and 4.1 stayed at the
-    // old $15/$75.  The bare `claude-opus-4` prefix is the 4.0 legacy entry and
-    // also the fall-through for any not-yet-listed dashed suffix.
+    // Claude 4.x family.  Opus list price dropped to $5/$25 with the 4.5
+    // refresh (4.5 through 4.8); 4.0 and 4.1 are $15/$75.  The bare
+    // `claude-opus-4` row prices 4.0 and is the fall-through for any
+    // not-yet-listed dashed suffix.
     ("claude-opus-4-8", ModelPricing::new(5.00, 25.00)),
     ("claude-opus-4-7", ModelPricing::new(5.00, 25.00)),
     ("claude-opus-4-6", ModelPricing::new(5.00, 25.00)),
@@ -125,11 +125,6 @@ const ANTHROPIC: &[(&str, ModelPricing)] = &[
     ("claude-sonnet-4", ModelPricing::new(3.00, 15.00)),
     ("claude-haiku-4-5", ModelPricing::new(1.00, 5.00)),
     ("claude-haiku-4", ModelPricing::new(1.00, 5.00)),
-    // Claude 3.x fall-through for older configs.
-    ("claude-3-5-sonnet", ModelPricing::new(3.00, 15.00)),
-    ("claude-3-5-haiku", ModelPricing::new(0.80, 4.00)),
-    ("claude-3-opus", ModelPricing::new(15.00, 75.00)),
-    ("claude-3-haiku", ModelPricing::new(0.25, 1.25)),
 ];
 
 const OPENAI: &[(&str, ModelPricing)] = &[
@@ -200,7 +195,7 @@ mod tests {
     #[test]
     fn lookup_prefix_fallback_takes_longest_match() {
         // `claude-opus-4-9` (unreleased) has no exact entry, so it falls
-        // through to the bare `claude-opus-4` legacy entry ($15/$75) rather
+        // through to the bare `claude-opus-4` entry ($15/$75) rather
         // than any of the dashed 4-5..4-8 entries. Add an explicit row when
         // it ships (a real 4-9 would price at the $5/$25 flagship tier).
         let p = lookup(&LlmProvider::Anthropic, "claude-opus-4-9").unwrap();

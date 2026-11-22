@@ -52,8 +52,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::error::Result;
 use crate::tool::{Tool, ToolOutput};
+use dyson_core::error::Result;
 
 // ---------------------------------------------------------------------------
 // Skill trait
@@ -360,8 +360,8 @@ pub async fn create_skills(
 /// parsed settings.  When `skills.builtin.tools` is set to a non-empty
 /// list, that same list gates subagents — the SPA tool-picker
 /// collapses them into one checklist.  An empty list (sentinel for
-/// "all builtins") and a missing entry both return `None` so the
-/// pre-allowlist behaviour is preserved.
+/// "all builtins") and a missing entry both return `None`: no
+/// allowlist, every subagent registers.
 fn derive_subagent_allowlist(
     skills: &[crate::config::SkillConfig],
 ) -> Option<std::collections::HashSet<String>> {

@@ -70,19 +70,14 @@ Default files are created automatically when the workspace is first loaded
 
 ---
 
-## Workspace Versioning and Migration
+## Workspace Version
 
-Workspaces are versioned via `.workspace_version` (missing = version 0). Migrations run automatically on every load — existing workspaces upgrade in place on next startup.
-
-| Version | Description |
-|---------|-------------|
-| 0 → 1 | Create `memory/notes/` directory for Tier 2 overflow |
-| 1 → 2 | Promote legacy `skills/*.md` files to `skills/<name>/SKILL.md` |
-| 2 → 3 | Create `kb/` directory structure for knowledge base |
-
-To add a migration: bump `CURRENT_WORKSPACE_VERSION` in `src/workspace/migrate.rs` and add a `Migration` to `migrations()`.
-
-`dyson init` auto-detects existing filesystem workspaces (presence of `SOUL.md` + `IDENTITY.md`) and migrates in place, or use `--import-filesystem <path>` to import from another directory.
+`FilesystemWorkspace::load` creates the full layout (`memory/`, `memory/notes/`,
+`skills/`, `kb/raw/`, `kb/wiki/`) and stamps `.workspace_version` (currently
+3) when it is missing. A workspace whose marker names any other version is
+refused; there is no automatic migration. An unmarked workspace is taken as
+current because `dyson swarm` writes `IDENTITY.md` before the first load and
+Swarm's state mirror does not carry dotfiles.
 
 ---
 
@@ -219,7 +214,6 @@ reassembly, and orphaned tool pair repair.  See
 | MemoryStore (FTS5) | `src/workspace/memory_store.rs` |
 | FilesystemWorkspace | `src/workspace/filesystem.rs` |
 | Workspace trait | `src/workspace/mod.rs` |
-| Workspace migration | `src/workspace/migrate.rs` |
 | MemoryConfig | `src/config/mod.rs` |
 | Nudge injection | `src/agent/mod.rs` |
 | memory_search tool | `src/tool/memory_search.rs` |
@@ -234,8 +228,7 @@ reassembly, and orphaned tool pair repair.  See
 The tiered memory architecture — agent-curated files with character limits,
 FTS5 search for overflow, periodic nudges, and daily journals — is inspired
 by [Hermes Agent](https://github.com/nousresearch/hermes-agent) by
-[Nous Research](https://nousresearch.com/).  Dyson's workspace file format
-is also compatible with the filesystem/TARS format used by Hermes.
+[Nous Research](https://nousresearch.com/).
 
 ---
 

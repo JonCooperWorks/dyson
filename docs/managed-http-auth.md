@@ -28,7 +28,7 @@ access after a successful provisioning response.
 
 Only the existing configure-protected admin lifecycle routes can authenticate
 with their pinned configure secret independently of the instance bearer.
-`cost-backfill` and other API paths retain the normal bearer gate. Explicit local
+All other API paths retain the normal bearer gate. Explicit local
 `dangerous_no_auth` deployments retain their existing opt-in behavior.
 
 Verification: the original warmup regression returned 200 instead of 401 before

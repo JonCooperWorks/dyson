@@ -20,10 +20,9 @@ use std::path::Path;
 
 use async_trait::async_trait;
 
-use crate::ast;
-use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::MAX_OUTPUT_BYTES;
+use dyson_core::error::{DysonError, Result};
 
 /// Maximum number of matching lines to collect.
 const MAX_MATCHES: usize = 500;
@@ -115,7 +114,7 @@ impl Tool for SearchFilesTool {
         let include_glob = input["include"].as_str();
 
         // Build the directory walker (respects .gitignore, optional glob).
-        let walker = ast::walk_dir_filtered(&search_dir, include_glob);
+        let walker = dyson_ast::walk_dir_filtered(&search_dir, include_glob);
 
         let working_dir_canon = crate::tool::canonical_or_self(&ctx.working_dir);
 
@@ -215,7 +214,7 @@ fn scan_file_ast(
 ) {
     let ext = path.extension().and_then(|e| e.to_str());
     let ast_capable = ext
-        .and_then(ast::config_for_extension)
+        .and_then(dyson_ast::config_for_extension)
         .is_some_and(|c| !c.identifier_types.is_empty());
 
     if ast_capable {
@@ -240,12 +239,12 @@ fn scan_ast_path(
     matches: &mut Vec<String>,
     total_bytes: &mut usize,
 ) {
-    let parsed = match ast::try_parse_file(path, working_dir_canon, true) {
+    let parsed = match dyson_ast::try_parse_file(path, working_dir_canon, true) {
         Ok(Some(pair)) => pair,
         _ => return, // skip, oversized, parse failure, or unsupported
     };
     let (config, parsed_file) = parsed;
-    let positions = ast::find_identifier_positions(
+    let positions = dyson_ast::find_identifier_positions(
         &parsed_file.tree,
         parsed_file.source.as_bytes(),
         name,
@@ -271,14 +270,14 @@ fn scan_text_fallback(
         Ok(m) => m,
         Err(_) => return,
     };
-    if metadata.len() > ast::MAX_FILE_SIZE {
+    if metadata.len() > dyson_ast::MAX_FILE_SIZE {
         return;
     }
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(_) => return, // binary / non-UTF-8
     };
-    let positions = ast::find_word_boundary_matches(&source, name);
+    let positions = dyson_ast::find_word_boundary_matches(&source, name);
     push_positions(&source, rel_path, &positions, matches, total_bytes);
 }
 

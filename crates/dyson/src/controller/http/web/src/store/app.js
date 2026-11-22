@@ -20,9 +20,7 @@ const INITIAL = {
   // string falls back to the literal "dyson" at the render site.
   agentName: '',
   // Flat list — a chat carries `source: 'http' | 'telegram'` if we
-  // ever want to render a provenance badge.  The old DYSON_DATA
-  // shape grouped by controller but every consumer flattened it back,
-  // so the group object was pure ceremony.
+  // ever want to render a provenance badge.
   conversations: [],
   providers: [],
   commands: [],

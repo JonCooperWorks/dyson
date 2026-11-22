@@ -9,9 +9,9 @@ use std::collections::HashMap;
 
 use regex::RegexBuilder;
 
-use crate::error::Result;
 use crate::workspace::Workspace;
 use crate::workspace::filesystem::chrono_today;
+use dyson_core::error::Result;
 
 /// In-memory workspace — no filesystem, no persistence.
 pub struct InMemoryWorkspace {

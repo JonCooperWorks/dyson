@@ -9,8 +9,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::controller::Output;
-use crate::error::{DysonError, LlmErrorKind, LlmRecovery, classify_llm_error};
 use crate::tool::ToolOutput;
+use dyson_core::error::{DysonError, LlmErrorKind, LlmRecovery, classify_llm_error};
 
 use super::EDIT_INTERVAL_MS;
 use super::api::BotApi;
@@ -257,7 +257,10 @@ impl Output for TelegramOutput {
         }
     }
 
-    fn send_artefact(&mut self, artefact: &crate::message::Artefact) -> Result<(), DysonError> {
+    fn send_artefact(
+        &mut self,
+        artefact: &dyson_core::message::Artefact,
+    ) -> Result<(), DysonError> {
         // Telegram has no inline-markdown surface, so dump the report
         // to a throwaway temp file and send it as a document — the user
         // gets the same .md they'd download from the web UI.  We flush

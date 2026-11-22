@@ -70,7 +70,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 // ---------------------------------------------------------------------------
 // SecretResolver trait

@@ -23,7 +23,7 @@ use tokio::task::JoinHandle;
 
 use super::Auth;
 use super::credential::Credential;
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 // The OAuth wire DTOs *and* the flow transport (URL building, the HTTP calls,
 // status/parse handling) now live once in `dyson-common::oauth::client`, so

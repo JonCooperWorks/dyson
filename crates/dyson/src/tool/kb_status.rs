@@ -37,7 +37,7 @@ impl Tool for KbStatusTool {
         &self,
         _input: &serde_json::Value,
         ctx: &ToolContext,
-    ) -> crate::Result<ToolOutput> {
+    ) -> dyson_core::error::Result<ToolOutput> {
         let ws = ctx.workspace("kb_status")?;
 
         // Collect data under the lock, then format outside it.

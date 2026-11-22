@@ -44,7 +44,7 @@ pub(super) fn parse_providers(
     };
 
     for (name, jp) in providers {
-        let provider_type = match crate::llm::registry::from_str_loose(&jp.provider_type) {
+        let provider_type = match crate::llm::registry::from_name(&jp.provider_type) {
             Some(p) => p,
             None => {
                 tracing::warn!(
@@ -429,13 +429,10 @@ pub(super) fn parse_workspace(
     if let Some(backend) = ws.backend {
         settings.workspace.backend = backend;
     }
-    // connection_string takes priority, then fall back to legacy path.
-    if let Some(ref cs) = ws.connection_string {
-        if let Ok(resolved) = secrets.resolve(cs) {
-            settings.workspace.connection_string = resolved;
-        }
-    } else if let Some(path) = ws.path {
-        settings.workspace.connection_string = crate::auth::Credential::new(path);
+    if let Some(ref cs) = ws.connection_string
+        && let Ok(resolved) = secrets.resolve(cs)
+    {
+        settings.workspace.connection_string = resolved;
     }
     // Memory config: merge user overrides on top of defaults.
     if let Some(mem) = ws.memory {

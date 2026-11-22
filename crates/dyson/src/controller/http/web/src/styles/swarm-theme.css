@@ -2,63 +2,9 @@
    existing component behavior stays intact while the visual language comes
    from swarm's tokens, controls, rails, and panels.
 
-   The canonical design tokens (--bg, --accent, --mono, --radius, …) now
-   live in dyson-common-ui/tokens.css (imported in main.jsx) — the single
-   source of the look shared with swarm.  This file keeps only the
-   compatibility aliases that bridge Dyson's native token names
-   (--panel, --line, --font-ui, role colors, …) onto those shared tokens. */
-
-:root {
-  /* Compatibility aliases for Dyson's existing selectors. */
-  --panel: var(--bg-1);
-  --panel-2: var(--bg-2);
-  --line: var(--border);
-  --line-2: color-mix(in srgb, var(--border) 72%, var(--fg-muted));
-  --mute: var(--fg-faint);
-  --mute-2: var(--fg-muted);
-  --fg-dim: var(--fg-muted);
-  --fg-2: var(--fg-muted);
-  --ln: var(--border);
-  --err: var(--danger);
-  --font-ui: var(--sans);
-  --font-mono: var(--mono);
-  --rad: var(--radius);
-  --rad-lg: var(--radius);
-  --rad-sm: var(--radius);
-  --rad-xs: 4px;
-  --row-h: var(--control-height);
-  --fs-body: 14px;
-  --fs-sm: 12px;
-  --fs-xs: 11px;
-  --accent-ink: var(--accent-fg);
-  --accent-2: var(--accent);
-  --accent-deep: color-mix(in srgb, var(--accent) 78%, #000);
-  --accent-dim: color-mix(in srgb, var(--accent) 14%, transparent);
-  --accent-ln: color-mix(in srgb, var(--accent) 46%, transparent);
-  --accent-glow: color-mix(in srgb, var(--accent) 34%, transparent);
-  --accent-wash: color-mix(in srgb, var(--accent) 8%, transparent);
-  --cyan: var(--accent);
-  --cyan-glow: var(--accent-wash);
-  --violet: var(--fg-muted);
-  --violet-glow: transparent;
-  --user: var(--accent);
-  --user-glow: var(--accent-wash);
-  --agent: var(--fg);
-  --tool: var(--accent);
-  --tool-glow: var(--accent-wash);
-  --sub: var(--warn);
-  --sub-glow: color-mix(in srgb, var(--warn) 18%, transparent);
-  --think: var(--fg-muted);
-  --grad-accent: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 82%, #000));
-  --grad-agent: var(--bg-2);
-  --grad-user: var(--bg-2);
-  --grad-sub: var(--bg-2);
-  --grad-tool: var(--bg-2);
-  --aurora: none;
-  --lift-1: none;
-  --lift-2: none;
-  --lift-3: var(--shadow-3);
-}
+   The design tokens (--bg, --accent, --mono, --radius, …) live in
+   dyson-common-ui/tokens.css (imported in main.jsx) — the single source of
+   the look shared with swarm.  Styles here use those token names directly. */
 
 * { box-sizing: border-box; }
 
@@ -506,7 +452,7 @@ textarea {
 }
 .topbar .new-chat:hover {
   color: var(--accent);
-  background: var(--accent-wash);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 .modelmenu-scrim { position: fixed; inset: 0; z-index: 19; }
@@ -521,7 +467,7 @@ textarea {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-1);
-  box-shadow: var(--lift-3);
+  box-shadow: var(--shadow-3);
   z-index: 20;
 }
 .modelmenu .group { border-radius: var(--radius); margin-bottom: 2px; }
@@ -1224,7 +1170,7 @@ textarea {
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--bg-1);
-  box-shadow: var(--lift-3);
+  box-shadow: var(--shadow-3);
 }
 .turn .reaction:hover {
   background: var(--bg-2);
@@ -1671,7 +1617,7 @@ textarea {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-1);
-  box-shadow: var(--lift-3);
+  box-shadow: var(--shadow-3);
 }
 .slashmenu .item {
   display: flex;
@@ -1867,8 +1813,8 @@ textarea {
   flex-wrap: wrap;
   gap: 8px;
   padding: 8px 18px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
 }
 .artefact-share-status {
   max-width: 220px;
@@ -1879,7 +1825,7 @@ textarea {
   white-space: nowrap;
 }
 .artefact-share-status.err {
-  color: var(--err);
+  color: var(--danger);
 }
 .artefact-share-link {
   max-width: min(520px, 100%);
@@ -2654,8 +2600,8 @@ button:disabled { cursor: not-allowed; }
 .turn:focus-within .copy-turn { opacity: 1; }
 .composer-dock { position: relative; flex: 0 0 auto; inset: auto; padding: 12px 32px 18px; background: var(--bg); pointer-events: auto; }
 .composer-dock-inner { display: flex; flex-direction: column; width: 100%; max-width: 788px; min-width: 0; }
-.composer { border-radius: 16px; border: 1px solid var(--line-2); background: var(--bg-1); box-shadow: 0 4px 20px #00000008; overflow: hidden; }
-.composer:focus-within { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-wash); }
+.composer { border-radius: 16px; border: 1px solid color-mix(in srgb, var(--border) 72%, var(--fg-muted)); background: var(--bg-1); box-shadow: 0 4px 20px #00000008; overflow: hidden; }
+.composer:focus-within { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 8%, transparent); }
 .composer textarea { min-height: 76px; max-height: min(240px, 30dvh); padding: 18px 18px 10px; }
 .composer .row { border: 0; padding: 6px 12px 12px; gap: 6px; }
 .composer .row .btn { border-radius: 7px; min-height: 32px; }

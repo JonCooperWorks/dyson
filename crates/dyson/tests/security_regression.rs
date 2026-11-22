@@ -721,7 +721,7 @@ async fn web_search_rejects_oversized_query() {
             &self,
             _query: &str,
             _num_results: usize,
-        ) -> dyson::Result<Vec<dyson::tool::web_search::SearchResult>> {
+        ) -> dyson_core::error::Result<Vec<dyson::tool::web_search::SearchResult>> {
             Ok(vec![])
         }
     }

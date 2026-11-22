@@ -1,4 +1,4 @@
-use crate::error::DysonError;
+use dyson_core::error::DysonError;
 
 /// Injected after a tool call's JSON arguments were cut off by max_tokens.
 /// Retrying verbatim would just re-truncate, so we redirect to small-write

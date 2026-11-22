@@ -1,19 +1,12 @@
 //! Durable boundaries around the existing executor. The checkpoint is the
 //! authority for a suspended run; transcripts and SSE are projections of it.
-use super::{
-    Agent,
-    protocol::{RunEventKind, RunId, RunStatus},
-    stream_handler::ToolCall,
-    token_budget::TokenBudget,
-};
-use crate::{
-    chat_history::ChatHistory,
-    controller::Output,
-    error::{DysonError, Result},
-    message::Message,
-    tool::ToolOutput,
-};
+use super::{Agent, stream_handler::ToolCall, token_budget::TokenBudget};
+use crate::{controller::Output, tool::ToolOutput};
+use dyson_core::error::{DysonError, Result};
+use dyson_core::message::Message;
 pub use dyson_harness::continuation::{HumanAction, HumanAnswer, RunCursor, RunState, Transition};
+use dyson_harness::protocol::{RunEventKind, RunId, RunStatus};
+use dyson_persistence::ChatHistory;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -139,7 +132,7 @@ impl RunCheckpoint {
                 + 1;
             store.append_run_event(
                 chat,
-                &super::protocol::RunEvent::new(
+                &dyson_harness::protocol::RunEvent::new(
                     sequence,
                     record.cursor.run_id,
                     record.turn_count,
@@ -397,7 +390,7 @@ impl Agent {
         run: &RunId,
         answer: Option<HumanAnswer>,
         output: &mut dyn Output,
-    ) -> Result<super::protocol::RunOutcome> {
+    ) -> Result<dyson_harness::protocol::RunOutcome> {
         let backend = self
             .history_backend
             .as_ref()

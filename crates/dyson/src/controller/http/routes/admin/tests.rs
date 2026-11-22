@@ -10,6 +10,7 @@ fn configure_body_accepts_full_swarm_wire_contract() {
         "name": "axelrod",
         "task": "research",
         "models": ["deepseek/deepseek-v4-pro"],
+        "provider_name": "openrouter",
         "instance_id": "i-1",
         "proxy_token": "pt_12345678901234567890123456789012",
         "proxy_base": "https://swarm.test/llm/openrouter",
@@ -44,7 +45,7 @@ fn configure_body_accepts_full_swarm_wire_contract() {
     assert_eq!(
         body.state_sync_token
             .as_ref()
-            .map(crate::tokens::StateSyncToken::as_str),
+            .map(dyson_common::tokens::StateSyncToken::as_str),
         Some("st_12345678901234567890123456789012")
     );
 }
@@ -251,7 +252,7 @@ fn named_swarm_provider_patch_preserves_active_subscription_provider() {
 
     patch_provider_doc(
         &mut doc,
-        None,
+        "openrouter",
         Some(&models),
         Some("pt_new"),
         Some("https://swarm.example/llm/openrouter"),
@@ -304,49 +305,6 @@ fn durable_selection_replaces_openrouter_startup_default() {
 }
 
 #[test]
-fn runtime_configure_refreshes_subscription_catalogues_after_rotation() {
-    let mut doc = serde_json::json!({
-        "agent": {
-            "provider": "chatgpt-subscription",
-            "model": "gpt-5.6-sol"
-        },
-        "providers": {
-            "openrouter": {
-                "type": "openai",
-                "models": ["swarm/model"]
-            },
-            "chatgpt-subscription": {
-                "type": "codex",
-                "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
-            },
-            "claude-subscription": {
-                "type": "claude-code",
-                "models": ["claude-opus-4-6", "claude-sonnet-4-6"]
-            }
-        }
-    });
-
-    assert!(patch_subscription_models_doc(&mut doc).unwrap());
-    assert_eq!(
-        doc["providers"]["chatgpt-subscription"]["models"],
-        serde_json::json!(crate::subscription_models::CHATGPT)
-    );
-    assert_eq!(
-        doc["providers"]["claude-subscription"]["models"],
-        serde_json::json!(crate::subscription_models::CLAUDE)
-    );
-    assert_eq!(doc["agent"]["provider"], "chatgpt-subscription");
-    assert_eq!(doc["agent"]["model"], "gpt-5.6-sol");
-    assert!(!patch_subscription_models_doc(&mut doc).unwrap());
-
-    doc["agent"]["provider"] = Value::String("claude-subscription".to_owned());
-    doc["agent"]["model"] = Value::String("claude-opus-4-6".to_owned());
-    assert!(patch_subscription_models_doc(&mut doc).unwrap());
-    assert_eq!(doc["agent"]["model"], "claude-fable-5");
-    assert!(!patch_subscription_models_doc(&mut doc).unwrap());
-}
-
-#[test]
 fn patch_image_generation_partial_update_only_touches_provided_fields() {
     // Operator-side: somebody bumps the image model id (e.g. a
     // newer preview) without changing the provider entry.  Only
@@ -388,11 +346,9 @@ fn patch_image_generation_partial_update_only_touches_provided_fields() {
 
 #[test]
 fn clear_skills_drops_the_block_so_loader_registers_all_builtins() {
-    // Regression for "the agent has no tools".  Older `dyson swarm`
-    // boots wrote `skills.builtin.tools = []`, which the loader
-    // parses as "register zero builtin tools".  The configure-time
-    // skills reset must remove the key entirely so the loader's
-    // no-skills-block branch fires on next reload.
+    // `reset_skills` ("use defaults") must remove the key entirely so
+    // the loader's no-skills-block branch fires on next reload; an
+    // empty `tools` list would mean "register zero builtin tools".
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dyson.json");
@@ -691,6 +647,7 @@ fn patch_provider_in_config(
     apply_config_patch(
         path,
         ConfigureConfigPatch {
+            provider_name: Some("openrouter"),
             models,
             api_key,
             base_url,

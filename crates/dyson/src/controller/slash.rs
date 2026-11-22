@@ -8,9 +8,9 @@ use tokio::sync::RwLock;
 use crate::agent::rate_limiter::RateLimitedHandle;
 use crate::config::Settings;
 use crate::llm::{CompletionConfig, LlmClient, StreamResponse, ToolDefinition};
-use crate::message::{ContentBlock, Message};
 use crate::skill::local::{LocalSkill, RESERVED_SLASH_COMMANDS};
 use crate::tool::ToolOutput;
+use dyson_core::message::{ContentBlock, Message};
 
 use super::Output;
 
@@ -49,8 +49,8 @@ impl LlmClient for DirectSlashLlm {
         _tools: &[ToolDefinition],
         _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn crate::tool::Tool>>,
         _config: &CompletionConfig,
-    ) -> crate::Result<StreamResponse> {
-        Err(crate::error::DysonError::Config(
+    ) -> dyson_core::error::Result<StreamResponse> {
+        Err(dyson_core::error::DysonError::Config(
             "direct slash command attempted to call the LLM".to_string(),
         ))
     }
@@ -148,7 +148,7 @@ pub async fn dispatch_without_llm(
     prompt: &str,
     attachments_present: bool,
     initial_messages: Vec<Message>,
-) -> crate::Result<Option<Vec<Message>>> {
+) -> dyson_core::error::Result<Option<Vec<Message>>> {
     let Some((command, _)) = parse_command(prompt) else {
         return Ok(None);
     };
@@ -207,7 +207,7 @@ pub async fn dispatch_executable(
     settings: &Settings,
     prompt: &str,
     attachments_present: bool,
-) -> crate::Result<SlashDispatch> {
+) -> dyson_core::error::Result<SlashDispatch> {
     let Some((command, _)) = parse_command(prompt) else {
         return Ok(SlashDispatch::NotSlash);
     };
@@ -248,7 +248,10 @@ pub async fn dispatch_executable(
     Ok(SlashDispatch::Handled(response))
 }
 
-fn emit_side_channels(output: &mut dyn Output, tool_output: &ToolOutput) -> crate::Result<()> {
+fn emit_side_channels(
+    output: &mut dyn Output,
+    tool_output: &ToolOutput,
+) -> dyson_core::error::Result<()> {
     for file_path in &tool_output.files {
         output.send_file(file_path)?;
     }
@@ -264,7 +267,7 @@ fn emit_side_channels(output: &mut dyn Output, tool_output: &ToolOutput) -> crat
 fn build_direct_agent_for_skill(
     settings: &Settings,
     command: &str,
-) -> crate::Result<Option<crate::agent::Agent>> {
+) -> dyson_core::error::Result<Option<crate::agent::Agent>> {
     let workspace = crate::workspace::create_workspace(&settings.workspace)?;
     let mut selected: Option<LocalSkill> = None;
     for dir in workspace.skill_dirs() {

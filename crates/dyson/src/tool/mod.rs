@@ -82,7 +82,7 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 pub use dyson_harness::{Idempotency, ResourceAccess, ResourceClaim, ToolExecutionPlan};
 
@@ -436,7 +436,7 @@ pub struct ToolContext {
     /// Shared across all tool calls within an agent session to avoid
     /// re-walking the codebase for each trace — a typical security
     /// review issues many taint_trace calls against the same language.
-    pub taint_indexes: Arc<RwLock<HashMap<&'static str, Arc<crate::ast::taint::SymbolIndex>>>>,
+    pub taint_indexes: Arc<RwLock<HashMap<&'static str, Arc<dyson_ast::taint::SymbolIndex>>>>,
 
     /// UI-only activity sink.  When populated (currently only by the
     /// HTTP controller), orchestrator / subagent tools record a
@@ -627,7 +627,7 @@ pub struct ToolOutput {
     /// chat-shaped (streamed text).  The HTTP controller stores the body
     /// in memory and emits an SSE `artefact` event so the UI can render
     /// it in the Artefacts tab.
-    pub artefacts: Vec<crate::message::Artefact>,
+    pub artefacts: Vec<dyson_core::message::Artefact>,
 }
 
 /// A single progress/checkpoint event emitted by a tool during its run.
@@ -885,7 +885,7 @@ impl ToolOutput {
     /// controller stores the body in an in-memory FIFO store and emits
     /// an SSE `artefact` event so the UI can render it in the Artefacts
     /// tab.  Other controllers' default impl is a no-op.
-    pub fn with_artefact(mut self, artefact: crate::message::Artefact) -> Self {
+    pub fn with_artefact(mut self, artefact: dyson_core::message::Artefact) -> Self {
         self.artefacts.push(artefact);
         self
     }

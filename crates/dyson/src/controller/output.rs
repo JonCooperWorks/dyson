@@ -1,9 +1,7 @@
 //! Rendering contract shared by agent event consumers.
-use crate::{
-    error::DysonError,
-    message::Message,
-    tool::{CheckpointEvent, ToolOutput},
-};
+use crate::tool::{CheckpointEvent, ToolOutput};
+use dyson_core::error::DysonError;
+use dyson_core::message::Message;
 use std::{future::Future, path::Path, pin::Pin};
 
 // ---------------------------------------------------------------------------
@@ -36,8 +34,10 @@ use std::{future::Future, path::Path, pin::Pin};
 ///         └── output.flush()
 /// ```
 /// Preserve terminal status when an older controller requires a string result.
-pub(crate) fn completed_text(outcome: crate::agent::protocol::RunOutcome) -> crate::Result<String> {
-    if outcome.status == crate::agent::protocol::RunStatus::Completed {
+pub(crate) fn completed_text(
+    outcome: dyson_harness::protocol::RunOutcome,
+) -> dyson_core::error::Result<String> {
+    if outcome.status == dyson_harness::protocol::RunStatus::Completed {
         Ok(outcome.final_text)
     } else {
         Err(DysonError::Llm(format!(
@@ -51,12 +51,12 @@ pub(crate) fn completed_text(outcome: crate::agent::protocol::RunOutcome) -> cra
 /// Interactive controllers already rendered the question/status. A durable
 /// yield is expected there; background completion still requires Completed.
 pub(crate) fn interactive_text(
-    outcome: crate::agent::protocol::RunOutcome,
-) -> crate::Result<String> {
+    outcome: dyson_harness::protocol::RunOutcome,
+) -> dyson_core::error::Result<String> {
     if matches!(
         outcome.status,
-        crate::agent::protocol::RunStatus::Paused
-            | crate::agent::protocol::RunStatus::WaitingForInput
+        dyson_harness::protocol::RunStatus::Paused
+            | dyson_harness::protocol::RunStatus::WaitingForInput
     ) {
         Ok(outcome.final_text)
     } else {
@@ -132,7 +132,7 @@ pub trait Output: Send {
     /// recording / capture controllers.
     fn send_artefact(
         &mut self,
-        artefact: &crate::message::Artefact,
+        artefact: &dyson_core::message::Artefact,
     ) -> std::result::Result<(), DysonError> {
         let _ = artefact;
         Ok(())
@@ -168,9 +168,9 @@ pub trait Output: Send {
     ///
     /// Controllers may use this hook to send user-facing messages (e.g.
     /// "model doesn't support tools") before returning a recovery action.
-    fn on_llm_error(&mut self, error: &DysonError) -> crate::error::LlmRecovery {
+    fn on_llm_error(&mut self, error: &DysonError) -> dyson_core::error::LlmRecovery {
         let _ = error;
-        crate::error::LlmRecovery::GiveUp
+        dyson_core::error::LlmRecovery::GiveUp
     }
 
     /// Show or hide a typing indicator.

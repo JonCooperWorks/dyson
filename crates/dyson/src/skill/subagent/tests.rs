@@ -147,9 +147,9 @@ fn capture_output_tee_is_silent_when_bus_is_unset() {
     cap.tool_use_start("inner_1", "bash").unwrap();
     cap.tool_result(&ToolOutput::success("ok")).unwrap();
     cap.send_file(std::path::Path::new("/tmp/x")).unwrap();
-    let art = crate::message::Artefact {
+    let art = dyson_core::message::Artefact {
         id: String::new(),
-        kind: crate::message::ArtefactKind::Other,
+        kind: dyson_core::message::ArtefactKind::Other,
         title: "t".into(),
         content: "c".into(),
         mime_type: "text/plain".into(),
@@ -345,7 +345,7 @@ fn mock_text_response(text: impl Into<String>) -> Vec<StreamEvent> {
 impl crate::llm::LlmClient for MockLlm {
     async fn stream(
         &self,
-        _messages: &[crate::message::Message],
+        _messages: &[dyson_core::message::Message],
         _system: &str,
         _system_suffix: &str,
         _tools: &[crate::llm::ToolDefinition],
@@ -2934,7 +2934,7 @@ async fn orchestrator_emits_artefact_for_non_report_shaped_output() {
 
     let config = OrchestratorConfig {
         name: "security_engineer",
-        emit_artefact: Some(crate::message::ArtefactKind::SecurityReview),
+        emit_artefact: Some(dyson_core::message::ArtefactKind::SecurityReview),
         ..test_orchestrator_config()
     };
     let tool = OrchestratorTool::new(
@@ -2962,7 +2962,7 @@ async fn orchestrator_emits_artefact_for_non_report_shaped_output() {
     let art = &result.artefacts[0];
     assert!(matches!(
         art.kind,
-        crate::message::ArtefactKind::SecurityReview
+        dyson_core::message::ArtefactKind::SecurityReview
     ));
     assert_eq!(
         art.content,
@@ -2980,7 +2980,7 @@ async fn orchestrator_suppresses_artefact_when_output_is_whitespace_only() {
 
     let config = OrchestratorConfig {
         name: "security_engineer",
-        emit_artefact: Some(crate::message::ArtefactKind::SecurityReview),
+        emit_artefact: Some(dyson_core::message::ArtefactKind::SecurityReview),
         ..test_orchestrator_config()
     };
     let tool = OrchestratorTool::new(

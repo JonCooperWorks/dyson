@@ -19,7 +19,6 @@ pub(super) struct ConfigureConfigPatch<'a> {
     pub(super) reset_skills: bool,
     pub(super) mcp_servers: Option<&'a serde_json::Map<String, Value>>,
     pub(super) telegram_proxy: Option<&'a TelegramProxyConfigure>,
-    pub(super) refresh_subscription_models: bool,
 }
 
 #[derive(Default)]
@@ -61,8 +60,8 @@ pub(super) enum ConfigureConfigPatchError {
     },
     #[error("config root is not an object")]
     RootNotObject,
-    #[error("config has no agent.provider - can't tell which provider's config to patch")]
-    MissingAgentProvider,
+    #[error("provider_name is required with models, proxy_token or proxy_base")]
+    MissingProviderName,
     #[error("config has no providers object")]
     MissingProvidersObject,
     #[error("config has no providers.{0}")]
@@ -117,14 +116,12 @@ pub(super) async fn patch_config_once(
         applied.http_auth_changed = true;
     }
 
-    if patch.refresh_subscription_models {
-        applied.provider_changed = patch_subscription_models_doc(&mut doc)?;
-    }
-
     if patch.models.is_some() || patch.api_key.is_some() || patch.base_url.is_some() {
         patch_provider_doc(
             &mut doc,
-            patch.provider_name,
+            patch
+                .provider_name
+                .ok_or(ConfigureConfigPatchError::MissingProviderName)?,
             patch.models,
             patch.api_key,
             patch.base_url,
@@ -164,87 +161,9 @@ pub(super) async fn patch_config_once(
     Ok(applied)
 }
 
-/// Upsert native subscription providers from the shared catalogue. Runtime
-/// configure must own this migration because an instance's existing
-/// `dyson.json` can outlive the image that wrote it.
-pub(super) fn patch_subscription_models_doc(
-    doc: &mut Value,
-) -> std::result::Result<bool, ConfigureConfigPatchError> {
-    let active_provider = doc
-        .get("agent")
-        .and_then(|agent| agent.get("provider"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let active_model = doc
-        .get("agent")
-        .and_then(|agent| agent.get("model"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let desired = [
-        (
-            "chatgpt-subscription",
-            "codex",
-            crate::subscription_models::CHATGPT,
-        ),
-        (
-            "claude-subscription",
-            "claude-code",
-            crate::subscription_models::CLAUDE,
-        ),
-    ];
-    let replacement_model = desired.iter().find_map(|(name, _, models)| {
-        (active_provider.as_deref() == Some(*name)
-            && active_model
-                .as_deref()
-                .is_none_or(|model| !models.contains(&model)))
-        .then(|| models.first().copied())
-        .flatten()
-    });
-    let mut changed = false;
-    {
-        let providers = doc
-            .as_object_mut()
-            .ok_or(ConfigureConfigPatchError::RootNotObject)?
-            .entry("providers".to_owned())
-            .or_insert_with(|| Value::Object(serde_json::Map::new()))
-            .as_object_mut()
-            .ok_or(ConfigureConfigPatchError::ProvidersNotObject)?;
-        for (name, provider_type, models) in desired {
-            let desired_models = Value::Array(
-                models
-                    .iter()
-                    .map(|model| Value::String((*model).to_owned()))
-                    .collect(),
-            );
-            let entry = providers
-                .entry(name.to_owned())
-                .or_insert_with(|| Value::Object(serde_json::Map::new()))
-                .as_object_mut()
-                .ok_or(ConfigureConfigPatchError::ProvidersNotObject)?;
-            if entry.get("type") != Some(&Value::String(provider_type.to_owned())) {
-                entry.insert("type".to_owned(), Value::String(provider_type.to_owned()));
-                changed = true;
-            }
-            if entry.get("models") != Some(&desired_models) {
-                entry.insert("models".to_owned(), desired_models);
-                changed = true;
-            }
-        }
-    }
-    if let Some(default_model) = replacement_model {
-        let agent = doc
-            .get_mut("agent")
-            .and_then(Value::as_object_mut)
-            .ok_or(ConfigureConfigPatchError::AgentNotObject)?;
-        agent.insert("model".to_owned(), Value::String(default_model.to_owned()));
-        changed = true;
-    }
-    Ok(changed)
-}
-
 pub(super) fn patch_provider_doc(
     doc: &mut Value,
-    provider_name: Option<&str>,
+    provider_name: &str,
     models: Option<&[String]>,
     api_key: Option<&str>,
     base_url: Option<&str>,
@@ -254,23 +173,8 @@ pub(super) fn patch_provider_doc(
         .and_then(|a| a.get("provider"))
         .and_then(|p| p.as_str())
         .map(str::to_owned);
-    // Pre-provider_name Swarm versions still send the proxy token/base URL
-    // without naming their provider. Recognize that legacy managed payload by
-    // its credential fields and stable `openrouter` entry, so a runtime sync
-    // cannot overwrite a user-selected CLI subscription provider.
-    let legacy_swarm_openrouter = provider_name.is_none()
-        && (api_key.is_some() || base_url.is_some())
-        && doc
-            .get("providers")
-            .and_then(|providers| providers.get("openrouter"))
-            .is_some_and(Value::is_object);
-    let provider_name = provider_name
-        .map(str::to_owned)
-        .or_else(|| legacy_swarm_openrouter.then(|| "openrouter".to_owned()))
-        .or_else(|| active_provider.clone())
-        .ok_or(ConfigureConfigPatchError::MissingAgentProvider)?;
     let primary_model = models.and_then(|ms| ms.first().filter(|m| !m.trim().is_empty()).cloned());
-    if active_provider.as_deref() == Some(provider_name.as_str())
+    if active_provider.as_deref() == Some(provider_name)
         && let Some(primary) = primary_model.as_ref()
     {
         let agent = doc
@@ -288,9 +192,9 @@ pub(super) fn patch_provider_doc(
         .and_then(|p| p.as_object_mut())
         .ok_or(ConfigureConfigPatchError::MissingProvidersObject)?;
     let prov_entry = providers
-        .get_mut(&provider_name)
+        .get_mut(provider_name)
         .and_then(|p| p.as_object_mut())
-        .ok_or_else(|| ConfigureConfigPatchError::MissingProvider(provider_name.clone()))?;
+        .ok_or_else(|| ConfigureConfigPatchError::MissingProvider(provider_name.to_owned()))?;
     if let Some(ms) = models {
         prov_entry.insert(
             "models".into(),

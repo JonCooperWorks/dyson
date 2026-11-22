@@ -874,9 +874,9 @@ mod tests {
         let json = serde_json::to_string(&f).expect("serialize");
         let back: SecurityFinding = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(f, back, "suggested_patch must survive a JSON round-trip");
-        // And a finding emitted without the field still parses (back-compat).
-        let legacy = r#"{"id":"x","title":"t","root_cause":"rc"}"#;
-        let parsed: SecurityFinding = serde_json::from_str(legacy).expect("legacy parse");
+        // A model may omit the field; the finding still parses.
+        let minimal = r#"{"id":"x","title":"t","root_cause":"rc"}"#;
+        let parsed: SecurityFinding = serde_json::from_str(minimal).expect("minimal parse");
         assert!(
             parsed.suggested_patch.is_empty(),
             "absent suggested_patch must default to empty"

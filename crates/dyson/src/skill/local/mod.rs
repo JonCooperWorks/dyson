@@ -58,8 +58,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::error::{DysonError, Result};
 use crate::tool::Tool;
+use dyson_core::error::{DysonError, Result};
 
 pub use manifest::{
     ArgumentMode, LocalSkillManifest, RESERVED_SLASH_COMMANDS, ScriptExecution, SkillExecution,

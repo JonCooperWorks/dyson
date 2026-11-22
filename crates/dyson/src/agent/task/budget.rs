@@ -1,5 +1,5 @@
 //! Integer accounting with reservations shared by every child of a task.
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,

@@ -17,17 +17,16 @@
 
 use std::path::PathBuf;
 
-use crate::error::Result;
+use dyson_core::error::Result;
 
 // ---------------------------------------------------------------------------
 // FeedbackRating
 // ---------------------------------------------------------------------------
 
 /// The 7-point rating scale (`FeedbackRating`, with `score`/`from_emoji`) and
-/// the per-turn `FeedbackEntry` are defined once in `dyson-common` and
-/// re-exported here, so existing call sites (`FeedbackRating::from_emoji(..)`,
-/// `FeedbackEntry { .. }`) are unchanged.  Wire form is snake_case.
-pub use dyson_common::feedback::{FeedbackEntry, FeedbackRating};
+/// the per-turn `FeedbackEntry` are defined once in `dyson-common`.  Wire
+/// form is snake_case.
+use dyson_common::feedback::FeedbackEntry;
 
 // ---------------------------------------------------------------------------
 // FeedbackStore
@@ -36,9 +35,7 @@ pub use dyson_common::feedback::{FeedbackEntry, FeedbackRating};
 /// Disk-backed per-chat feedback store.
 ///
 /// Stores feedback entries as `{dir}/{chat_id}/feedback.json`, alongside
-/// the chat's history (see `feedback_path`).  Legacy flat
-/// `{chat_id}_feedback.json` files are migrated into this layout on startup
-/// by `chat_history::migrate`.
+/// the chat's history (see `feedback_path`).
 pub struct FeedbackStore {
     dir: PathBuf,
 }
@@ -51,9 +48,7 @@ impl FeedbackStore {
 
     /// Path to the feedback file for a given chat.
     ///
-    /// Per-chat layout: `{dir}/{chat_id}/feedback.json`.  The migration
-    /// in `chat_history::migrate` moves legacy `{chat_id}_feedback.json`
-    /// files into this shape on startup.
+    /// Per-chat layout: `{dir}/{chat_id}/feedback.json`.
     fn feedback_path(&self, chat_id: &str) -> PathBuf {
         self.dir.join(chat_id).join("feedback.json")
     }
@@ -120,6 +115,7 @@ impl FeedbackStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dyson_common::feedback::FeedbackRating;
 
     #[test]
     fn rating_scores() {

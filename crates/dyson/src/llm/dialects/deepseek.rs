@@ -26,11 +26,11 @@
 // `OpenAiCompatClient`.
 // ===========================================================================
 
-use crate::error::Result;
 use crate::llm::openai::OpenAiJsonParser;
 use crate::llm::sse_parser::{SseJsonParser, ToolBufferContext};
 use crate::llm::stream::StreamEvent;
-use crate::message::{ContentBlock, Message, Role};
+use dyson_core::error::Result;
+use dyson_core::message::{ContentBlock, Message, Role};
 
 /// Returns `true` if the model name looks like a DeepSeek variant.
 ///

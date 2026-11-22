@@ -13,10 +13,10 @@ use std::path::Path;
 
 use regex::Regex;
 
-use crate::error::Result;
 use crate::tool::ToolOutput;
+use dyson_core::error::Result;
 
-use crate::ast::{self, MAX_FILE_SIZE};
+use dyson_ast::MAX_FILE_SIZE;
 
 /// Maximum number of files to process in a single find_replace.
 ///
@@ -72,7 +72,7 @@ pub fn find_replace(
             }
         }
     } else if resolved_path.is_dir() {
-        for entry in ast::walk_dir(resolved_path).flatten() {
+        for entry in dyson_ast::walk_dir(resolved_path).flatten() {
             if edits.len() >= MAX_FILES {
                 break;
             }

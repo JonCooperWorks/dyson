@@ -19,9 +19,9 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 
 use crate::auth::Auth;
-use crate::chat_history::ChatHistory;
 use crate::config::Settings;
 use crate::feedback::FeedbackStore;
+use dyson_persistence::ChatHistory;
 
 use super::ClientRegistry;
 use super::Output;
@@ -115,7 +115,7 @@ pub fn mint_sse_ticket_for_test(state: &Arc<HttpState>, identity: &str) -> Strin
     state.mint_sse_ticket(identity)
 }
 
-pub async fn serve(state: Arc<HttpState>, listener: TcpListener) -> crate::Result<()> {
+pub async fn serve(state: Arc<HttpState>, listener: TcpListener) -> dyson_core::error::Result<()> {
     // Test rigs always run plain HTTP — no TLS termination.  The
     // production code path adds an `Option<TlsAcceptor>` for the
     // ACME / Let's Encrypt flow; tests pass `None`.
@@ -126,12 +126,12 @@ pub async fn serve(state: Arc<HttpState>, listener: TcpListener) -> crate::Resul
 /// without standing up a real LLM turn: look up the chat, build a
 /// one-shot `SseOutput` over its broadcast channel, and call the
 /// same `Output::send_file` the agent would.  Round-trips through
-/// `FileStore` so `/api/files/<id>` serves the bytes afterwards.
+/// `FileStore` so `/api/conversations/<chat>/files/<id>` serves the bytes afterwards.
 pub async fn emit_agent_file(
     state: Arc<HttpState>,
     chat_id: &str,
     path: &std::path::Path,
-) -> crate::Result<()> {
+) -> dyson_core::error::Result<()> {
     emit_agent_file_for_tool(state, chat_id, path, None).await
 }
 
@@ -145,14 +145,14 @@ pub async fn emit_agent_file_for_tool(
     chat_id: &str,
     path: &std::path::Path,
     tool_use_id: Option<&str>,
-) -> crate::Result<()> {
+) -> dyson_core::error::Result<()> {
     let handle = state
         .chats
         .lock()
         .await
         .get(chat_id)
         .cloned()
-        .ok_or_else(|| crate::DysonError::Config(format!("no chat {chat_id}")))?;
+        .ok_or_else(|| dyson_core::error::DysonError::Config(format!("no chat {chat_id}")))?;
     let mut out = SseOutput {
         chat_id: chat_id.to_string(),
         tx: handle.events.clone(),
@@ -173,8 +173,8 @@ pub async fn emit_agent_file_for_tool(
 /// test — lets the integration tests verify that a file sent
 /// through Telegram's `send_file` would land in the web UI's
 /// Artefacts tab.  Returns the minted `(file_id, artefact_id)` so
-/// the caller can assert on `/api/files/...` and
-/// `/api/artefacts/...` reachability.
+/// the caller can assert on `/api/conversations/<chat>/files/...` and
+/// `/api/conversations/<chat>/artefacts/...` reachability.
 pub fn publish_file_as_artefact_for_test(
     state: Arc<HttpState>,
     chat_id: &str,
@@ -191,15 +191,15 @@ pub fn publish_file_as_artefact_for_test(
 pub async fn emit_agent_artefact(
     state: Arc<HttpState>,
     chat_id: &str,
-    artefact: crate::message::Artefact,
-) -> crate::Result<()> {
+    artefact: dyson_core::message::Artefact,
+) -> dyson_core::error::Result<()> {
     let handle = state
         .chats
         .lock()
         .await
         .get(chat_id)
         .cloned()
-        .ok_or_else(|| crate::DysonError::Config(format!("no chat {chat_id}")))?;
+        .ok_or_else(|| dyson_core::error::DysonError::Config(format!("no chat {chat_id}")))?;
     let mut out = SseOutput {
         chat_id: chat_id.to_string(),
         tx: handle.events.clone(),
@@ -225,14 +225,14 @@ pub async fn emit_for_test(
     state: Arc<HttpState>,
     chat_id: &str,
     evt: super::wire::SseEvent,
-) -> crate::Result<()> {
+) -> dyson_core::error::Result<()> {
     let handle = state
         .chats
         .lock()
         .await
         .get(chat_id)
         .cloned()
-        .ok_or_else(|| crate::DysonError::Config(format!("no chat {chat_id}")))?;
+        .ok_or_else(|| dyson_core::error::DysonError::Config(format!("no chat {chat_id}")))?;
     handle.emit(evt);
     Ok(())
 }
@@ -244,14 +244,14 @@ pub async fn set_chat_busy_for_test(
     state: Arc<HttpState>,
     chat_id: &str,
     busy: bool,
-) -> crate::Result<()> {
+) -> dyson_core::error::Result<()> {
     let handle = state
         .chats
         .lock()
         .await
         .get(chat_id)
         .cloned()
-        .ok_or_else(|| crate::DysonError::Config(format!("no chat {chat_id}")))?;
+        .ok_or_else(|| dyson_core::error::DysonError::Config(format!("no chat {chat_id}")))?;
     handle.busy.store(busy, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
@@ -284,14 +284,17 @@ pub async fn queue_path_for_test(
 /// after emitting `Done`.  Exposed so the integration tests can
 /// simulate a finished turn (then assert a fresh subscriber sees
 /// nothing stale) without a real agent run.
-pub async fn reset_replay_for_test(state: Arc<HttpState>, chat_id: &str) -> crate::Result<()> {
+pub async fn reset_replay_for_test(
+    state: Arc<HttpState>,
+    chat_id: &str,
+) -> dyson_core::error::Result<()> {
     let handle = state
         .chats
         .lock()
         .await
         .get(chat_id)
         .cloned()
-        .ok_or_else(|| crate::DysonError::Config(format!("no chat {chat_id}")))?;
+        .ok_or_else(|| dyson_core::error::DysonError::Config(format!("no chat {chat_id}")))?;
     handle.reset_replay();
     Ok(())
 }
@@ -304,13 +307,12 @@ pub async fn seed_transcript(
     state: Arc<HttpState>,
     chat_id: &str,
     messages: &[(&str, &str)],
-) -> crate::Result<()> {
-    use crate::message::{ContentBlock, Message, Role};
-    let history = state
-        .history
-        .as_ref()
-        .cloned()
-        .ok_or_else(|| crate::DysonError::Config("no chat_history backend".into()))?;
+) -> dyson_core::error::Result<()> {
+    use dyson_core::message::{ContentBlock, Message, Role};
+    let history =
+        state.history.as_ref().cloned().ok_or_else(|| {
+            dyson_core::error::DysonError::Config("no chat_history backend".into())
+        })?;
     let msgs: Vec<Message> = messages
         .iter()
         .map(|(role, text)| {

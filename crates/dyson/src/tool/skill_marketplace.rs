@@ -59,14 +59,14 @@ struct SkillDetail {
     computed_sha256: String,
 }
 
-// The install-package body is the shared catalog contract; dyson-common owns
-// the definition so swarm (producer) and dyson (consumer) can't drift on it.
-// Re-exported under the local name so call sites stay unchanged. The display
-// structs above (CatalogSkill/CatalogListing/SkillDetail) stay local: swarm's
-// listing view is dyson-specific (CatalogListing isn't in the shared crate) and
+// The install-package body (`SkillPackageBody`) is the shared catalog
+// contract; dyson-common owns the definition so swarm (producer) and dyson
+// (consumer) can't drift on it. The display structs above
+// (CatalogSkill/CatalogListing/SkillDetail) stay local: swarm's listing view
+// is dyson-specific (CatalogListing isn't in the shared crate) and
 // dyson-common's CatalogSkill carries extra required fields (license,
 // min_dyson_version) that dyson's display path neither needs nor deserializes.
-pub use dyson_common::marketplace::SkillPackageBody as SkillBody;
+use dyson_common::marketplace::SkillPackageBody;
 
 #[derive(Debug, Serialize)]
 pub struct SkillInstallOutcome {
@@ -85,24 +85,24 @@ pub struct SkillRemoveOutcome {
 pub enum SkillInstallError {
     AlreadyInstalled { current_version: Option<String> },
     Invalid(String),
-    Workspace(crate::DysonError),
+    Workspace(dyson_core::error::DysonError),
 }
 
 #[derive(Debug)]
 pub enum SkillRemoveError {
     Invalid(String),
     NotInstalled,
-    Workspace(crate::DysonError),
+    Workspace(dyson_core::error::DysonError),
 }
 
-impl From<crate::DysonError> for SkillInstallError {
-    fn from(value: crate::DysonError) -> Self {
+impl From<dyson_core::error::DysonError> for SkillInstallError {
+    fn from(value: dyson_core::error::DysonError) -> Self {
         Self::Workspace(value)
     }
 }
 
-impl From<crate::DysonError> for SkillRemoveError {
-    fn from(value: crate::DysonError) -> Self {
+impl From<dyson_core::error::DysonError> for SkillRemoveError {
+    fn from(value: dyson_core::error::DysonError) -> Self {
         Self::Workspace(value)
     }
 }
@@ -147,7 +147,11 @@ impl Tool for SkillMarketplaceTool {
         })
     }
 
-    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
+    async fn run(
+        &self,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> dyson_core::error::Result<ToolOutput> {
         let op = input["op"].as_str().unwrap_or("").trim();
         let marketplace = input["marketplace"].as_str().unwrap_or("").trim();
         let skill = input["skill"].as_str().unwrap_or("").trim();
@@ -167,7 +171,7 @@ impl Tool for SkillMarketplaceTool {
     }
 }
 
-async fn list_sources() -> crate::Result<ToolOutput> {
+async fn list_sources() -> dyson_core::error::Result<ToolOutput> {
     let sources: SourceList = swarm_get("skill-marketplaces").await?;
     if sources.sources.is_empty() {
         return Ok(ToolOutput::success(
@@ -185,7 +189,7 @@ async fn list_sources() -> crate::Result<ToolOutput> {
     Ok(ToolOutput::success(out))
 }
 
-async fn list_skills() -> crate::Result<ToolOutput> {
+async fn list_skills() -> dyson_core::error::Result<ToolOutput> {
     let listing: CatalogListing = swarm_get("skill-marketplaces/skills").await?;
     let mut out = String::new();
     if listing.skills.is_empty() {
@@ -213,7 +217,7 @@ async fn list_skills() -> crate::Result<ToolOutput> {
     Ok(ToolOutput::success(out))
 }
 
-async fn show_skill(marketplace: &str, skill: &str) -> crate::Result<ToolOutput> {
+async fn show_skill(marketplace: &str, skill: &str) -> dyson_core::error::Result<ToolOutput> {
     if marketplace.is_empty() || skill.is_empty() {
         return Ok(ToolOutput::error(
             "'marketplace' and 'skill' are required for show",
@@ -248,7 +252,7 @@ async fn install_skill(
     marketplace: &str,
     skill: &str,
     force: bool,
-) -> crate::Result<ToolOutput> {
+) -> dyson_core::error::Result<ToolOutput> {
     if marketplace.is_empty() || skill.is_empty() {
         return Ok(ToolOutput::error(
             "'marketplace' and 'skill' are required for install",
@@ -259,7 +263,7 @@ async fn install_skill(
         url_component(marketplace),
         url_component(skill)
     );
-    let package: SkillBody = swarm_get(&body_path).await?;
+    let package: SkillPackageBody = swarm_get(&body_path).await?;
     let ws = ctx.workspace("skill_marketplace")?;
     match install_skill_package_to_workspace(ws, marketplace, skill, package, force).await {
         Ok(_outcome) => Ok(ToolOutput::success(format!(
@@ -279,7 +283,7 @@ pub async fn install_skill_package_to_workspace(
     workspace: &crate::workspace::WorkspaceHandle,
     marketplace: &str,
     skill: &str,
-    package: SkillBody,
+    package: SkillPackageBody,
     force: bool,
 ) -> Result<SkillInstallOutcome, SkillInstallError> {
     if package.marketplace_id != marketplace {
@@ -363,7 +367,7 @@ fn installed_skill_version(metadata: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-async fn remove_skill(ctx: &ToolContext, skill: &str) -> crate::Result<ToolOutput> {
+async fn remove_skill(ctx: &ToolContext, skill: &str) -> dyson_core::error::Result<ToolOutput> {
     if skill.is_empty() {
         return Ok(ToolOutput::error("'skill' is required for remove"));
     }
@@ -405,17 +409,15 @@ pub async fn remove_skill_from_workspace(
     })
 }
 
-async fn swarm_get<T: for<'de> Deserialize<'de>>(path: &str) -> crate::Result<T> {
-    let cfg = crate::swarm_state_sync::config_snapshot()
-        .or_else(crate::swarm_state_sync::config_from_env)
-        .ok_or_else(|| {
-            crate::DysonError::tool(
-                "skill_marketplace",
-                "Swarm state sync is not configured; marketplace catalog is unavailable",
-            )
-        })?;
+async fn swarm_get<T: for<'de> Deserialize<'de>>(path: &str) -> dyson_core::error::Result<T> {
+    let cfg = crate::swarm_state_sync::config_snapshot().ok_or_else(|| {
+        dyson_core::error::DysonError::tool(
+            "skill_marketplace",
+            "Swarm state sync is not configured; marketplace catalog is unavailable",
+        )
+    })?;
     let base = marketplace_base_from_state_url(&cfg.url).map_err(|e| {
-        crate::DysonError::tool(
+        dyson_core::error::DysonError::tool(
             "skill_marketplace",
             format!("bad Swarm state sync URL: {e}"),
         )
@@ -430,20 +432,21 @@ async fn swarm_get<T: for<'de> Deserialize<'de>>(path: &str) -> crate::Result<T>
         .bearer_auth(&cfg.token)
         .send()
         .await
-        .map_err(|e| crate::DysonError::tool("skill_marketplace", e.to_string()))?;
+        .map_err(|e| dyson_core::error::DysonError::tool("skill_marketplace", e.to_string()))?;
     let status = resp.status();
     let text = resp
         .text()
         .await
-        .map_err(|e| crate::DysonError::tool("skill_marketplace", e.to_string()))?;
+        .map_err(|e| dyson_core::error::DysonError::tool("skill_marketplace", e.to_string()))?;
     if !status.is_success() {
-        return Err(crate::DysonError::tool(
+        return Err(dyson_core::error::DysonError::tool(
             "skill_marketplace",
             format!("Swarm marketplace request failed ({status}): {text}"),
         ));
     }
-    serde_json::from_str(&text)
-        .map_err(|e| crate::DysonError::tool("skill_marketplace", format!("parse response: {e}")))
+    serde_json::from_str(&text).map_err(|e| {
+        dyson_core::error::DysonError::tool("skill_marketplace", format!("parse response: {e}"))
+    })
 }
 
 fn marketplace_base_from_state_url(url: &str) -> Result<String, String> {
@@ -523,7 +526,7 @@ mod tests {
     async fn installs_package_and_metadata() {
         let skill_md = "---\nname: code-review\ndescription: Review code.\n---\n\nRead the diff.";
         let computed_sha256 = sha256_hex(skill_md.as_bytes());
-        let package = SkillBody {
+        let package = SkillPackageBody {
             marketplace_id: "official".into(),
             marketplace_name: "Official Skills".into(),
             name: "code-review".into(),
@@ -567,7 +570,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_mismatched_marketplace_response() {
         let skill_md = "body";
-        let package = SkillBody {
+        let package = SkillPackageBody {
             marketplace_id: "other".into(),
             marketplace_name: "Other".into(),
             name: "code-review".into(),

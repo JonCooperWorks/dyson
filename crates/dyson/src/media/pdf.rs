@@ -15,7 +15,7 @@
 
 use base64::Engine;
 
-use crate::message::ContentBlock;
+use dyson_core::message::ContentBlock;
 
 /// Maximum PDF file size we'll process (32 MB — Anthropic's limit).
 const MAX_PDF_BYTES: usize = 32 * 1024 * 1024;
@@ -25,9 +25,9 @@ const MAX_PDF_BYTES: usize = 32 * 1024 * 1024;
 /// Extracts text as Markdown via `unpdf` and base64-encodes the raw PDF.
 /// Both are stored in the resulting content block so each LLM provider
 /// can pick the best representation.
-pub fn process_pdf(data: &[u8]) -> crate::Result<ContentBlock> {
+pub fn process_pdf(data: &[u8]) -> dyson_core::error::Result<ContentBlock> {
     if data.len() > MAX_PDF_BYTES {
-        return Err(crate::DysonError::Config(format!(
+        return Err(dyson_core::error::DysonError::Config(format!(
             "PDF too large: {:.1} MB (max {:.0} MB)",
             data.len() as f64 / (1024.0 * 1024.0),
             MAX_PDF_BYTES as f64 / (1024.0 * 1024.0),
@@ -37,10 +37,11 @@ pub fn process_pdf(data: &[u8]) -> crate::Result<ContentBlock> {
     // Parse and extract text as Markdown for providers that can't handle
     // native PDFs.  Markdown preserves headings, lists, and tables.
     let doc = unpdf::parse_bytes(data)
-        .map_err(|e| crate::DysonError::Config(format!("failed to parse PDF: {e}")))?;
+        .map_err(|e| dyson_core::error::DysonError::Config(format!("failed to parse PDF: {e}")))?;
     let options = unpdf::render::RenderOptions::default();
-    let extracted_text = unpdf::render::to_markdown(&doc, &options)
-        .map_err(|e| crate::DysonError::Config(format!("failed to render PDF as markdown: {e}")))?;
+    let extracted_text = unpdf::render::to_markdown(&doc, &options).map_err(|e| {
+        dyson_core::error::DysonError::Config(format!("failed to render PDF as markdown: {e}"))
+    })?;
 
     // Base64-encode the raw PDF for providers that support native documents.
     let b64 = base64::engine::general_purpose::STANDARD.encode(data);

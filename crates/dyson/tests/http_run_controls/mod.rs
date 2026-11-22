@@ -12,7 +12,7 @@ impl LlmClient for QuestionClient {
         _: &[ToolDefinition],
         _: &std::collections::HashMap<String, Arc<dyn dyson::tool::Tool>>,
         _: &CompletionConfig,
-    ) -> dyson::Result<StreamResponse> {
+    ) -> dyson_core::error::Result<StreamResponse> {
         let first = self.0.fetch_add(1, Ordering::SeqCst) == 0;
         let mut events = if first {
             vec![StreamEvent::ToolUseComplete {
@@ -94,7 +94,10 @@ async fn waiting_question() -> (Rig, Arc<AtomicUsize>, String, serde_json::Value
     (r, calls, id, run)
 }
 
-async fn reconstruct(r: &Rig, calls: Arc<AtomicUsize>) -> (String, JoinHandle<dyson::Result<()>>) {
+async fn reconstruct(
+    r: &Rig,
+    calls: Arc<AtomicUsize>,
+) -> (String, JoinHandle<dyson_core::error::Result<()>>) {
     r._handle.abort();
 
     let settings = r.state.settings_snapshot();

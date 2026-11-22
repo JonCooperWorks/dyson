@@ -1,13 +1,8 @@
-//! Application façade and configured persistence factory.
-
-pub use dyson_persistence::{ChatHistory, DiskChatHistory};
-
-pub(crate) mod coalesce {
-    pub(crate) use dyson_persistence::CoalescingPersister;
-}
+//! Configured chat-history persistence factory.
 
 use crate::config::ChatHistoryConfig;
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
+use dyson_persistence::{ChatHistory, DiskChatHistory};
 
 /// Create the configured per-chat persistence backend.
 pub fn create_chat_history(config: &ChatHistoryConfig) -> Result<Box<dyn ChatHistory>> {

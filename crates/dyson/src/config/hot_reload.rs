@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::config::Settings;
-use crate::error::Result;
+use dyson_core::error::Result;
 
 /// How long the mtime must be stable before we reload.
 ///
@@ -342,7 +342,7 @@ mod tests {
     async fn no_change_returns_false() {
         let dir = temp_dir("no-change");
         let config = dir.join("dyson.json");
-        std::fs::write(&config, r#"{"agent":{}}"#).unwrap();
+        std::fs::write(&config, r#"{"config_version":3,"agent":{}}"#).unwrap();
 
         let mut reloader = HotReloader::new(Some(&config), None);
         let (changed, _) = reloader.check().await.unwrap();
@@ -355,7 +355,7 @@ mod tests {
     fn change_is_debounced() {
         let dir = temp_dir("debounce");
         let config = dir.join("dyson.json");
-        std::fs::write(&config, r#"{"agent":{}}"#).unwrap();
+        std::fs::write(&config, r#"{"config_version":3,"agent":{}}"#).unwrap();
 
         let mut reloader = HotReloader::new(Some(&config), None);
 
@@ -363,7 +363,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         {
             let mut f = std::fs::File::create(&config).unwrap();
-            write!(f, r#"{{"agent":{{"model":"test"}}}}"#).unwrap();
+            write!(f, r#"{{"config_version":3,"agent":{{"model":"test"}}}}"#).unwrap();
         }
 
         // Non-blocking check — should NOT reload yet (debounce).
@@ -384,13 +384,13 @@ mod tests {
     async fn blocking_check_waits_for_debounce() {
         let dir = temp_dir("blocking");
         let config = dir.join("dyson.json");
-        std::fs::write(&config, r#"{"agent":{}}"#).unwrap();
+        std::fs::write(&config, r#"{"config_version":3,"agent":{}}"#).unwrap();
 
         let mut reloader = HotReloader::new(Some(&config), None);
 
         // Modify the file.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        std::fs::write(&config, r#"{"agent":{"model":"test"}}"#).unwrap();
+        std::fs::write(&config, r#"{"config_version":3,"agent":{"model":"test"}}"#).unwrap();
 
         // Async check should wait for debounce and report the change
         // in a single call.
@@ -408,13 +408,17 @@ mod tests {
         let dir = temp_dir("config-reload");
         let config = dir.join("dyson.json");
         // Write a valid config.
-        std::fs::write(&config, r#"{"agent":{}}"#).unwrap();
+        std::fs::write(&config, r#"{"config_version":3,"agent":{}}"#).unwrap();
 
         let mut reloader = HotReloader::new(Some(&config), None);
 
         // Modify the config file.
         std::thread::sleep(Duration::from_millis(50));
-        std::fs::write(&config, r#"{"agent":{"max_iterations":5}}"#).unwrap();
+        std::fs::write(
+            &config,
+            r#"{"config_version":3,"agent":{"max_iterations":5}}"#,
+        )
+        .unwrap();
 
         // Detect the change.
         let (changed, _) = reloader.check_nonblocking().unwrap();
@@ -473,19 +477,19 @@ mod tests {
     fn rapid_writes_reset_debounce() {
         let dir = temp_dir("rapid-writes");
         let config = dir.join("dyson.json");
-        std::fs::write(&config, r#"{"agent":{}}"#).unwrap();
+        std::fs::write(&config, r#"{"config_version":3,"agent":{}}"#).unwrap();
 
         let mut reloader = HotReloader::new(Some(&config), None);
 
         // First write.
         std::thread::sleep(Duration::from_millis(50));
-        std::fs::write(&config, r#"{"agent":{"model":"v1"}}"#).unwrap();
+        std::fs::write(&config, r#"{"config_version":3,"agent":{"model":"v1"}}"#).unwrap();
         let (changed, _) = reloader.check_nonblocking().unwrap();
         assert!(!changed);
 
         // Second write before debounce expires — should reset timer.
         std::thread::sleep(Duration::from_millis(200));
-        std::fs::write(&config, r#"{"agent":{"model":"v2"}}"#).unwrap();
+        std::fs::write(&config, r#"{"config_version":3,"agent":{"model":"v2"}}"#).unwrap();
         let (changed, _) = reloader.check_nonblocking().unwrap();
         assert!(!changed, "debounce should have reset");
 

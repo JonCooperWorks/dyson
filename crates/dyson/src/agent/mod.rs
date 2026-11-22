@@ -79,7 +79,6 @@
 
 mod budget;
 mod compaction;
-mod dependency_analyzer;
 pub mod dream;
 mod execution;
 pub mod rate_limiter;
@@ -92,7 +91,6 @@ pub use silent_output::SilentOutput;
 pub mod continuation;
 mod r#loop;
 mod persistence;
-pub mod protocol;
 mod sliding_window;
 mod state;
 pub mod stream_handler;
@@ -115,15 +113,16 @@ use self::tool_limiter::ToolLimiter;
 use crate::config::{AgentSettings, CompactionConfig};
 use crate::controller::Output;
 #[cfg(test)]
-use crate::error::DysonError;
-use crate::error::Result;
-#[cfg(test)]
 use crate::llm::ToolDefinition;
 use crate::llm::{CompletionConfig, LlmClient};
-use crate::message::{ContentBlock, Message};
 use crate::sandbox::Sandbox;
 use crate::skill::Skill;
 use crate::tool::{Tool, ToolContext};
+#[cfg(test)]
+use dyson_core::error::DysonError;
+use dyson_core::error::Result;
+use dyson_core::message::{ContentBlock, Message};
+use dyson_harness::protocol;
 
 use self::state::{Conversation, HistoryBackend, ToolRegistry, restored_turn_count};
 use self::token_budget::TokenBudget;
@@ -242,7 +241,7 @@ pub struct Agent {
 
 /// Callback fired whenever the agent's message history changes.
 /// See [`Agent::set_persist_hook`] for usage.
-pub type PersistHook = std::sync::Arc<dyn Fn(&[crate::message::Message]) + Send + Sync>;
+pub type PersistHook = std::sync::Arc<dyn Fn(&[dyson_core::message::Message]) + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // AgentBuilder
@@ -749,8 +748,8 @@ impl Agent {
     pub fn record_feedback(
         &self,
         turn_index: usize,
-        rating: crate::feedback::FeedbackRating,
-    ) -> crate::error::Result<()> {
+        rating: dyson_common::feedback::FeedbackRating,
+    ) -> dyson_core::error::Result<()> {
         let (Some(store), Some(backend)) = (&self.feedback_store, &self.history_backend) else {
             return Ok(());
         };
@@ -760,7 +759,7 @@ impl Agent {
             .as_secs();
         store.upsert(
             &backend.chat_id,
-            crate::feedback::FeedbackEntry {
+            dyson_common::feedback::FeedbackEntry {
                 turn_index,
                 rating,
                 score: rating.score(),
@@ -770,7 +769,7 @@ impl Agent {
     }
 
     /// Remove a previously recorded rating for a specific turn.
-    pub fn remove_feedback(&self, turn_index: usize) -> crate::error::Result<()> {
+    pub fn remove_feedback(&self, turn_index: usize) -> dyson_core::error::Result<()> {
         let (Some(store), Some(backend)) = (&self.feedback_store, &self.history_backend) else {
             return Ok(());
         };
@@ -968,7 +967,7 @@ impl Agent {
     /// (e.g. photos, voice notes).
     pub async fn run_with_blocks(
         &mut self,
-        blocks: Vec<crate::message::ContentBlock>,
+        blocks: Vec<dyson_core::message::ContentBlock>,
         output: &mut dyn Output,
     ) -> Result<String> {
         self.ensure_startable()?;

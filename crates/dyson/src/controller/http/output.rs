@@ -15,9 +15,9 @@ use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
-use crate::error::DysonError;
-use crate::message::{ContentBlock, Message};
 use crate::tool::{CheckpointEvent, ToolOutput};
+use dyson_core::error::DysonError;
+use dyson_core::message::{ContentBlock, Message};
 
 use super::Output;
 use super::responses::mime_for_extension;
@@ -282,9 +282,9 @@ impl Output for SseOutput {
                 .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
                 .unwrap_or(false);
         let kind = if inline_image {
-            crate::message::ArtefactKind::Image
+            dyson_core::message::ArtefactKind::Image
         } else {
-            crate::message::ArtefactKind::Other
+            dyson_core::message::ArtefactKind::Other
         };
         let content = if is_markdown {
             let s = match self.files.lock() {
@@ -307,7 +307,7 @@ impl Output for SseOutput {
         } else {
             mime.clone()
         };
-        let artefact = crate::message::Artefact {
+        let artefact = dyson_core::message::Artefact {
             id: String::new(),
             kind,
             title: name.clone(),
@@ -336,7 +336,7 @@ impl Output for SseOutput {
 
     fn send_artefact(
         &mut self,
-        artefact: &crate::message::Artefact,
+        artefact: &dyson_core::message::Artefact,
     ) -> std::result::Result<(), DysonError> {
         let id = format!(
             "a{}",
@@ -345,7 +345,7 @@ impl Output for SseOutput {
         );
         // The `url` surfaces to the client as the chip's href — use the
         // SPA deep-link so cmd-click / copy-paste lands on the reader.
-        // The raw bytes still live at `/api/artefacts/<id>` and the
+        // The raw bytes still live at `/api/conversations/<chat>/artefacts/<id>` and the
         // reader fetches them itself once mounted.
         let url = format!("/#/artefacts/{id}");
         let bytes = artefact.content.len();
@@ -424,10 +424,10 @@ impl Output for SseOutput {
             // but the explicit match keeps the wire shape obvious
             // at the call site.
             let kind = match artefact.kind {
-                crate::message::ArtefactKind::SecurityReview => "security_review",
-                crate::message::ArtefactKind::EvalReport => "eval_report",
-                crate::message::ArtefactKind::Image => "image",
-                crate::message::ArtefactKind::Other => "other",
+                dyson_core::message::ArtefactKind::SecurityReview => "security_review",
+                dyson_core::message::ArtefactKind::EvalReport => "eval_report",
+                dyson_core::message::ArtefactKind::Image => "image",
+                dyson_core::message::ArtefactKind::Other => "other",
             }
             .to_owned();
             let title = artefact.title.clone();
@@ -550,7 +550,7 @@ fn file_id_from_controller_url(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{Artefact, ArtefactKind};
+    use dyson_core::message::{Artefact, ArtefactKind};
     use std::sync::atomic::AtomicU64;
 
     fn fixture(data_dir: Option<PathBuf>) -> (SseOutput, broadcast::Receiver<SseEvent>) {
@@ -979,7 +979,7 @@ mod tests {
             id: String::new(),
             kind: ArtefactKind::Other,
             title: "blob.bin".into(),
-            content: "/api/files/f1".into(),
+            content: "/api/conversations/c1/files/f1".into(),
             mime_type: "application/octet-stream".into(),
             metadata: None,
         };

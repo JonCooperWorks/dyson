@@ -12,15 +12,15 @@
 // ===========================================================================
 
 use crate::controller::Output;
-use crate::error::{DysonError, Result};
 use crate::llm::ToolDefinition;
-use crate::message::Message;
 use crate::sandbox::SandboxDecision;
 use crate::tool::{ToolContext, ToolExecutionPlan, ToolOutput};
+use dyson_core::error::{DysonError, Result};
+use dyson_core::message::Message;
 
 use super::Agent;
-use super::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
 use super::stream_handler::ToolCall;
+use dyson_harness::scheduler::{DependencyAnalyzer, ExecutionPhase};
 
 impl Agent {
     /// Execute one registered tool directly, without an LLM turn.
@@ -48,7 +48,7 @@ impl Agent {
                 .map(|(output, _)| output)
         };
         if result.as_ref().is_ok_and(|out| !out.is_error) {
-            self.last_run_status = super::protocol::RunStatus::Completed;
+            self.last_run_status = dyson_harness::protocol::RunStatus::Completed;
         }
         self.finish_run_protocol(&result);
         result
@@ -205,14 +205,14 @@ impl Agent {
             return Err(DysonError::Llm("token budget exhausted".into()));
         }
         let iteration = usize::MAX;
-        self.try_emit_run_event(super::protocol::RunEventKind::LlmAttemptStarted {
+        self.try_emit_run_event(dyson_harness::protocol::RunEventKind::LlmAttemptStarted {
             iteration,
             attempt: 0,
         })?;
         let mut config = self.budgeted_config();
         let input_estimate = messages.iter().map(Message::estimate_tokens).sum::<usize>()
-            + crate::message::estimate_text_tokens(system)
-            + crate::message::estimate_text_tokens(suffix);
+            + dyson_core::message::estimate_text_tokens(system)
+            + dyson_core::message::estimate_text_tokens(suffix);
         let (reservation, max_output) = super::task::budget::Reservation::reserve(
             self.tool_context.harness.budget.clone(),
             &config.model,
@@ -246,7 +246,7 @@ impl Agent {
             self.tool_context.harness.checkpoint()?;
             let _ = self.conversation.token_budget.record(tokens);
             observed_completion = true;
-            self.try_emit_run_event(super::protocol::RunEventKind::LlmAttemptCompleted {
+            self.try_emit_run_event(dyson_harness::protocol::RunEventKind::LlmAttemptCompleted {
                 iteration,
                 output_tokens: tokens,
                 tool_calls: calls.len(),
@@ -262,7 +262,7 @@ impl Agent {
         if result.is_err() && !observed_completion {
             self.conversation.token_budget.llm_calls += 1;
             // Failed requests still consume an attempt, even without provider usage.
-            self.emit_run_event(super::protocol::RunEventKind::LlmAttemptFailed {
+            self.emit_run_event(dyson_harness::protocol::RunEventKind::LlmAttemptFailed {
                 iteration,
                 error_kind: "auxiliary".into(),
                 retryable: false,
@@ -289,7 +289,7 @@ impl Agent {
                 );
             } else {
                 let notification = request.clone();
-                self.last_run_status = super::protocol::RunStatus::WaitingForInput;
+                self.last_run_status = dyson_harness::protocol::RunStatus::WaitingForInput;
                 self.transition(super::continuation::Transition::Wait(request))?;
                 if let Err(error) = output.human_input_requested(&notification) {
                     tracing::warn!(%error, "question delivery failed; durable request remains available");
@@ -505,7 +505,7 @@ impl Agent {
                     );
                 }
                 Err(e) => {
-                    let err = crate::error::DysonError::Tool {
+                    let err = dyson_core::error::DysonError::Tool {
                         tool: call.name.clone(),
                         message: e.to_string(),
                     };
@@ -572,7 +572,7 @@ impl Agent {
         use sha2::Digest as _;
         let input_bytes = serde_json::to_vec(&call.input).unwrap_or_default();
         let input_sha256 = format!("{:x}", sha2::Sha256::digest(input_bytes));
-        self.try_emit_run_event(super::protocol::RunEventKind::ToolRequested {
+        self.try_emit_run_event(dyson_harness::protocol::RunEventKind::ToolRequested {
             tool_use_id: call.id.clone(),
             tool_name: call.name.clone(),
             input_sha256,
@@ -775,7 +775,7 @@ impl Agent {
             ctx.harness.validate_observations(&plan)?;
             ctx.harness.prepare_mutation()?;
         }
-        let authorized = super::protocol::RunEventKind::ToolAuthorized {
+        let authorized = dyson_harness::protocol::RunEventKind::ToolAuthorized {
             tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
             effective_tool_name: name.to_string(),
             idempotency: plan.idempotency,
@@ -786,7 +786,7 @@ impl Agent {
             self.active_run_id.0,
             ctx.tool_use_id.as_deref().unwrap_or("direct")
         );
-        let tool_started = super::protocol::RunEventKind::ToolStarted {
+        let tool_started = dyson_harness::protocol::RunEventKind::ToolStarted {
             tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
             effective_tool_name: name.to_string(),
             idempotency_key: ctx.idempotency_key.clone().unwrap_or(idempotency_key),
@@ -825,11 +825,13 @@ impl Agent {
         {
             Ok(Ok(out)) => out,
             Ok(Err(e)) if keyed => {
-                self.try_emit_run_event(super::protocol::RunEventKind::ToolOutcomeUnknown {
-                    tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
-                    effective_tool_name: name.into(),
-                    reason: e.to_string(),
-                })?;
+                self.try_emit_run_event(
+                    dyson_harness::protocol::RunEventKind::ToolOutcomeUnknown {
+                        tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
+                        effective_tool_name: name.into(),
+                        reason: e.to_string(),
+                    },
+                )?;
                 return Err(e);
             }
             Ok(Err(e)) => ToolOutput::error(e.to_string()),
@@ -842,11 +844,13 @@ impl Agent {
                     ));
                 }
                 self.run_warnings.lock().unwrap_or_else(|e| e.into_inner()).push(format!("Tool '{name}' timed out with an unknown outcome; reconcile before further mutations"));
-                self.try_emit_run_event(super::protocol::RunEventKind::ToolOutcomeUnknown {
-                    tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
-                    effective_tool_name: name.to_string(),
-                    reason: format!("execution exceeded {} ms deadline", plan.timeout_ms),
-                })?;
+                self.try_emit_run_event(
+                    dyson_harness::protocol::RunEventKind::ToolOutcomeUnknown {
+                        tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
+                        effective_tool_name: name.to_string(),
+                        reason: format!("execution exceeded {} ms deadline", plan.timeout_ms),
+                    },
+                )?;
                 return Ok(ToolOutput::error(format!(
                     "Tool '{name}' exceeded its {} ms execution deadline; side-effect outcome is unknown and the runtime will not retry it automatically",
                     plan.timeout_ms
@@ -889,7 +893,7 @@ impl Agent {
         }
         self.notify_after_tool(name, &tool_output).await;
 
-        self.try_emit_run_event(super::protocol::RunEventKind::ToolFinished {
+        self.try_emit_run_event(dyson_harness::protocol::RunEventKind::ToolFinished {
             tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
             effective_tool_name: name.to_string(),
             is_error: tool_output.is_error,

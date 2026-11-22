@@ -6,11 +6,6 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct JsonRoot {
-    /// Schema version — consumed by `migrate()`, retained here so
-    /// `deny_unknown_fields` doesn't reject it.
-    #[serde(default)]
-    #[expect(dead_code, reason = "serde-only compatibility field")]
-    pub(super) config_version: Option<u32>,
     /// Named provider configurations.
     ///
     /// ```json
@@ -263,10 +258,8 @@ pub(super) struct JsonToolPolicy {
 
 /// The `"workspace"` object.
 ///
-/// Supports both new-style `backend` + `connection_string` and legacy `path`:
 /// ```json
 /// { "workspace": { "backend": "filesystem", "connection_string": "~/.dyson" } }
-/// { "workspace": { "path": "~/.dyson" } }
 /// ```
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -275,8 +268,6 @@ pub(super) struct JsonWorkspace {
     pub(super) backend: Option<String>,
     /// Connection string (path for filesystem).  Supports secret resolution.
     pub(super) connection_string: Option<SecretValue>,
-    /// Legacy: plain path.  Falls back to this if connection_string is absent.
-    pub(super) path: Option<String>,
     /// Memory tier configuration.
     pub(super) memory: Option<JsonMemory>,
 }

@@ -20,19 +20,19 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use dyson::agent::Agent;
-use dyson::agent::protocol::{RunEventKind, evaluate_run};
 use dyson::agent::rate_limiter::RateLimitedHandle;
-use dyson::chat_history::{ChatHistory, DiskChatHistory};
 use dyson::config::AgentSettings;
 use dyson::controller::recording::RecordingOutput;
-use dyson::error::Result;
 use dyson::llm::stream::{StopReason, StreamEvent};
 use dyson::llm::{CompletionConfig, LlmClient, ToolDefinition};
-use dyson::message::Message;
 use dyson::sandbox::{Sandbox, SandboxDecision};
 use dyson::skill::Skill;
 use dyson::skill::builtin::BuiltinSkill;
 use dyson::tool::ToolContext;
+use dyson_core::error::Result;
+use dyson_core::message::Message;
+use dyson_harness::protocol::{RunEventKind, evaluate_run};
+use dyson_persistence::{ChatHistory, DiskChatHistory};
 
 // ===========================================================================
 // Mock infrastructure
@@ -511,7 +511,7 @@ async fn unknown_tool_returns_error() {
     let messages = agent.messages();
     let has_error_result = messages.iter().any(|msg| {
         msg.content.iter().any(|block| {
-            if let dyson::message::ContentBlock::ToolResult {
+            if let dyson_core::message::ContentBlock::ToolResult {
                 content, is_error, ..
             } = block
             {
@@ -679,7 +679,7 @@ async fn set_messages_restores_conversation() {
     // Inject a pre-existing conversation.
     let history = vec![
         Message::user("previous question"),
-        Message::assistant(vec![dyson::message::ContentBlock::Text {
+        Message::assistant(vec![dyson_core::message::ContentBlock::Text {
             text: "previous answer".into(),
         }]),
     ];
@@ -719,7 +719,7 @@ async fn redirect_to_unknown_tool_is_handled_gracefully() {
     // The error should be in the conversation history as an error tool_result.
     let has_redirect_error = agent.messages().iter().any(|msg| {
         msg.content.iter().any(|block| {
-            if let dyson::message::ContentBlock::ToolResult {
+            if let dyson_core::message::ContentBlock::ToolResult {
                 content, is_error, ..
             } = block
             {

@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dyson::auth::{Auth, Credential, DangerousNoAuth, HashedBearerAuth};
-use dyson::chat_history::{ChatHistory, DiskChatHistory};
 use dyson::config::{
     BuiltinSkillConfig, ChatHistoryConfig, LlmProvider, ProviderConfig, Settings, SkillConfig,
 };
@@ -20,7 +19,8 @@ use dyson::controller::http::{HttpState, test_helpers};
 use dyson::feedback::FeedbackStore;
 use dyson::llm::stream::{StopReason, StreamEvent};
 use dyson::llm::{CompletionConfig, LlmClient, StreamResponse, ToolDefinition, ToolMode};
-use dyson::message::{ContentBlock, Message};
+use dyson_core::message::{ContentBlock, Message};
+use dyson_persistence::{ChatHistory, DiskChatHistory};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::{Method, Request, Response, StatusCode};
@@ -40,7 +40,7 @@ struct Rig {
     state: Arc<HttpState>,
     chat_dir: tempfile::TempDir,
     workspace_dir: tempfile::TempDir,
-    _handle: JoinHandle<dyson::error::Result<()>>,
+    _handle: JoinHandle<dyson_core::error::Result<()>>,
 }
 
 impl Rig {
@@ -112,7 +112,7 @@ impl LlmClient for StubLlmClient {
         _tools: &[ToolDefinition],
         _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn dyson::tool::Tool>>,
         _config: &CompletionConfig,
-    ) -> dyson::error::Result<StreamResponse> {
+    ) -> dyson_core::error::Result<StreamResponse> {
         let events = vec![
             Ok(StreamEvent::TextDelta("ok".to_string())),
             Ok(StreamEvent::MessageComplete {
@@ -155,7 +155,7 @@ impl LlmClient for BlockingLlmClient {
         _tools: &[ToolDefinition],
         _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn dyson::tool::Tool>>,
         _config: &CompletionConfig,
-    ) -> dyson::error::Result<StreamResponse> {
+    ) -> dyson_core::error::Result<StreamResponse> {
         self.started
             .store(true, std::sync::atomic::Ordering::SeqCst);
         while !self.release.load(std::sync::atomic::Ordering::SeqCst) {
@@ -189,7 +189,7 @@ impl LlmClient for ToolThenRecordMessagesLlm {
         _tools: &[ToolDefinition],
         _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn dyson::tool::Tool>>,
         _config: &CompletionConfig,
-    ) -> dyson::error::Result<StreamResponse> {
+    ) -> dyson_core::error::Result<StreamResponse> {
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.seen.lock().unwrap().push(messages.to_vec());
         let events = if call == 0 {
@@ -238,7 +238,7 @@ impl LlmClient for CaptureToolsLlm {
         tools: &[ToolDefinition],
         _tool_instances: &std::collections::HashMap<String, std::sync::Arc<dyn dyson::tool::Tool>>,
         _config: &CompletionConfig,
-    ) -> dyson::error::Result<StreamResponse> {
+    ) -> dyson_core::error::Result<StreamResponse> {
         self.calls.lock().unwrap().push(
             tools
                 .iter()
@@ -1271,6 +1271,7 @@ async fn admin_state_file_replay_enforces_durable_allowlist() {
         .post_json_with_headers(
             "/api/admin/state/file",
             &serde_json::json!({
+                "updated_at": 1_700_000_000_i64,
                 "namespace": "workspace",
                 "path": "memory/SOUL.md",
                 "mime": "text/markdown",
@@ -1314,7 +1315,8 @@ async fn admin_state_file_replay_enforces_durable_allowlist() {
             .post_json_with_headers(
                 "/api/admin/state/file",
                 &serde_json::json!({
-                    "namespace": "workspace",
+                    "updated_at": 1_700_000_000_i64,
+                "namespace": "workspace",
                     "path": path,
                     "mime": "application/octet-stream",
                     "body_b64": "c2hvdWxkLW5vdC1iZS1kdXJhYmxl"
@@ -1333,6 +1335,7 @@ async fn admin_state_file_replay_enforces_durable_allowlist() {
         .post_json_with_headers(
             "/api/admin/state/file",
             &serde_json::json!({
+                "updated_at": 1_700_000_000_i64,
                 "namespace": "chats",
                 "path": "c-1/transcript.json",
                 "mime": "application/json",
@@ -1346,6 +1349,20 @@ async fn admin_state_file_replay_enforces_durable_allowlist() {
         !r.chat_dir.path().join("c-1/transcript.json").exists(),
         "zero-byte chat transcript replay should be rejected"
     );
+}
+
+#[tokio::test]
+async fn configure_requires_provider_name_with_provider_fields() {
+    let r = rig().await;
+    let secret = "test-configure-secret";
+    let resp = r
+        .post_json_with_headers(
+            "/api/admin/configure",
+            &serde_json::json!({ "models": ["anthropic/claude-sonnet-4-5"] }),
+            &[("x-swarm-configure", secret)],
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -1369,7 +1386,8 @@ async fn admin_state_file_replay_advances_file_and_artefact_ids() {
             .post_json_with_headers(
                 "/api/admin/state/file",
                 &serde_json::json!({
-                    "namespace": "chats",
+                    "updated_at": 1_700_000_000_i64,
+                "namespace": "chats",
                     "path": path,
                     "mime": "application/octet-stream",
                     "body_b64": B64.encode(bytes),
@@ -2002,7 +2020,7 @@ async fn accepted_turn_checkpoint_does_not_duplicate_first_user_message() {
         messages = history.load(&id).expect("load history");
         if messages
             .iter()
-            .any(|m| matches!(m.role, dyson::message::Role::Assistant))
+            .any(|m| matches!(m.role, dyson_core::message::Role::Assistant))
         {
             break;
         }
@@ -2012,7 +2030,7 @@ async fn accepted_turn_checkpoint_does_not_duplicate_first_user_message() {
     let prompt_count = messages
         .iter()
         .filter(|m| {
-            matches!(m.role, dyson::message::Role::User)
+            matches!(m.role, dyson_core::message::Role::User)
                 && m.content
                     .iter()
                     .any(|b| matches!(b, ContentBlock::Text { text } if text == prompt))
@@ -2149,7 +2167,7 @@ async fn queued_turn_is_admitted_before_next_llm_iteration_after_tool_batch() {
         .get(1)
         .expect("second LLM call should have been recorded");
     let follow_up_pos = second_iteration.iter().position(|message| {
-        message.role == dyson::message::Role::User
+        message.role == dyson_core::message::Role::User
             && message.content.iter().any(|block| {
                 matches!(
                     block,
@@ -2158,7 +2176,7 @@ async fn queued_turn_is_admitted_before_next_llm_iteration_after_tool_batch() {
             })
     });
     let tool_result_pos = second_iteration.iter().position(|message| {
-        message.role == dyson::message::Role::User
+        message.role == dyson_core::message::Role::User
             && message
                 .content
                 .iter()
@@ -2557,11 +2575,11 @@ async fn post_turn_with_slash_clear_rotates_chat_history() {
     // an empty file already exists — we overwrite it with a message.)
     let store = DiskChatHistory::new(r.chat_dir.path().to_path_buf()).expect("seed store");
     store
-        .save(&id, &[dyson::message::Message::user("hello world")])
+        .save(&id, &[dyson_core::message::Message::user("hello world")])
         .expect("seed save");
 
     let current = r.chat_dir.path().join(&id).join("transcript.json");
-    let before: Vec<dyson::message::Message> =
+    let before: Vec<dyson_core::message::Message> =
         serde_json::from_str(&std::fs::read_to_string(&current).unwrap()).unwrap();
     assert_eq!(
         before.len(),
@@ -2589,7 +2607,7 @@ async fn post_turn_with_slash_clear_rotates_chat_history() {
         current.exists(),
         "current file must be re-seeded empty after rotate"
     );
-    let after: Vec<dyson::message::Message> =
+    let after: Vec<dyson_core::message::Message> =
         serde_json::from_str(&std::fs::read_to_string(&current).unwrap()).unwrap();
     assert!(after.is_empty(), "current transcript should be cleared");
 
@@ -2605,7 +2623,7 @@ async fn post_turn_with_slash_clear_rotates_chat_history() {
         "exactly one rotated archive expected — found: {:?}",
         rotated.iter().map(|e| e.file_name()).collect::<Vec<_>>(),
     );
-    let rotated_msgs: Vec<dyson::message::Message> =
+    let rotated_msgs: Vec<dyson_core::message::Message> =
         serde_json::from_str(&std::fs::read_to_string(rotated[0].path()).unwrap()).unwrap();
     assert_eq!(rotated_msgs.len(), 1, "archive preserves prior transcript");
 }
@@ -2625,7 +2643,10 @@ async fn create_conversation_rotates_previous_chat_when_requested() {
 
     let store = DiskChatHistory::new(r.chat_dir.path().to_path_buf()).expect("seed store");
     store
-        .save(&prev, &[dyson::message::Message::user("first thought")])
+        .save(
+            &prev,
+            &[dyson_core::message::Message::user("first thought")],
+        )
         .expect("seed save");
 
     let resp = r
@@ -2651,7 +2672,7 @@ async fn create_conversation_rotates_previous_chat_when_requested() {
         old_current.exists(),
         "prev chat's current file must be re-seeded empty after rotate",
     );
-    let after: Vec<dyson::message::Message> =
+    let after: Vec<dyson_core::message::Message> =
         serde_json::from_str(&std::fs::read_to_string(&old_current).unwrap()).unwrap();
     assert!(
         after.is_empty(),
@@ -2705,16 +2726,18 @@ async fn mint_id_skips_ids_used_by_rotated_archives_or_orphan_artefacts() {
     let workspace_dir = tempfile::tempdir().expect("workspace tempdir");
 
     // Seed a rotated archive for c-0042 (no current file).
+    let archives = chat_dir.path().join("c-0042").join("archives");
+    std::fs::create_dir_all(&archives).unwrap();
+    std::fs::write(archives.join("2026-04-22T12-00-00.json"), b"[]").unwrap();
+
+    // Seed an orphan artefact under c-0099 (no transcript).
+    let art_dir = chat_dir.path().join("c-0099").join("artefacts");
+    std::fs::create_dir_all(&art_dir).unwrap();
     std::fs::write(
-        chat_dir.path().join("c-0042.2026-04-22T12-00-00.json"),
-        b"[]",
+        art_dir.join("a1.body"),
+        b"/api/conversations/c-0099/files/f1",
     )
     .unwrap();
-
-    // Seed an orphan artefact that claims chat_id=c-0099.
-    let art_dir = chat_dir.path().join("artefacts");
-    std::fs::create_dir_all(&art_dir).unwrap();
-    std::fs::write(art_dir.join("a1.body"), b"/api/files/f1").unwrap();
     std::fs::write(
         art_dir.join("a1.meta.json"),
         br#"{"chat_id":"c-0099","created_at":0,"kind":"image","title":"stray.png","mime_type":"image/png"}"#,
@@ -2830,7 +2853,7 @@ async fn delete_non_empty_chat_rotates_then_drops_from_list() {
 
     let store = DiskChatHistory::new(r.chat_dir.path().to_path_buf()).expect("seed store");
     store
-        .save(&id, &[dyson::message::Message::user("dont lose this")])
+        .save(&id, &[dyson_core::message::Message::user("dont lose this")])
         .expect("seed save");
 
     let resp = r
@@ -2857,7 +2880,7 @@ async fn delete_non_empty_chat_rotates_then_drops_from_list() {
         1,
         "one dated archive preserves the transcript"
     );
-    let archived: Vec<dyson::message::Message> =
+    let archived: Vec<dyson_core::message::Message> =
         serde_json::from_str(&std::fs::read_to_string(rotated[0].path()).unwrap()).unwrap();
     assert_eq!(
         archived.len(),
@@ -2938,11 +2961,13 @@ async fn turn_with_invalid_base64_attachment_400s_clean() {
 
 #[tokio::test]
 async fn files_endpoint_404s_for_unknown_id() {
-    // /api/files/<id> serves agent-produced files (image_generate
-    // outputs etc.).  Unknown id is a 404 — same shape as missing
-    // static asset.
+    // /api/conversations/<chat>/files/<id> serves agent-produced files
+    // (image_generate outputs etc.).  Unknown id is a 404.
     let r = rig().await;
-    let resp = r.get("/api/files/does-not-exist").await;
+    let chat = r.create_chat_id("files").await;
+    let resp = r
+        .get(&format!("/api/conversations/{chat}/files/does-not-exist"))
+        .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -2990,9 +3015,6 @@ async fn emitted_file_is_only_served_from_owning_chat_scope() {
         .expect("collect")
         .to_bytes();
     assert_eq!(&bytes[..], b"scoped file body");
-
-    let global_resp = r.get(&format!("/api/files/{}", file_id)).await;
-    assert_eq!(global_resp.status(), StatusCode::NOT_FOUND);
 
     let sibling_resp = r
         .get(&format!("/api/conversations/{}/files/{}", sibling, file_id))
@@ -3277,7 +3299,7 @@ const PNG_1X1: &[u8] = &[
 #[tokio::test]
 async fn send_file_inlines_images_and_attaches_everything_else() {
     // End-to-end: agent emits a file via `Output::send_file` → SSE `file`
-    // event with `inline_image` set per MIME → `/api/files/<id>` serves
+    // event with `inline_image` set per MIME → `.../files/<id>` serves
     // with the matching `Content-Disposition`.  Covers the contract the
     // web UI's `FileBlock` depends on (inline `<img>` for images,
     // download card for everything else).
@@ -3562,8 +3584,8 @@ async fn agent_artefact_round_trips_through_sse_and_disk() {
     test_helpers::wait_for_sse_subscriber(r.state.clone(), &id).await;
 
     let markdown = "# Security review: juice-shop\n\nFindings go here.\n";
-    let artefact = dyson::message::Artefact::markdown(
-        dyson::message::ArtefactKind::SecurityReview,
+    let artefact = dyson_core::message::Artefact::markdown(
+        dyson_core::message::ArtefactKind::SecurityReview,
         "Security review: juice-shop",
         markdown,
     )
@@ -3686,7 +3708,7 @@ async fn chat_reload_rehydrates_user_uploaded_images_as_file_blocks() {
     // `run_with_attachments` writes to disk after a Telegram photo
     // or a web composer upload.
     {
-        use dyson::message::{ContentBlock, Message, Role};
+        use dyson_core::message::{ContentBlock, Message, Role};
         let history = r.state.history_for_test().expect("disk history");
         let msgs = vec![Message {
             role: Role::User,
@@ -3811,8 +3833,8 @@ async fn list_conversations_flags_chats_with_artefacts() {
     test_helpers::emit_agent_artefact(
         r.state.clone(),
         &a_id,
-        dyson::message::Artefact::markdown(
-            dyson::message::ArtefactKind::SecurityReview,
+        dyson_core::message::Artefact::markdown(
+            dyson_core::message::ArtefactKind::SecurityReview,
             "R",
             "body",
         ),
@@ -3852,8 +3874,8 @@ async fn artefact_body_is_only_served_from_owning_chat_scope() {
     assert_eq!(sse.status(), StatusCode::OK);
     test_helpers::wait_for_sse_subscriber(r.state.clone(), &owner).await;
 
-    let artefact = dyson::message::Artefact::markdown(
-        dyson::message::ArtefactKind::SecurityReview,
+    let artefact = dyson_core::message::Artefact::markdown(
+        dyson_core::message::ArtefactKind::SecurityReview,
         "Scoped Report",
         "scoped artefact body",
     );
@@ -3879,9 +3901,6 @@ async fn artefact_body_is_only_served_from_owning_chat_scope() {
         .to_bytes();
     assert_eq!(&bytes[..], b"scoped artefact body");
 
-    let global_resp = r.get(&format!("/api/artefacts/{}", art_id)).await;
-    assert_eq!(global_resp.status(), StatusCode::NOT_FOUND);
-
     let sibling_resp = r
         .get(&format!(
             "/api/conversations/{}/artefacts/{}",
@@ -3892,15 +3911,11 @@ async fn artefact_body_is_only_served_from_owning_chat_scope() {
 }
 
 #[tokio::test]
-async fn artefact_deep_link_is_shareable() {
-    // Two linked contracts the UI relies on to make artefact URLs
-    // "go straight to the artefact":
-    //   1. Naked `/artefacts/<id>` 302-redirects to the SPA deep-link
-    //      `/#/artefacts/<id>` so a link pasted into chat/docs opens
-    //      the reader, not a download.
-    //   2. The raw bytes endpoint surfaces the owning chat id via an
-    //      `X-Dyson-Chat-Id` header so a cold deep-link can restore
-    //      the sidebar without a second round-trip.
+async fn artefact_deep_link_carries_chat_id() {
+    // The emitted URL is the SPA deep-link `/#/artefacts/<id>`, and the
+    // raw bytes endpoint surfaces the owning chat id via an
+    // `X-Dyson-Chat-Id` header so a cold deep-link can restore the
+    // sidebar without a second round-trip.
     let r = rig().await;
 
     let created = r.create_chat("permalinks").await;
@@ -3916,8 +3931,8 @@ async fn artefact_deep_link_is_shareable() {
     assert_eq!(sse.status(), StatusCode::OK);
     test_helpers::wait_for_sse_subscriber(r.state.clone(), &id).await;
 
-    let artefact = dyson::message::Artefact::markdown(
-        dyson::message::ArtefactKind::SecurityReview,
+    let artefact = dyson_core::message::Artefact::markdown(
+        dyson_core::message::ArtefactKind::SecurityReview,
         "Report",
         "body",
     );
@@ -3926,15 +3941,11 @@ async fn artefact_deep_link_is_shareable() {
         .expect("emit artefact");
     let evt = read_sse_event(&mut sse).await;
     let spa_url = evt["url"].as_str().unwrap().to_string();
-    let art_id = spa_url.trim_start_matches("/#/artefacts/").to_string();
+    let art_id = spa_url
+        .strip_prefix("/#/artefacts/")
+        .expect("SPA deep-link")
+        .to_string();
 
-    // 1. Naked `/artefacts/<id>` 302s to the SPA deep-link.
-    let redir = r.get(&format!("/artefacts/{}", art_id)).await;
-    assert_eq!(redir.status(), StatusCode::FOUND);
-    let loc = redir.headers().get("location").expect("location header");
-    assert_eq!(loc.to_str().unwrap(), format!("/#/artefacts/{art_id}"));
-
-    // 2. The scoped raw endpoint carries the chat id.
     let body = r
         .get(&format!("/api/conversations/{}/artefacts/{}", id, art_id))
         .await;
@@ -3944,52 +3955,6 @@ async fn artefact_deep_link_is_shareable() {
         .get("x-dyson-chat-id")
         .expect("X-Dyson-Chat-Id header must be present");
     assert_eq!(chat_hdr.to_str().unwrap(), id);
-}
-
-#[tokio::test]
-async fn artefact_id_rejects_url_encoded_traversal() {
-    // Before the gate landed, `/api/artefacts/<id>` url-decoded the id
-    // and handed it to ArtefactStore::load_from_disk, which joined it
-    // into `sub.join(format!("{id}.meta.json"))`.  A decoded `../`
-    // would have escaped the store dir.  `/artefacts/<id>` had the
-    // analogous bypass — its `!id.contains('/')` check ran before
-    // url_decode so `%2F` slipped through and landed in the Location
-    // header.  Both must 404 now regardless of encoding.
-    let r = rig().await;
-    for evil in [
-        "..%2F..%2Fetc%2Fpasswd",
-        "%2e%2e%2fsecret",
-        "..%2fx",
-        "a0%2F..",
-        "a0/b1", // raw `/` — structurally bogus for a single id
-    ] {
-        let api = r.get(&format!("/api/artefacts/{}", evil)).await;
-        assert_eq!(
-            api.status(),
-            StatusCode::NOT_FOUND,
-            "/api/artefacts/{} should 404, got {}",
-            evil,
-            api.status(),
-        );
-        let redir = r.get(&format!("/artefacts/{}", evil)).await;
-        assert_eq!(
-            redir.status(),
-            StatusCode::NOT_FOUND,
-            "/artefacts/{} should 404, got {}",
-            evil,
-            redir.status(),
-        );
-    }
-    for evil in ["..%2Ffoo", "%2e%2e"] {
-        let resp = r.get(&format!("/api/files/{}", evil)).await;
-        assert_eq!(
-            resp.status(),
-            StatusCode::NOT_FOUND,
-            "/api/files/{} should 404, got {}",
-            evil,
-            resp.status(),
-        );
-    }
 }
 
 #[tokio::test]
@@ -4292,8 +4257,8 @@ async fn chat_reload_shows_evicted_persisted_artefacts_in_transcript() {
 
     const TOTAL: usize = 36; // MAX_ARTEFACTS is 32; force FIFO eviction.
     for n in 0..TOTAL {
-        let artefact = dyson::message::Artefact::markdown(
-            dyson::message::ArtefactKind::Other,
+        let artefact = dyson_core::message::Artefact::markdown(
+            dyson_core::message::ArtefactKind::Other,
             format!("report-{n:02}"),
             format!("body-{n}"),
         );
@@ -4716,8 +4681,8 @@ async fn unauthorized_omits_www_authenticate_for_dangerous_no_auth() {
         async fn validate_request(
             &self,
             _h: &hyper::HeaderMap,
-        ) -> dyson::error::Result<dyson::auth::AuthInfo> {
-            Err(dyson::error::DysonError::Config("unauthorized".into()))
+        ) -> dyson_core::error::Result<dyson::auth::AuthInfo> {
+            Err(dyson_core::error::DysonError::Config("unauthorized".into()))
         }
     }
     let r = rig_with_auth_and_mode(Arc::new(AlwaysDeny), test_helpers::AuthMode::None).await;
@@ -5095,6 +5060,7 @@ async fn store_endpoints_reject_url_decoded_path_traversal() {
     // every traversal shape an attacker is likely to try lands on
     // a 404 (not 200, not 500).
     let r = rig().await;
+    let chat = r.create_chat_id("traversal").await;
     let cases = [
         // %2F → '/'
         "%2F..%2Fetc%2Fpasswd",
@@ -5113,30 +5079,23 @@ async fn store_endpoints_reject_url_decoded_path_traversal() {
         "%C3%A9",
     ];
     for raw in cases {
-        let resp = r.get(&format!("/api/files/{}", raw)).await;
+        let resp = r
+            .get(&format!("/api/conversations/{chat}/files/{raw}"))
+            .await;
         assert_eq!(
             resp.status(),
             StatusCode::NOT_FOUND,
-            "/api/files/{raw} must 404, not traverse",
+            "files/{raw} must 404, not traverse",
         );
-        let resp = r.get(&format!("/api/artefacts/{}", raw)).await;
+        let resp = r
+            .get(&format!("/api/conversations/{chat}/artefacts/{raw}"))
+            .await;
         assert_eq!(
             resp.status(),
             StatusCode::NOT_FOUND,
-            "/api/artefacts/{raw} must 404, not traverse",
+            "artefacts/{raw} must 404, not traverse",
         );
     }
-}
-
-#[tokio::test]
-async fn shareable_artefact_redirect_rejects_traversal_ids() {
-    // /artefacts/<id> redirects to /#/artefacts/<id> for the SPA
-    // reader.  An invalid id must NOT round-trip through Location
-    // — that would let an attacker craft a phishing URL on this
-    // host that forwards to an arbitrary fragment.
-    let r = rig().await;
-    let resp = r.get("/artefacts/%2Fevil").await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 // ---------------------------------------------------------------------------
@@ -5235,8 +5194,8 @@ async fn list_artefacts_returns_evicted_entries_via_disk_fallback() {
     const TOTAL: usize = MAX_ARTEFACTS + 4; // 36 — four past the cap
 
     for n in 0..TOTAL {
-        let artefact = dyson::message::Artefact::markdown(
-            dyson::message::ArtefactKind::Other,
+        let artefact = dyson_core::message::Artefact::markdown(
+            dyson_core::message::ArtefactKind::Other,
             format!("report-{n:02}"),
             format!("body-{n}"),
         );
@@ -5657,8 +5616,8 @@ async fn sse_replay_with_last_event_id_resumes_from_checkpoint() {
     // SseEvent::Artefact.  Three artefacts → three events with
     // monotonic ids 1..3.
     for n in 0..3 {
-        let art = dyson::message::Artefact::markdown(
-            dyson::message::ArtefactKind::Other,
+        let art = dyson_core::message::Artefact::markdown(
+            dyson_core::message::ArtefactKind::Other,
             format!("a-{n}"),
             format!("body-{n}"),
         );
@@ -5854,7 +5813,7 @@ async fn unauthorized_strips_quote_from_oidc_authorization_endpoint() {
 
 #[tokio::test]
 async fn http_turn_journals_and_exposes_operator_recovery() {
-    use dyson::agent::protocol::{RunEvent, RunEventKind, RunId, evaluate_run};
+    use dyson_harness::protocol::{RunEvent, RunEventKind, RunId, evaluate_run};
     let r = rig().await;
     let id = r.create_chat_id("harness recovery").await;
     assert_eq!(
@@ -6045,7 +6004,7 @@ async fn managed_bootstrap_and_admin_routes_require_trusted_credentials() {
     );
     assert_eq!(
         post_json_with_headers(
-            &format!("{}/api/admin/cost-backfill", r.base),
+            &format!("{}/api/admin/not-a-configure-route", r.base),
             &serde_json::json!({}),
             &[("x-swarm-configure", "instance-configure-secret")]
         )

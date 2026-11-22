@@ -276,10 +276,10 @@ async fn read_meta_dto(sub: &std::path::Path, id: &str) -> Option<ArtefactDto> {
         .await
         .ok()?;
     let meta: serde_json::Value = serde_json::from_str(&meta_txt).ok()?;
-    let kind: crate::message::ArtefactKind = meta
+    let kind: dyson_core::message::ArtefactKind = meta
         .get("kind")
         .and_then(|k| serde_json::from_value(k.clone()).ok())
-        .unwrap_or(crate::message::ArtefactKind::Other);
+        .unwrap_or(dyson_core::message::ArtefactKind::Other);
     let bytes = tokio::fs::metadata(sub.join(format!("{id}.body")))
         .await
         .map(|m| m.len() as usize)

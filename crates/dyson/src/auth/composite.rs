@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 
 use crate::auth::{Auth, AuthInfo};
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 /// Chains multiple `Auth` implementations.
 ///

@@ -657,12 +657,12 @@ POST /api/admin/unquiesce          # resume turns after snapshot
 
 ### Files & artefacts
 
-`/api/files/:id` returns the bytes (inline `Content-Disposition` for
-images, `attachment` otherwise).  `/api/artefacts/:id` returns the
-markdown body and an `X-Dyson-Chat-Id` response header so a cold
-deep-link can restore sidebar context without a second round-trip.
-Naked `/artefacts/:id` (no `/api/`) 302s to `/#/artefacts/:id` so the
-SPA reader mounts directly — pasteable, doesn't leak the API path.
+`/api/conversations/:chat/files/:id` returns the bytes (inline
+`Content-Disposition` for images, `attachment` otherwise).
+`/api/conversations/:chat/artefacts/:id` returns the markdown body and an
+`X-Dyson-Chat-Id` response header so a cold deep-link can restore sidebar
+context without a second round-trip.  Shareable artefact links are the SPA
+deep-link `/#/artefacts/:id`.
 
 Ids are mint-only (`f<u64>` / `a<u64>`); `safe_store_id` rejects
 anything outside `[A-Za-z0-9_-]` so `%2F../etc/passwd` after URL
@@ -722,7 +722,7 @@ flowchart TB
     cs["createStore.js<br>deep-freeze<br>same-ref reducer is no-op"]
     app["app.js<br>conversations, providers,<br>mind, tools, ui"]
     sess["sessions.js<br>per-chat frozen sessions<br>plus resources Map"]
-    cnst["constants.js<br>SLASH_COMMANDS"]
+    cnst["constants.js<br>FALLBACK_SLASH_COMMANDS"]
   end
 
   subgraph hooks[hooks]
@@ -872,7 +872,7 @@ showing the chat across restarts), and emits `done`.  No LLM call.
 | Chat transcript | `{chat_history.connection_string}/{chat_id}/transcript.json` | Persist hook on every message push + canonical save at end of turn |
 | Chat title | `{chat_history.connection_string}/{chat_id}/title.txt` | background title generation and conversation create |
 | Feedback | `{chat_history.connection_string}/{chat_id}/feedback.json` | `POST /feedback` |
-| Workspace files | `{workspace.path}/{file}` | `POST /api/mind/file` or via the agent's `workspace` tool |
+| Workspace files | `{workspace.connection_string}/{file}` | `POST /api/mind/file` or via the agent's `workspace` tool |
 | Files | `{chat_history.connection_string}/files/{id}.bin` + `.meta.json` | Write-through on `Output::send_file` and `BrowserArtefactSink::publish_file_as_artefact` |
 | Artefacts | `{chat_history.connection_string}/{chat_id}/artefacts/{id}.body` + `.meta.json` | Write-through on `Output::send_artefact` |
 | Provider/model | `dyson.json` + in-memory runtime override | `POST /api/model` writes through `persist_model_selection` |

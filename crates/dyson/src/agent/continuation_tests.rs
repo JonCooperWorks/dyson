@@ -1,6 +1,6 @@
 use super::*;
 use crate::agent::continuation::{HumanAction, HumanAnswer, RunCheckpoint, Transition};
-use crate::chat_history::{ChatHistory, DiskChatHistory};
+use dyson_persistence::{ChatHistory, DiskChatHistory};
 
 fn response(calls: &[ToolCall]) -> Vec<StreamEvent> {
     let mut events: Vec<_> = calls

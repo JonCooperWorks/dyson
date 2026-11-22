@@ -17,7 +17,7 @@ struct InstallSkillAdminBody {
     skill: String,
     #[serde(default)]
     force: bool,
-    package: crate::tool::skill_marketplace::SkillBody,
+    package: dyson_common::marketplace::SkillPackageBody,
 }
 
 pub(in super::super) async fn post_skill_install(

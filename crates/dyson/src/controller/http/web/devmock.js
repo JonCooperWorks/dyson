@@ -58,7 +58,7 @@ const MESSAGES = {
         { type: 'tool_result', tool_use_id: 'tu_edit_tokens', is_error: false, content: 'updated 14 hunks in styles/tokens.css' },
         { type: 'tool_use', id: 'tu_edit_layout', name: 'Edit', input: { path: 'styles/layout.css' } },
         { type: 'tool_result', tool_use_id: 'tu_edit_layout', is_error: false, content: 'updated 22 hunks in styles/layout.css' },
-        { type: 'text', text: "I bumped the panel rounding, added a subtle aurora layer behind the transcript, gave the accent a soft halo, and reworked the composer with a focus glow.\n\n```css\n.composer:focus-within {\n  border-color: var(--accent-ln);\n  box-shadow:\n    0 0 0 1px var(--accent-ln),\n    0 0 32px -8px oklch(0.88 0.22 130 / 0.35),\n    0 12px 32px -12px oklch(0 0 0 / 0.6);\n}\n```\n\n> The aurora is a single fixed `radial-gradient` layer — zero JS, one composited paint. Animation is on `background-position`, GPU-only." },
+        { type: 'text', text: "I bumped the panel rounding, added a subtle aurora layer behind the transcript, gave the accent a soft halo, and reworked the composer with a focus glow.\n\n```css\n.composer:focus-within {\n  border-color: color-mix(in srgb, var(--accent) 46%, transparent);\n  box-shadow:\n    0 0 0 1px color-mix(in srgb, var(--accent) 46%, transparent),\n    0 0 32px -8px oklch(0.88 0.22 130 / 0.35),\n    0 12px 32px -12px oklch(0 0 0 / 0.6);\n}\n```\n\n> The aurora is a single fixed `radial-gradient` layer — zero JS, one composited paint. Animation is on `background-position`, GPU-only." },
         { type: 'tool_use', id: 'tu_bash_build', name: 'Bash', input: { command: 'cd web && npm run build' } },
         { type: 'tool_result', tool_use_id: 'tu_bash_build', is_error: false, content: 'built dist/ in 4.2s — 318 KB total' },
       ],
@@ -254,16 +254,7 @@ const ARTEFACTS = {
         findings_rollup: SECURITY_REPORT_DOC.summary,
       },
       // Markdown fallback body, shown only if the report doc fails to load.
-      body: '# Security Harness Report: vuln-demo\n\n(legacy markdown fallback)\n',
-    },
-    {
-      id: 'mock-legacy-report',
-      kind: 'security_review',
-      title: 'Security harness: legacy-run (no doc)',
-      bytes: 900,
-      // No report_path: a pre-doc artefact must keep rendering as markdown.
-      metadata: { run_id: 'sec-old', model: 'claude-opus-4-7', target_name: 'legacy-run' },
-      body: '# Security Harness Report: legacy-run\n\nThis pre-doc artefact renders as **markdown**.\n',
+      body: '# Security Harness Report: vuln-demo\n\n(markdown fallback)\n',
     },
     {
       id: 'mock-screenshot-result',
@@ -271,7 +262,7 @@ const ARTEFACTS = {
       title: 'screenshot_result.txt',
       bytes: 13,
       metadata: {
-        file_url: '/api/files/mock-screenshot-result',
+        file_url: '/api/conversations/sec-audit/files/mock-screenshot-result',
         file_name: 'screenshot_result.txt',
         mime_type: 'text/plain; charset=utf-8',
         bytes: 172,
@@ -432,23 +423,9 @@ export function dysonMock() {
           res.end(art.body || art.metadata?.file_url || '');
           return;
         }
-        const globalArtMatch = url.match(/^\/api\/artefacts\/([^/?]+)$/);
-        if (globalArtMatch && req.method === 'GET') {
-          const id = decodeURIComponent(globalArtMatch[1]);
-          for (const [chat, list] of Object.entries(ARTEFACTS)) {
-            const art = list.find(a => a.id === id);
-            if (!art) continue;
-            res.statusCode = 200;
-            res.setHeader('content-type', 'text/plain; charset=utf-8');
-            res.setHeader('X-Dyson-Chat-Id', chat);
-            res.end(art.metadata?.file_url || '');
-            return;
-          }
-          return json(res, { error: 'not found' }, 404);
-        }
-        const fileMatch = url.match(/^\/api\/files\/([^/?]+)$/);
+        const fileMatch = url.match(/^\/api\/conversations\/([^/?]+)\/files\/([^/?]+)$/);
         if (fileMatch && req.method === 'GET') {
-          const id = decodeURIComponent(fileMatch[1]);
+          const id = decodeURIComponent(fileMatch[2]);
           if (!(id in FILES)) return json(res, { error: 'not found' }, 404);
           res.statusCode = 200;
           res.setHeader('content-type', 'text/plain; charset=utf-8');

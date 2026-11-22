@@ -18,7 +18,6 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
-use dyson::ast;
 use dyson::tool::security::ast_query::execute_query_string;
 
 struct Target {
@@ -333,7 +332,7 @@ fn main() {
     // drift.  Compilation failure is a hard error.
     println!("═══ query compile-check pass ═══");
     for t in targets {
-        let config = match ast::config_for_language_name(t.language) {
+        let config = match dyson_ast::config_for_language_name(t.language) {
             Some(c) => c,
             None => {
                 totals.errors += 1;
@@ -455,7 +454,7 @@ fn shallow_clone(slug: &str, dest: &Path) -> Result<(), String> {
 }
 
 fn run_repo(t: &Target, path: &Path, totals: &mut Totals) -> Result<(), String> {
-    let config = ast::config_for_language_name(t.language)
+    let config = dyson_ast::config_for_language_name(t.language)
         .ok_or_else(|| format!("unknown language: {}", t.language))?;
 
     let started = Instant::now();

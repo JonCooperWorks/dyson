@@ -38,10 +38,10 @@ use cedar_policy::{
 };
 
 use crate::config::{CedarConfig, CedarMode};
-use crate::error::Result;
 use crate::sandbox::policy_sandbox::redact_secrets;
 use crate::sandbox::{Sandbox, SandboxBypassGuard, SandboxDecision};
 use crate::tool::{ToolContext, ToolOutput};
+use dyson_core::error::Result;
 
 const SCHEMA: &str = include_str!("cedar/tools.cedarschema");
 const DEFAULT_POLICIES: &str = include_str!("cedar/default.cedar");

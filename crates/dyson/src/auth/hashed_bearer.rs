@@ -18,7 +18,7 @@ use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use async_trait::async_trait;
 
 use crate::auth::{Auth, AuthInfo};
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 /// Bearer-token auth that compares against a stored Argon2id hash.
 ///

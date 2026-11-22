@@ -4,10 +4,8 @@ use super::super::{
     state::HttpState,
     wire::MAX_SMALL_BODY,
 };
-use crate::agent::{
-    continuation::{HumanAnswer, RunCheckpoint, RunState},
-    protocol::RunId,
-};
+use crate::agent::continuation::{HumanAnswer, RunCheckpoint, RunState};
+use dyson_harness::protocol::RunId;
 use hyper::Request;
 use std::sync::Arc;
 

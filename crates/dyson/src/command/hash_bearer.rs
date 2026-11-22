@@ -16,11 +16,11 @@
 // ===========================================================================
 
 use dyson::auth::HashedBearerAuth;
-use dyson::error::Result;
+use dyson_core::error::Result;
 
 pub fn run(plaintext: String) -> Result<()> {
     if plaintext.is_empty() {
-        return Err(dyson::error::DysonError::Config(
+        return Err(dyson_core::error::DysonError::Config(
             "hash-bearer: refuse to hash an empty token".into(),
         ));
     }

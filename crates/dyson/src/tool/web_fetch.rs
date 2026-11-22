@@ -22,8 +22,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use dyson_core::error::{DysonError, Result};
 
 /// Default maximum characters in extracted text output.
 const DEFAULT_MAX_LENGTH: usize = 50_000;

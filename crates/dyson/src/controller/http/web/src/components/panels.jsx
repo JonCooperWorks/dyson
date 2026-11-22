@@ -160,7 +160,7 @@ function SbomPanel({ rows, counts }) {
   return (
     <div className="p-body flush">
       {clean ? (
-        <div style={{padding:'20px 16px', color:'var(--mute)', fontSize:12, lineHeight:1.5}}>
+        <div style={{padding:'20px 16px', color:'var(--fg-faint)', fontSize:12, lineHeight:1.5}}>
           No known vulnerabilities across <strong style={{color:'var(--fg)'}}>{total.toLocaleString()}</strong> {total === 1 ? 'dependency' : 'dependencies'}.
         </div>
       ) : (
@@ -170,8 +170,8 @@ function SbomPanel({ rows, counts }) {
             {rows.map((r, i) => (
               <tr key={i}>
                 <td className="sev"><span className={`b ${r.sev === 'high' ? 'high' : r.sev === 'med' ? 'med' : r.sev === 'low' ? 'low' : r.sev === 'crit' ? 'crit' : ''}`}>{r.sev}</span></td>
-                <td><span className="pkg">{r.pkg}</span> <span className="ver">{r.ver}</span><div style={{color:'var(--mute)',fontSize:10.5,marginTop:3}}>{r.note}</div></td>
-                <td style={{color:'var(--mute-2)'}}>{r.id}</td>
+                <td><span className="pkg">{r.pkg}</span> <span className="ver">{r.ver}</span><div style={{color:'var(--fg-faint)',fontSize:10.5,marginTop:3}}>{r.note}</div></td>
+                <td style={{color:'var(--fg-muted)'}}>{r.id}</td>
                 <td><span className={`reach ${r.reach==='unreachable'?'no':''}`}>{r.reach}</span></td>
               </tr>
             ))}
@@ -180,13 +180,13 @@ function SbomPanel({ rows, counts }) {
       )}
       <div className="sbom-foot">
         <span>{total.toLocaleString()} {total === 1 ? 'crate' : 'crates'}</span>
-        {crit > 0 && <span style={{color:'var(--err)'}}>{crit} crit</span>}
-        {high > 0 && <span style={{color:'var(--err)'}}>{high} high</span>}
+        {crit > 0 && <span style={{color:'var(--danger)'}}>{crit} crit</span>}
+        {high > 0 && <span style={{color:'var(--danger)'}}>{high} high</span>}
         {med > 0 && <span style={{color:'var(--warn)'}}>{med} med</span>}
         {low > 0 && <span>{low} low</span>}
         {clean && <span style={{color:'var(--ok, var(--fg))'}}>✓ clean</span>}
         <span style={{flex:1}}/>
-        {reachable > 0 && <span style={{color:'var(--mute)'}}>{reachable} reachable</span>}
+        {reachable > 0 && <span style={{color:'var(--fg-faint)'}}>{reachable} reachable</span>}
       </div>
     </div>
   );
@@ -201,7 +201,7 @@ function TaintPanel({ flow }) {
             <div className={`node ${n.kind}`}>
               <span className="ic">{n.kind === 'source' ? 'S' : n.kind === 'sink' ? '!' : '·'}</span>
               <div className="col">
-                <div className="loc">{n.loc} <span style={{color:'var(--mute)',marginLeft:6}}>{n.sym}</span></div>
+                <div className="loc">{n.loc} <span style={{color:'var(--fg-faint)',marginLeft:6}}>{n.sym}</span></div>
                 <div className="sym">{n.note}</div>
               </div>
             </div>
@@ -235,7 +235,7 @@ function SubagentPanel({ children, summary, running }) {
   return (
     <div className="p-body flush" style={{overflow:'auto', flex:1}}>
       {list.length === 0 && (
-        <div style={{padding:'16px', color:'var(--mute)', fontSize:12}}>
+        <div style={{padding:'16px', color:'var(--fg-faint)', fontSize:12}}>
           {running ? 'Subagent starting…' : 'Subagent ran without inner tool calls.'}
         </div>
       )}
@@ -256,8 +256,8 @@ function SubagentPanel({ children, summary, running }) {
         </div>
       ))}
       {summary && (
-        <div style={{padding:'12px 14px', borderTop:'1px solid var(--line)',
-                     fontSize:12, lineHeight:1.55, color:'var(--fg-dim)',
+        <div style={{padding:'12px 14px', borderTop:'1px solid var(--border)',
+                     fontSize:12, lineHeight:1.55, color:'var(--fg-muted)',
                      whiteSpace:'pre-wrap'}}>
           {summary}
         </div>
@@ -539,17 +539,17 @@ function StageBar({ status }) {
   const PREFIX = { running: '▸ ', done: '✓ ', errored: '✕ ', pending: '' };
   return (
     <div style={{display:'flex', gap:4, padding:'10px 12px',
-                 borderBottom:'1px solid var(--line)',
+                 borderBottom:'1px solid var(--border)',
                  background:'var(--bg-1)'}}>
       {HARNESS_STAGES.map((s, i) => {
         const st = status[i];
         const bg = st === 'done' ? 'var(--ok, #2c7a3a)'
                  : st === 'running' ? 'var(--accent, #4a9eff)'
-                 : st === 'errored' ? 'var(--err, #b91c1c)'
+                 : st === 'errored' ? 'var(--danger)'
                  : 'transparent';
-        const fg = st === 'pending' ? 'var(--mute)' : 'var(--fg)';
+        const fg = st === 'pending' ? 'var(--fg-faint)' : 'var(--fg)';
         const border = st === 'pending'
-          ? '1px dashed var(--line)'
+          ? '1px dashed var(--border)'
           : '1px solid transparent';
         const decoration = st === 'errored' ? 'line-through' : 'none';
         const cellClass = st === 'running' ? 'dyson-harness-cell-running' : '';
@@ -588,8 +588,8 @@ function InitializingStrip() {
   return (
     <div className="dyson-harness-init-row"
          style={{padding:'6px 12px', fontSize:11,
-                 color:'var(--fg-dim)', borderBottom:'1px solid var(--line)',
-                 letterSpacing:0.3, fontFamily:'var(--font-mono)'}}>
+                 color:'var(--fg-muted)', borderBottom:'1px solid var(--border)',
+                 letterSpacing:0.3, fontFamily:'var(--mono)'}}>
       harness initializing — loading checkpoint, choosing first stage…
     </div>
   );
@@ -601,9 +601,9 @@ function FindingsCounter({ findings, total }) {
   if (!total) return null;
   return (
     <div style={{display:'flex', gap:14, padding:'8px 12px',
-                 borderBottom:'1px solid var(--line)',
+                 borderBottom:'1px solid var(--border)',
                  background:'var(--bg)',
-                 fontSize:12, color:'var(--fg-dim)',
+                 fontSize:12, color:'var(--fg-muted)',
                  alignItems:'baseline'}}>
       <span style={{fontWeight:600, color:'var(--fg)'}}>
         {total} {total === 1 ? 'finding' : 'findings'}
@@ -639,9 +639,9 @@ function ClassGrid({ classStatus }) {
   entries.sort(([, a], [, b]) =>
     (priority[a.status] ?? 9) - (priority[b.status] ?? 9));
   return (
-    <div style={{padding:'8px 12px', borderBottom:'1px solid var(--line)',
+    <div style={{padding:'8px 12px', borderBottom:'1px solid var(--border)',
                  background:'var(--bg)'}}>
-      <div style={{fontSize:10, letterSpacing:0.5, color:'var(--mute)',
+      <div style={{fontSize:10, letterSpacing:0.5, color:'var(--fg-faint)',
                    textTransform:'uppercase', marginBottom:6}}>
         Class coverage ({entries.length}/24 reported)
       </div>
@@ -657,11 +657,11 @@ function ClassGrid({ classStatus }) {
                  style={{
                    padding:'4px 8px', borderRadius:3, fontSize:10,
                    background: bg,
-                   color:'var(--fg-dim)',
-                   border:'1px solid var(--line)',
+                   color:'var(--fg-muted)',
+                   border:'1px solid var(--border)',
                    opacity,
                    display:'flex', justifyContent:'space-between', alignItems:'center',
-                   fontFamily:'var(--font-mono)',
+                   fontFamily:'var(--mono)',
                  }}>
               <span style={{overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
                 {cls}
@@ -682,16 +682,16 @@ function ClassGrid({ classStatus }) {
 // Header — run_id, resume / completed / failed badges, error banner.
 function HarnessHeader({ runId, resumed, completed, errored, errorText, summary, failedAtStage }) {
   return (
-    <div style={{padding:'10px 12px', borderBottom:'1px solid var(--line)',
-                 fontSize:11, color:'var(--fg-dim)', background:'var(--bg)'}}>
+    <div style={{padding:'10px 12px', borderBottom:'1px solid var(--border)',
+                 fontSize:11, color:'var(--fg-muted)', background:'var(--bg)'}}>
       <div style={{display:'flex', alignItems:'center', gap:10, flexWrap:'wrap'}}>
-        <span style={{fontFamily:'var(--font-mono)', color:'var(--fg)', fontSize:12}}>
+        <span style={{fontFamily:'var(--mono)', color:'var(--fg)', fontSize:12}}>
           {runId || '(no run id yet)'}
         </span>
         {resumed && (
           <span style={{fontSize:10, padding:'2px 7px', borderRadius:3,
-                        background:'var(--bg-1)', border:'1px solid var(--line)',
-                        color:'var(--fg-dim)', letterSpacing:0.3}}>
+                        background:'var(--bg-1)', border:'1px solid var(--border)',
+                        color:'var(--fg-muted)', letterSpacing:0.3}}>
             resumed
           </span>
         )}
@@ -704,7 +704,7 @@ function HarnessHeader({ runId, resumed, completed, errored, errorText, summary,
         )}
         {errored && (
           <span style={{fontSize:10, padding:'2px 7px', borderRadius:3,
-                        background:'var(--err, #b91c1c)', color:'var(--fg)',
+                        background:'var(--danger)', color:'var(--fg)',
                         fontWeight:600, letterSpacing:0.3}}>
             {failedAtStage ? `failed at ${STAGE_LABEL[failedAtStage]}` : 'failed'}
           </span>
@@ -714,12 +714,12 @@ function HarnessHeader({ runId, resumed, completed, errored, errorText, summary,
         <div style={{marginTop:8, padding:'8px 10px', borderRadius:4,
                      background:'var(--err-dim, #4a1f1f)', color:'var(--fg)',
                      fontSize:11, lineHeight:1.5, whiteSpace:'pre-wrap',
-                     borderLeft:'3px solid var(--err, #b91c1c)'}}>
+                     borderLeft:'3px solid var(--danger)'}}>
           {errorText}
         </div>
       )}
       {summary && !errorText && (
-        <div style={{marginTop:6, fontSize:11, color:'var(--fg-dim)',
+        <div style={{marginTop:6, fontSize:11, color:'var(--fg-muted)',
                      whiteSpace:'pre-wrap'}}>
           {summary}
         </div>
@@ -774,12 +774,12 @@ function SecurityHarnessPanel({ body, exit, running, summary, errorText }) {
 function ReadPanel({ path, lines }) {
   return (
     <div className="p-body flush" style={{background:'var(--bg)'}}>
-      <div style={{padding:'8px 12px', borderBottom:'1px solid var(--line)', fontFamily:'var(--font-mono)', fontSize:11, color:'var(--mute)'}}>{path}</div>
-      <div style={{fontFamily:'var(--font-mono)', fontSize:11.5, lineHeight:1.6, padding:'8px 0'}}>
+      <div style={{padding:'8px 12px', borderBottom:'1px solid var(--border)', fontFamily:'var(--mono)', fontSize:11, color:'var(--fg-faint)'}}>{path}</div>
+      <div style={{fontFamily:'var(--mono)', fontSize:11.5, lineHeight:1.6, padding:'8px 0'}}>
         {lines.map((l, i) => (
           <div key={i} style={{display:'flex', padding:'0 12px 0 0'}}>
-            <span style={{color:'var(--mute)', width:32, textAlign:'right', paddingRight:10, flex:'0 0 auto', userSelect:'none'}}>{i+1}</span>
-            <span style={{color:'var(--fg-dim)', whiteSpace:'pre'}}>{l || ' '}</span>
+            <span style={{color:'var(--fg-faint)', width:32, textAlign:'right', paddingRight:10, flex:'0 0 auto', userSelect:'none'}}>{i+1}</span>
+            <span style={{color:'var(--fg-muted)', whiteSpace:'pre'}}>{l || ' '}</span>
           </div>
         ))}
       </div>
@@ -797,14 +797,14 @@ function ThinkingPanel({ text, running }) {
     if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
   }, [text]);
   if (!text && !running) {
-    return <div style={{padding:16, color:'var(--mute)', fontSize:12}}>No reasoning yet.</div>;
+    return <div style={{padding:16, color:'var(--fg-faint)', fontSize:12}}>No reasoning yet.</div>;
   }
   return (
     <div ref={bodyRef}
          style={{overflowY:'auto', flex:1, padding:'12px 14px',
                  fontFamily:'ui-monospace, SFMono-Regular, Menlo, monospace',
                  fontSize:12, lineHeight:1.55, whiteSpace:'pre-wrap',
-                 color:'var(--fg-dim)', background:'var(--bg)'}}>
+                 color:'var(--fg-muted)', background:'var(--bg)'}}>
       {text || ''}
       {running && <span style={{color:'var(--accent)', marginLeft:4}}>▍</span>}
     </div>
@@ -815,7 +815,7 @@ function ThinkingPanel({ text, running }) {
 // tool stack so it's visible alongside the tool call that produced it.
 function ImagePanel({ url, name, prompt }) {
   if (!url) {
-    return <div style={{padding:16, color:'var(--mute)', fontSize:12}}>No image URL.</div>;
+    return <div style={{padding:16, color:'var(--fg-faint)', fontSize:12}}>No image URL.</div>;
   }
   return (
     <div style={{overflow:'auto', flex:1, padding:14, display:'flex',
@@ -829,7 +829,7 @@ function ImagePanel({ url, name, prompt }) {
       </a>
       {prompt && (
         <div style={{alignSelf:'stretch', fontSize:12, lineHeight:1.4,
-                     color:'var(--fg-dim)', fontStyle:'italic'}}>
+                     color:'var(--fg-muted)', fontStyle:'italic'}}>
           {prompt}
         </div>
       )}

@@ -34,8 +34,8 @@ use std::path::Path;
 
 use crate::config::Settings;
 use crate::controller::{CommandResult, Output, ProviderInfo, ReloadOutcome};
-use crate::error::DysonError;
 use crate::tool::ToolOutput;
+use dyson_core::error::DysonError;
 
 /// Render a `CommandResult` for the terminal.
 fn render_command_result_terminal(result: &CommandResult) {
@@ -121,7 +121,7 @@ impl super::Controller for TerminalController {
         &self,
         settings: &Settings,
         registry: &std::sync::Arc<super::ClientRegistry>,
-    ) -> crate::Result<()> {
+    ) -> dyson_core::error::Result<()> {
         let mut current_settings = settings.clone();
 
         let client_handle = registry.get_default();
@@ -334,7 +334,10 @@ impl Output for TerminalOutput {
         Ok(())
     }
 
-    fn send_artefact(&mut self, artefact: &crate::message::Artefact) -> Result<(), DysonError> {
+    fn send_artefact(
+        &mut self,
+        artefact: &dyson_core::message::Artefact,
+    ) -> Result<(), DysonError> {
         // The terminal has no artefact panel — print a terse notice so
         // the user knows the report was emitted and how big it is.  The
         // full content is still in ToolOutput.content above, so a user

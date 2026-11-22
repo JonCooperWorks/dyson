@@ -13,11 +13,11 @@ use async_trait::async_trait;
 
 use crate::agent::rate_limiter::RateLimitedHandle;
 use crate::config::{AgentSettings, LlmProvider};
-use crate::error::{DysonError, Result};
 use crate::llm::LlmClient;
 use crate::sandbox::Sandbox;
 use crate::skill::Skill;
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use dyson_core::error::{DysonError, Result};
 
 use super::Advisor;
 

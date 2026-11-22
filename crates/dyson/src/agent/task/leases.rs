@@ -1,8 +1,6 @@
 //! Process-wide leases cover independent conversations and nested tool execution.
-use crate::{
-    error::{DysonError, Result},
-    tool::{ResourceAccess, ResourceClaim, ToolContext, ToolExecutionPlan},
-};
+use crate::tool::{ResourceAccess, ResourceClaim, ToolContext, ToolExecutionPlan};
+use dyson_core::error::{DysonError, Result};
 use std::sync::{
     Mutex, OnceLock,
     atomic::{AtomicU64, Ordering},

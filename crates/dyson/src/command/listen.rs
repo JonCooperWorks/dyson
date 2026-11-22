@@ -28,9 +28,9 @@ use dyson::controller::Controller;
 
 fn build_controllers(
     settings: &dyson::config::Settings,
-) -> dyson::error::Result<Vec<Box<dyn Controller>>> {
+) -> dyson_core::error::Result<Vec<Box<dyn Controller>>> {
     if settings.controllers.is_empty() {
-        return Err(dyson::error::DysonError::Config(
+        return Err(dyson_core::error::DysonError::Config(
             "no controllers configured.  Add a controller to the \"controllers\" array in dyson.json.\n\
              Use 'dyson run \"prompt\"' for single-shot mode."
                 .into(),
@@ -64,7 +64,7 @@ fn build_controllers(
     }
 
     if controllers.is_empty() {
-        return Err(dyson::error::DysonError::Config(
+        return Err(dyson_core::error::DysonError::Config(
             "no valid controllers could be created from the configuration".into(),
         ));
     }
@@ -78,7 +78,7 @@ pub async fn run(
     provider: Option<String>,
     base_url: Option<String>,
     workspace: Option<String>,
-) -> dyson::error::Result<()> {
+) -> dyson_core::error::Result<()> {
     let config_path = super::resolve_config_path(config);
 
     let mut settings = dyson::config::loader::load_settings(config_path.as_deref())?;

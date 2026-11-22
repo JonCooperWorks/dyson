@@ -29,7 +29,7 @@ pub(super) async fn list(state: &HttpState) -> Resp {
     json_ok(&serde_json::json!({ "pending": pending }))
 }
 
-fn durable_pending(state: &HttpState) -> crate::Result<Vec<serde_json::Value>> {
+fn durable_pending(state: &HttpState) -> dyson_core::error::Result<Vec<serde_json::Value>> {
     let mut pending = Vec::new();
     if let Some(store) = &state.history {
         for chat in store.list_harness_chats()? {
@@ -51,7 +51,7 @@ fn durable_pending(state: &HttpState) -> crate::Result<Vec<serde_json::Value>> {
 /// newest `RunSuspended` event of the checkpoint's run.  Best-effort; a
 /// journal that can't be read just leaves `asked_at` out.
 fn suspended_at(
-    store: &dyn crate::chat_history::ChatHistory,
+    store: &dyn dyson_persistence::ChatHistory,
     chat: &str,
     record: &RunCheckpoint,
 ) -> Option<u64> {
@@ -63,7 +63,7 @@ fn suspended_at(
             e.run_id == record.cursor.run_id
                 && matches!(
                     e.kind,
-                    crate::agent::protocol::RunEventKind::RunSuspended { .. }
+                    dyson_harness::protocol::RunEventKind::RunSuspended { .. }
                 )
         })
         .and_then(|e| u64::try_from(e.unix_ms / 1000).ok())

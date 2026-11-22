@@ -1,8 +1,6 @@
 //! Account-visible native subscription model catalogues.
 //!
-//! These are shared by the immutable Swarm boot config and the runtime
-//! configure path. Keeping both paths on one source of truth matters because
-//! an instance's `dyson.json` can outlive the image that wrote it.
+//! `dyson swarm` writes these into every boot's dyson.json.
 
 /// Models returned by Codex's authenticated `model/list` response.
 pub const CHATGPT: &[&str] = &[

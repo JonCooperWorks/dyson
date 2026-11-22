@@ -1,10 +1,10 @@
 # dyson-persistence src
 
 ## Overview
-This crate stores durable per-chat conversation history and the per-chat execution journal. It defines the `ChatHistory` trait, a disk backend (`DiskChatHistory`) that keeps one directory per chat, a coalescing background checkpointer, and a versioned migration for the chats directory layout ([lib.rs:module comment], [disk.rs:module comment]).
+This crate stores durable per-chat conversation history and the per-chat execution journal. It defines the `ChatHistory` trait, a disk backend (`DiskChatHistory`) that keeps one directory per chat, a coalescing background checkpointer, and a `.chats_version` guard for the chats directory layout ([lib.rs:module comment], [disk.rs:module comment]).
 
 ## Interface
-- Modules and re-exports: `pub mod disk`, `pub mod migrate`, `pub use coalesce::CoalescingPersister`, `pub use disk::DiskChatHistory` ([lib.rs]).
+- Modules and re-exports: `pub mod disk`, `pub use coalesce::CoalescingPersister`, `pub use disk::DiskChatHistory` ([lib.rs]).
 - `trait ChatHistory: Send + Sync` ([lib.rs:ChatHistory]):
   - Required methods: `save(chat_id, &[Message])`, `load(chat_id) -> Vec<Message>` and `rotate(chat_id)`.
   - Defaulted transcript methods: `save_title`, `load_title`, `remove_title`, `remove` and `list`.
@@ -16,7 +16,7 @@ This crate stores durable per-chat conversation history and the per-chat executi
   - `schedule(Vec<Message>)`: non-blocking, latest snapshot wins.
   - `async flush()`.
   - `async checkpoint(Vec<Message>)`: schedule plus flush.
-- `migrate::migrate(dir) -> Result<bool>` and `migrate::CURRENT_CHATS_VERSION` (1) ([migrate.rs:migrate]).
+- `disk::CHATS_VERSION` (1) ([disk.rs:CHATS_VERSION]).
 
 ## Invariants
 - On-disk layout under `{dir}/{chat_id}/` ([disk.rs]):
@@ -43,19 +43,15 @@ This crate stores durable per-chat conversation history and the per-chat executi
   - Debounces for 100 ms (`DEBOUNCE`) and writes only the newest snapshot.
   - Marks a generation complete even when the save fails, so `flush` cannot hang.
   - The worker exits when the last handle is dropped.
-- `migrate` ([migrate.rs:migrate]):
-  - A version above `CURRENT_CHATS_VERSION` is a `Config` error. A gap in the migration chain is also a `Config` error.
-  - A directory without `.chats_version` starts at v0 only if it contains flat-layout files. Otherwise it starts at the current version.
-  - The v0 to v1 migration steps are `FlattenToPerChatDirs` and `FanOutSharedArtefacts`, and both are idempotent ([migrate.rs:migrations]).
-- `DiskChatHistory::new` logs a migration failure instead of failing construction ([disk.rs:DiskChatHistory::new]).
+- `DiskChatHistory::new` stamps a missing `.chats_version` with `CHATS_VERSION` and fails construction when the marker names another version ([disk.rs:check_or_stamp_version]).
 
 ## Side Effects
 - Disk: creates, writes, renames and removes files and directories under the chats root, and calls fsync on files and directories ([disk.rs]).
-- Disk (migration): `.chats_version` writes, plus file moves that also relocate shared `artefacts/*.meta.json` entries by their `chat_id` ([migrate.rs:write_version], [migrate.rs:fan_out_shared_artefacts]).
+- Disk: writes `.chats_version` when missing ([disk.rs:check_or_stamp_version]).
 - Locks: 64 striped `std::sync::Mutex<()>` journal locks, the `outcomes` cache mutex, and the `CoalescingPersister` snapshot mutex ([disk.rs:DiskChatHistory], [coalesce.rs:Inner]).
 - Async runtime: `tokio::spawn` for the background worker and `spawn_blocking` for `ChatHistory::save`. `CoalescingPersister::new` must be called inside a Tokio runtime ([coalesce.rs:CoalescingPersister::new]).
 - Environment read: `$HOME` for `~` expansion ([lib.rs:resolve_tilde]).
-- Logging: `tracing` warn, info and debug events for migration, save, rotate and checkpoint failures.
+- Logging: `tracing` warn, info and debug events for save, rotate and checkpoint failures.
 
 ## Verification
 - Run: `cargo test -p dyson-persistence` (from `dyson/`)

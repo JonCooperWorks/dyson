@@ -132,13 +132,13 @@ use std::process::Stdio;
 use async_trait::async_trait;
 use tokio::io::AsyncWriteExt;
 
-use crate::error::{DysonError, Result};
 use crate::llm::cli_subprocess::{self, CliLineParser, cli_event_stream};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call};
-use crate::message::Message;
 use crate::tool::Tool;
 use crate::workspace::WorkspaceHandle;
+use dyson_core::error::{DysonError, Result};
+use dyson_core::message::Message;
 
 // ---------------------------------------------------------------------------
 // ClaudeCodeClient

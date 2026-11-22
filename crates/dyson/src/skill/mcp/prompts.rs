@@ -2,9 +2,9 @@
 use super::protocol;
 use super::text::sanitize_mcp_description;
 use super::transport::McpTransport;
-use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use async_trait::async_trait;
+use dyson_core::error::{DysonError, Result};
 use std::sync::Arc;
 
 /// Tool exposing an MCP server's `prompts/list` + `prompts/get` surface.

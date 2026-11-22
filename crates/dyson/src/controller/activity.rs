@@ -13,9 +13,8 @@
 // On-disk layout:
 //   {data_dir}/{chat_id}/activity.jsonl
 //
-// Mirrors the per-chat subdir pattern established by
-// `chat_history::migrate` (commit 9d9973f) and used by the artefact /
-// feedback stores.
+// Mirrors the per-chat subdir layout of `DiskChatHistory` and the
+// artefact / feedback stores.
 //
 // Append-only JSONL.  Each state transition appends a line, so a single
 // run writes two lines (`Running`, then `Ok` / `Err`).  On load we fold

@@ -6,7 +6,7 @@ use crate::config::{SkillConfig, SubagentAgentConfig, SubagentSkillConfig};
 static ANTHROPIC_KEY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
-fn voice_block_is_parsed_and_whisper_is_gone() {
+fn voice_block_is_parsed() {
     let json =
         r#"{ "voice": { "provider": "swarm", "speech_model": "openai/tts-1", "voice": "nova" } }"#;
     let root: JsonRoot = serde_json::from_str(json).unwrap();
@@ -16,10 +16,6 @@ fn voice_block_is_parsed_and_whisper_is_gone() {
     assert_eq!(settings.voice.speech_model.as_deref(), Some("openai/tts-1"));
     assert_eq!(settings.voice.voice.as_deref(), Some("nova"));
     assert_eq!(settings.voice.transcription_model, None);
-    assert!(
-        serde_json::from_str::<JsonRoot>(r#"{ "transcriber": { "provider": "whisper-cli" } }"#)
-            .is_err()
-    );
 }
 
 #[test]
@@ -708,4 +704,44 @@ fn sandbox_cedar_parses_and_unknown_mode_falls_back_to_audit() {
         parse(r#"{"cedar": {"mode": "enforcing"}}"#).unwrap().mode,
         CedarMode::Audit
     );
+}
+
+#[test]
+fn config_version_guard_accepts_only_the_current_version() {
+    let path = std::path::Path::new("dyson.json");
+    let current = crate::config::CONFIG_VERSION;
+
+    let mut ok = serde_json::json!({ "config_version": current, "agent": {} });
+    check_config_version(path, &mut ok).expect("current version loads");
+    assert!(ok.get("config_version").is_none(), "stamp is stripped");
+
+    for bad in [
+        serde_json::json!({ "agent": {} }),
+        serde_json::json!({ "config_version": current - 1, "agent": {} }),
+        serde_json::json!({ "config_version": current + 1 }),
+        serde_json::json!({ "config_version": "3" }),
+    ] {
+        let mut raw = bad;
+        let err = check_config_version(path, &mut raw)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!("reads only config_version {current}")),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn legacy_config_shapes_are_rejected() {
+    for legacy in [
+        r#"{ "workspace": { "path": "~/.dyson" } }"#,
+        r#"{ "providers": { "default": { "type": "anthropic", "model": "x" } } }"#,
+        r#"{ "agent": { "api_key": "k" } }"#,
+    ] {
+        assert!(
+            serde_json::from_str::<JsonRoot>(legacy).is_err(),
+            "{legacy} must not parse"
+        );
+    }
 }

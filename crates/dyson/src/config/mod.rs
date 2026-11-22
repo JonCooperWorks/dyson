@@ -42,7 +42,10 @@
 
 pub mod hot_reload;
 pub mod loader;
-pub mod migrate;
+
+/// The only dyson.json `config_version` this build reads.  A file stamped
+/// with any other version, or with none, is refused at load.
+pub const CONFIG_VERSION: u64 = 3;
 
 // ---------------------------------------------------------------------------
 // Settings — the top-level config struct.

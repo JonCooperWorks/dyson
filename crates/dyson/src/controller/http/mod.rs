@@ -36,11 +36,12 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 
 use crate::auth::{Auth, DangerousNoAuth, HashedBearerAuth, OidcAuth};
-use crate::chat_history::{ChatHistory, create_chat_history};
+use crate::chat_history::create_chat_history;
 use crate::config::{ControllerConfig, Settings};
-use crate::error::DysonError;
 use crate::feedback::FeedbackStore;
 use crate::util::resolve_tilde;
+use dyson_core::error::DysonError;
+use dyson_persistence::ChatHistory;
 
 use super::{AgentMode, ClientRegistry, Controller, Output, build_agent};
 
@@ -285,7 +286,11 @@ impl Controller for HttpController {
         "http"
     }
 
-    async fn run(&self, settings: &Settings, registry: &Arc<ClientRegistry>) -> crate::Result<()> {
+    async fn run(
+        &self,
+        settings: &Settings,
+        registry: &Arc<ClientRegistry>,
+    ) -> dyson_core::error::Result<()> {
         // Build the live auth + its public-discovery shape.  For OIDC
         // we run `.well-known/openid-configuration` here, in async
         // land, so a misconfigured issuer fails the controller start
@@ -535,7 +540,9 @@ impl Controller for HttpController {
 /// certificate to `~/.dyson/acme/<domain>/`; spawns the renewal /
 /// fetch task so the cert rotates well before expiry.  Returns an
 /// acceptor the accept loop wraps every TCP stream in.
-async fn build_acme_acceptor(cfg: &HttpTlsConfig) -> crate::Result<tokio_rustls::TlsAcceptor> {
+async fn build_acme_acceptor(
+    cfg: &HttpTlsConfig,
+) -> dyson_core::error::Result<tokio_rustls::TlsAcceptor> {
     use rustls_acme::AcmeConfig;
     use rustls_acme::caches::DirCache;
     use std::sync::Arc;
@@ -544,7 +551,7 @@ async fn build_acme_acceptor(cfg: &HttpTlsConfig) -> crate::Result<tokio_rustls:
     // a `~/.dyson` snapshot captures everything needed to restart.
     let cache_dir = crate::util::resolve_tilde("~/.dyson/acme");
     if let Err(e) = std::fs::create_dir_all(&cache_dir) {
-        return Err(crate::DysonError::Config(format!(
+        return Err(dyson_core::error::DysonError::Config(format!(
             "cannot create acme cache dir {}: {e}",
             cache_dir.display()
         )));
@@ -600,7 +607,7 @@ async fn serve_loop(
     state: Arc<HttpState>,
     listener: TcpListener,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-) -> crate::Result<()> {
+) -> dyson_core::error::Result<()> {
     // Cap simultaneous in-flight connections so a misbehaving client
     // (or a runaway test) can't exhaust file descriptors / RAM.  1024
     // is generous for a single-operator deployment but small enough
@@ -704,16 +711,20 @@ mod tests {
         // plugin — that's what lets us skip the render-blocking CSS
         // round-trip on cold paint.  So the contract here is (a) a JS
         // chunk exists and (b) the HTML carries the stylesheet rules
-        // directly, NOT as a separate .css asset.
-        let has_js = assets::ASSETS
-            .iter()
-            .any(|(p, _, ct)| p.ends_with(".js") && ct.starts_with("application/javascript"));
-        let has_standalone_css = assets::ASSETS.iter().any(|(p, _, _)| p.ends_with(".css"));
+        // directly, NOT as a separate .css asset.  Checked the way a
+        // browser sees it: follow index.html's references through `lookup`.
         let (html_bytes, _) = assets::lookup("/").expect("/ must serve index.html");
         let html = std::str::from_utf8(html_bytes).unwrap();
-        assert!(has_js, "bundle must ship at least one JS chunk");
+        let entry_js = html
+            .split("src=\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .find(|src| src.ends_with(".js"))
+            .expect("index.html must reference a JS entry chunk");
+        let (_, js_ct) = assets::lookup(entry_js).expect("JS entry chunk must be embedded");
+        assert!(js_ct.starts_with("application/javascript"));
         assert!(
-            !has_standalone_css,
+            !html.contains("rel=\"stylesheet\""),
             "CSS should be inlined into index.html, not shipped as a separate chunk"
         );
         assert!(

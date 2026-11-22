@@ -14,13 +14,12 @@
 
 use std::sync::Arc;
 
-use hyper::body::Bytes;
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{Method, Request};
 
 use super::responses::{
-    Resp, apply_security_headers, boxed, client_accepts_gzip, get_auth_config, maybe_gzip,
-    method_not_allowed, misdirected_request, not_found, read_json_capped, safe_store_id,
-    service_unavailable, unauthorized, url_decode_strict,
+    Resp, apply_security_headers, client_accepts_gzip, get_auth_config, maybe_gzip,
+    method_not_allowed, misdirected_request, not_found, read_json_capped, service_unavailable,
+    unauthorized, url_decode_strict,
 };
 use super::state::HttpState;
 
@@ -133,7 +132,7 @@ async fn authorize_route(
         return Some(misdirected_request());
     }
     // Only these handlers independently validate X-Swarm-Configure. Never
-    // exempt cost-backfill or arbitrary /api/admin paths from bearer auth.
+    // exempt arbitrary /api/admin paths from bearer auth.
     let configure_admin = matches!(
         state.effective_auth_mode(),
         super::wire::AuthMode::SwarmBearer
@@ -218,7 +217,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         return get_auth_config(&state);
     }
 
-    // SSE bearer-in-URL was the older (sin) shape: a real OIDC token
+    // SSE auth never puts a bearer in the URL, where a real OIDC token
     // would survive in browser history / proxy logs.  Tickets are
     // single-use, identity-bound, and 30-second-lived — the SPA
     // exchanges its bearer at this endpoint and the controller hands
@@ -318,39 +317,6 @@ async fn dispatch_route(
         // See routes/admin.rs.
         (_, ["api", "admin", rest @ ..]) => dispatch_admin(req, &state, method, rest).await,
 
-        // ─── files & artefacts ─────────────────────────────────────────
-        // Strict decode here — these ids feed `safe_store_id` which
-        // refuses anything outside `[A-Za-z0-9_-]`.  A malformed
-        // percent-escape that the lossy `url_decode` would silently
-        // pass through as `%ZZ` should 404 instead.
-        (&Method::GET, ["api", "files", id]) => match url_decode_strict(id) {
-            Some(_) => not_found(),
-            None => not_found(),
-        },
-        (&Method::GET, ["api", "artefacts", id]) => match url_decode_strict(id) {
-            Some(_) => not_found(),
-            None => not_found(),
-        },
-        // Naked `/artefacts/<id>` is a shareable permalink: bounce it
-        // to `#/artefacts/<id>` so the SPA reader opens with it
-        // selected.  Keeps the URL short and doesn't leak the API
-        // path that serves the bytes.
-        (&Method::GET, ["artefacts", id]) => {
-            let id = match url_decode_strict(id) {
-                Some(id) => id,
-                None => return not_found(),
-            };
-            if !safe_store_id(&id) {
-                return not_found();
-            }
-            Response::builder()
-                .status(StatusCode::FOUND)
-                .header("Location", format!("/#/artefacts/{id}"))
-                .header("Cache-Control", "no-cache")
-                .body(boxed(Bytes::new()))
-                .unwrap()
-        }
-
         // ─── static shell + fallback ───────────────────────────────────
         (&Method::GET, _) => static_assets::serve(path).await,
         _ if is_api_path => method_not_allowed(),
@@ -372,9 +338,7 @@ async fn dispatch_conversations(
         (&Method::POST, [id, "turn"]) => turns::post(req, state, id).await,
         (&Method::GET, [id, "run"]) => runs::get(&state, id).await,
         (&Method::POST, [id, "pause"]) => runs::pause(req, &state, id).await,
-        (&Method::POST, [id, "resume"]) | (&Method::POST, [id, "signal"]) => {
-            runs::resume(req, state, id).await
-        }
+        (&Method::POST, [id, "resume"]) => runs::resume(req, state, id).await,
         (&Method::POST, [id, "cancel"]) => conversations::cancel(&state, id).await,
         (&Method::GET, [id, "recovery"]) => recovery::get(&state, id).await,
         (&Method::POST, [id, "recovery"]) => recovery::post(req, &state, id).await,
@@ -442,7 +406,6 @@ async fn dispatch_admin(
         (&Method::POST, ["quiesce"]) => admin::post_quiesce(req, state).await,
         (&Method::POST, ["unquiesce"]) => admin::post_unquiesce(req, state).await,
         (&Method::GET, ["skills"]) => admin::get_skills(req, state).await,
-        (&Method::POST, ["cost-backfill"]) => admin::post_cost_backfill(req, state).await,
         _ => method_not_allowed(),
     }
 }
@@ -653,8 +616,6 @@ mod tests {
             segs("/api/conversations/c-1/events"),
             vec!["api", "conversations", "c-1", "events"],
         );
-        // /artefacts redirect path uses two segments.
-        assert_eq!(segs("/artefacts/a1"), vec!["artefacts", "a1"]);
         // /api/auth/config — the unauthenticated discovery endpoint.
         assert_eq!(segs("/api/auth/config"), vec!["api", "auth", "config"]);
     }

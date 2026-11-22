@@ -1,7 +1,7 @@
 # Bulk Edit Tool (`tool/bulk_edit`)
 
 ## Overview
-The `bulk_edit` tool performs multi-file edits dispatched by an `operation` field: AST-aware `rename_symbol` (with word-boundary text fallback for non-grammar files), plain-text or regex `find_replace`, and AST-only `list_definitions`. AST support comes from `crate::ast` (a facade over `dyson-ast`).
+The `bulk_edit` tool performs multi-file edits dispatched by an `operation` field: AST-aware `rename_symbol` (with word-boundary text fallback for non-grammar files), plain-text or regex `find_replace`, and AST-only `list_definitions`. AST support comes from `dyson-ast`.
 
 ## Interface
 - `BulkEditTool` - `Tool` named `bulk_edit`; `operation` enum `rename_symbol` | `find_replace` | `list_definitions` [mod.rs:BulkEditTool]

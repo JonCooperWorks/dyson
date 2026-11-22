@@ -48,11 +48,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::Agent;
 use crate::auth::Auth;
-use crate::chat_history::ChatHistory;
 use crate::config::{ActiveProvider, Settings};
 use crate::feedback::FeedbackStore;
-use crate::message::Message;
 use crate::util::resolve_tilde;
+use dyson_core::message::Message;
+use dyson_persistence::ChatHistory;
 
 use super::ClientRegistry;
 use super::stores::{ArtefactEntry, ArtefactStore, FileEntry, FileStore, max_file_id};
@@ -466,7 +466,9 @@ mod ring_tests {
         let mut admitted = Vec::new();
         let count = handle
             .admit_text_only_queued_turns(|message| {
-                if let Some(crate::message::ContentBlock::Text { text }) = message.content.first() {
+                if let Some(dyson_core::message::ContentBlock::Text { text }) =
+                    message.content.first()
+                {
                     admitted.push(text.clone());
                 }
                 Ok(())
@@ -667,9 +669,9 @@ impl ChatHandle {
     pub(crate) async fn admit_text_only_queued_turns<F>(
         &self,
         mut admit: F,
-    ) -> crate::error::Result<usize>
+    ) -> dyson_core::error::Result<usize>
     where
-        F: FnMut(Message) -> crate::error::Result<()>,
+        F: FnMut(Message) -> dyson_core::error::Result<()>,
     {
         let candidates = {
             let mut q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
@@ -828,7 +830,7 @@ pub struct HttpState {
     /// In-memory store for agent-produced files (image_generate output,
     /// exploit_builder PoCs, etc.).  The agent calls
     /// `Output::send_file(path)`; we slurp the bytes, mint an id, push
-    /// an SSE `file` event with `/api/files/<id>`, and serve it on GET.
+    /// an SSE `file` event with `/api/conversations/<chat>/files/<id>`, and serve it on GET.
     /// Shared with each per-turn `SseOutput` via Arc clone.  Uses
     /// `std::sync::Mutex` because Output trait methods are sync and the
     /// critical section is just a HashMap insert / get — fast enough
@@ -840,7 +842,7 @@ pub struct HttpState {
     /// In-memory store for agent-produced artefacts (security-review
     /// reports, etc.).  The HTTP controller stamps each artefact with
     /// the chat id on emission so `/api/conversations/<id>/artefacts`
-    /// can filter; the body is served from `/api/artefacts/<id>`.
+    /// can filter; the body is served from `/api/conversations/<chat>/artefacts/<id>`.
     pub(crate) artefacts: Arc<std::sync::Mutex<ArtefactStore>>,
     pub(crate) artefact_id: Arc<std::sync::atomic::AtomicU64>,
     /// Root directory for on-disk persistence of agent-produced files
@@ -1148,21 +1150,9 @@ impl HttpState {
             tls_enabled,
             titles: std::sync::Mutex::new(HashMap::new()),
             allowed_identity: std::sync::Mutex::new(allowed_identity),
-            // Boot-time defaults from the env envelope.  These reads
-            // return empty strings when the process starts without
-            // `SWARM_INGEST_*` set, until /api/admin/configure
-            // patches in the live values.  A non-swarm dyson (terminal
-            // / telegram only) sees both empty and skips the push.
-            ingest: {
-                let url = std::env::var("SWARM_INGEST_URL").unwrap_or_default();
-                let token = std::env::var("SWARM_INGEST_TOKEN").unwrap_or_default();
-                let cfg = if !url.is_empty() && !token.is_empty() {
-                    Some(IngestConfig { url, token })
-                } else {
-                    None
-                };
-                Arc::new(std::sync::Mutex::new(cfg))
-            },
+            // Unset until /api/admin/configure installs Swarm's ingest
+            // URL and token; a non-Swarm Dyson never gets one.
+            ingest: Arc::new(std::sync::Mutex::new(None)),
             quiesced: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -1394,7 +1384,7 @@ impl HttpState {
     }
 
     /// Test hook — returns the stored file bytes for `id` via the same
-    /// memory-then-disk lookup chain that `GET /api/files/:id` uses.
+    /// memory-then-disk lookup chain that `GET /api/conversations/<chat>/files/:id` uses.
     /// Lets the refresh-regression test assert bytes survive controller
     /// restarts.
     #[doc(hidden)]
@@ -1555,9 +1545,9 @@ impl HttpState {
         drop(s);
 
         let kind = if inline_image {
-            crate::message::ArtefactKind::Image
+            dyson_core::message::ArtefactKind::Image
         } else {
-            crate::message::ArtefactKind::Other
+            dyson_core::message::ArtefactKind::Other
         };
         let artefact_id = format!(
             "a{}",
@@ -1667,8 +1657,8 @@ mod eviction_tests {
                 std::sync::Arc<dyn crate::tool::Tool>,
             >,
             _config: &crate::llm::CompletionConfig,
-        ) -> crate::error::Result<crate::llm::StreamResponse> {
-            Err(crate::error::DysonError::Llm("noop".into()))
+        ) -> dyson_core::error::Result<crate::llm::StreamResponse> {
+            Err(dyson_core::error::DysonError::Llm("noop".into()))
         }
     }
 

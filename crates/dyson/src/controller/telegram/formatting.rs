@@ -363,7 +363,7 @@ pub fn is_public_command(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{LlmErrorKind, classify_llm_error};
+    use dyson_core::error::{LlmErrorKind, classify_llm_error};
 
     #[test]
     fn plain_text_passthrough() {

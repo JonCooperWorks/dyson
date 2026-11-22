@@ -42,8 +42,8 @@ mod taxonomy;
 mod types;
 
 use crate::controller::http::SubagentEventBus;
-use crate::message::{Artefact, ArtefactKind};
 use crate::tool::{CheckpointEvent, ToolOutput};
+use dyson_core::message::{Artefact, ArtefactKind};
 
 use super::orchestrator::{OrchestratorConfig, OrchestratorHarness, OrchestratorInput};
 
@@ -84,7 +84,7 @@ pub(crate) use self::{
     types::ValidateStageOutput,
 };
 
-use crate::error::Result;
+use dyson_core::error::Result;
 
 const DIRECT_TOOLS: &[&str] = &[
     "bash",
@@ -101,14 +101,6 @@ const DIRECT_TOOLS: &[&str] = &[
 
 pub const SECURITY_HARNESS_SCHEMA_VERSION: u32 = 1;
 pub const SECURITY_HARNESS_VERSION: &str = "security-harness-v3";
-/// Harness versions whose checkpoints this binary can still resume. All v1→v2
-/// and v2→v3 changes are additive/default-tolerant, so older checkpoints
-/// deserialize and resume cleanly. Keep the current version in this list.
-pub const SUPPORTED_HARNESS_VERSIONS: &[&str] = &[
-    "security-harness-v1",
-    "security-harness-v2",
-    "security-harness-v3",
-];
 /// Pure runaway backstop on class-specialist hunters spawned in one Hunt
 /// stage.  Specialist count is driven by the work list (one per applicable
 /// class), not by this number — it only stops a pathological recon that
@@ -177,8 +169,8 @@ pub fn security_engineer_config() -> OrchestratorConfig {
         system_prompt: include_str!("../prompts/security_engineer.md"),
         direct_tool_names: DIRECT_TOOLS,
         // The staged harness uses smaller per-stage child budgets internally;
-        // this remains the advertised ceiling for legacy metadata/tests and
-        // as an upper bound for any single security stage child.
+        // this is the advertised ceiling and the upper bound for any single
+        // security stage child.
         max_iterations: 80,
         max_tokens: 8192,
         injects_protocol: Some(include_str!("../prompts/security_engineer_protocol.md")),

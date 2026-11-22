@@ -15,9 +15,8 @@
 //   * If Node/npm are missing, we panic with a pointed error rather than
 //     a cryptic ENOENT.  The frontend is a required part of the binary
 //     — there's no feature flag to skip it — so failing loud is right.
-//   * The generated `web_assets.rs` embeds files once, preserves the
-//     `ASSETS` slice for tests/shape checks, and emits a `match`-based
-//     `lookup_asset()` so runtime requests don't scan the slice.
+//   * The generated `web_assets.rs` embeds each file once and emits a
+//     `match`-based `lookup_asset()` dispatcher.
 
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
@@ -221,7 +220,7 @@ fn hash_bytes(bytes: Vec<u8>) -> u64 {
 }
 
 /// Walk `dist/` and emit a Rust source file declaring the embedded asset
-/// bytes, compatibility table, and direct `lookup_asset()` dispatcher.
+/// bytes and the `lookup_asset()` dispatcher.
 fn generate_asset_table(dist: &Path, out: &Path) {
     let mut entries = Vec::new();
     for path in walk(dist) {
@@ -247,13 +246,6 @@ fn generate_asset_table(dist: &Path, out: &Path) {
         writeln!(src, "const ASSET_{idx}: &[u8] = include_bytes!({abs:?});").unwrap();
     }
     src.push('\n');
-
-    src.push_str("#[allow(dead_code)]\n");
-    src.push_str("pub const ASSETS: &[(&str, &[u8], &str)] = &[\n");
-    for (idx, (url, _, ct)) in entries.iter().enumerate() {
-        writeln!(src, "    ({url:?}, ASSET_{idx}, {ct:?}),").unwrap();
-    }
-    src.push_str("];\n\n");
 
     src.push_str("pub fn lookup_asset(key: &str) -> Option<(&'static [u8], &'static str)> {\n");
     src.push_str("    match key {\n");

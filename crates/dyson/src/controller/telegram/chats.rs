@@ -29,7 +29,7 @@ pub(super) struct ChatEntry {
     pub(super) agent: Mutex<ChatAgent>,
     /// Snapshot of conversation messages, updated before each agent run.
     /// Quick response reads this when the agent is busy.
-    pub(super) messages_snapshot: tokio::sync::RwLock<Vec<crate::message::Message>>,
+    pub(super) messages_snapshot: tokio::sync::RwLock<Vec<dyson_core::message::Message>>,
     /// System prompt for quick response context.
     pub(super) system_prompt: tokio::sync::RwLock<String>,
     /// Completion config for quick response LLM calls.
@@ -55,7 +55,7 @@ pub(super) async fn rebuild_agents_on_reload(
     agents: &tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>,
     settings: &Settings,
     controller_prompt: Option<&str>,
-    chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
+    chat_store: &Arc<dyn dyson_persistence::ChatHistory>,
     feedback_dir: &std::path::Path,
     registry: &crate::controller::ClientRegistry,
 ) {
@@ -189,7 +189,7 @@ pub(super) fn reloaded_provider_model(
 pub(super) struct ChatContext<'a> {
     pub(super) settings: &'a Settings,
     pub(super) controller_prompt: Option<&'a str>,
-    pub(super) chat_store: &'a Arc<dyn crate::chat_history::ChatHistory>,
+    pub(super) chat_store: &'a Arc<dyn dyson_persistence::ChatHistory>,
     pub(super) feedback_dir: &'a std::path::Path,
     pub(super) registry: &'a crate::controller::ClientRegistry,
 }
@@ -199,7 +199,7 @@ pub(super) async fn get_or_create_entry(
     chat_id: i64,
     is_group: bool,
     cx: &ChatContext<'_>,
-) -> crate::Result<Arc<ChatEntry>> {
+) -> dyson_core::error::Result<Arc<ChatEntry>> {
     // Fast path: entry already exists.
     {
         let map = agents.read().await;

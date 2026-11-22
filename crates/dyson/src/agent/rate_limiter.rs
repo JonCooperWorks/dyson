@@ -26,7 +26,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 use super::sliding_window::SlidingWindow;
 

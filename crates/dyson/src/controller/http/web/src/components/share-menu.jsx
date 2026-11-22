@@ -30,7 +30,7 @@ export function ShareMenu({ canShare, busy, onMint }) {
       {open && (
         <div role="menu" style={{
           position: 'absolute', right: 0, top: '100%', marginTop: 4,
-          background: 'var(--panel)', border: '1px solid var(--line)',
+          background: 'var(--bg-1)', border: '1px solid var(--border)',
           borderRadius: 6, padding: 4, zIndex: 20, display: 'flex',
           flexDirection: 'column', minWidth: 110,
           boxShadow: '0 4px 12px rgba(0,0,0,0.35)',

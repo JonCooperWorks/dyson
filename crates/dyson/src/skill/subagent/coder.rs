@@ -13,9 +13,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::config::{AgentSettings, LlmProvider};
-use crate::error::{DysonError, Result};
 use crate::sandbox::Sandbox;
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use dyson_core::error::{DysonError, Result};
 
 use super::{ChildSpawn, spawn_child};
 

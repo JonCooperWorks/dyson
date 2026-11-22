@@ -17,7 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::config::{LlmProvider, Settings};
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 /// The most text one speech call reads aloud (OpenAI's limit).
 pub const MAX_SPEECH_CHARS: usize = 4096;

@@ -1,13 +1,13 @@
 // dependency_scan — agent-facing wrapper around
-// `crate::dependency_analysis::scan`.
+// `dyson_dependency_analysis::scan`.
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::dependency_analysis::{self, Dependency, OsvClient, ScanOptions, ScanReport, Severity};
-use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use dyson_core::error::{DysonError, Result};
+use dyson_dependency_analysis::{Dependency, OsvClient, ScanOptions, ScanReport, Severity};
 
 #[derive(Deserialize)]
 struct Input {
@@ -74,7 +74,7 @@ impl Tool for DependencyScanTool {
             ..ScanOptions::default()
         };
         let client = OsvClient::with_http(crate::http::client().clone());
-        let report = dependency_analysis::scan(&root, &opts, &client).await?;
+        let report = dyson_dependency_analysis::scan(&root, &opts, &client).await?;
 
         let out = match parsed.format.as_deref() {
             Some("json") => serde_json::to_string_pretty(&report)
@@ -296,7 +296,7 @@ fn render_cyclonedx(report: &ScanReport) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dependency_analysis::types::{Dependency, Ecosystem, ScanReport, Vulnerability};
+    use dyson_dependency_analysis::types::{Dependency, Ecosystem, ScanReport, Vulnerability};
     use std::path::PathBuf;
 
     #[test]

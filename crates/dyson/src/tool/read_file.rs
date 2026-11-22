@@ -17,10 +17,9 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use tokio::io::AsyncBufReadExt;
 
-use crate::ast;
-use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::truncate_output;
+use dyson_core::error::{DysonError, Result};
 
 pub struct ReadFileTool;
 
@@ -228,7 +227,7 @@ fn extract_symbol(
 ) -> Result<ToolOutput> {
     let working_dir_canon = crate::tool::canonical_or_self(working_dir);
 
-    let parsed = match ast::try_parse_file(path, &working_dir_canon, false)? {
+    let parsed = match dyson_ast::try_parse_file(path, &working_dir_canon, false)? {
         Some(pair) => pair,
         None => {
             return Ok(ToolOutput::error(format!(
@@ -239,7 +238,7 @@ fn extract_symbol(
     };
     let (config, parsed_file) = parsed;
 
-    let matches = ast::find_definitions_by_name(&parsed_file, config, name, kind);
+    let matches = dyson_ast::find_definitions_by_name(&parsed_file, config, name, kind);
 
     if matches.is_empty() {
         let kind_part = kind.map(|k| format!(" of kind '{k}'")).unwrap_or_default();
@@ -305,7 +304,7 @@ const RATIO_MIN_INPUT_BYTES: usize = 64 * 1024;
 async fn read_document_as_markdown<E>(
     path: &std::path::Path,
     extractor: E,
-) -> crate::Result<ToolOutput>
+) -> dyson_core::error::Result<ToolOutput>
 where
     E: FnOnce(&[u8]) -> std::result::Result<String, String>,
 {

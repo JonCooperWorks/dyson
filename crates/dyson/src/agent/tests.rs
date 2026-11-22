@@ -1,10 +1,10 @@
 use super::*;
 use crate::controller::Output;
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::message::{ContentBlock, Role};
 use crate::sandbox::no_sandbox::DangerousNoSandbox;
 use crate::skill::builtin::BuiltinSkill;
 use crate::tool::ToolOutput;
+use dyson_core::message::{ContentBlock, Role};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -236,7 +236,7 @@ impl Output for PendingAdmissionOutput {
 
     fn send_artefact(
         &mut self,
-        artefact: &crate::message::Artefact,
+        artefact: &dyson_core::message::Artefact,
     ) -> std::result::Result<(), DysonError> {
         self.inner.send_artefact(artefact)
     }
@@ -261,7 +261,7 @@ impl Output for PendingAdmissionOutput {
         self.inner.error(error)
     }
 
-    fn on_llm_error(&mut self, error: &DysonError) -> crate::error::LlmRecovery {
+    fn on_llm_error(&mut self, error: &DysonError) -> dyson_core::error::LlmRecovery {
         self.inner.on_llm_error(error)
     }
 
@@ -707,17 +707,17 @@ fn summarize_for_reflection_captures_tool_stats() {
     let messages = vec![
         Message::user("Deploy my app"),
         Message::assistant(vec![
-            crate::message::ContentBlock::Text {
+            dyson_core::message::ContentBlock::Text {
                 text: "I'll deploy it.".into(),
             },
-            crate::message::ContentBlock::ToolUse {
+            dyson_core::message::ContentBlock::ToolUse {
                 id: "c1".into(),
                 name: "bash".into(),
                 input: serde_json::json!({"command": "deploy.sh"}),
             },
         ]),
         Message::tool_result("c1", "Deployed successfully", false),
-        Message::assistant(vec![crate::message::ContentBlock::Text {
+        Message::assistant(vec![dyson_core::message::ContentBlock::Text {
             text: "Done!".into(),
         }]),
     ];
@@ -750,7 +750,7 @@ fn summarize_for_reflection_handles_multibyte_utf8() {
     // Same for tool error content (truncated at 200 bytes).
     let error_content = text.clone();
     let messages_with_error = vec![
-        Message::assistant(vec![crate::message::ContentBlock::ToolUse {
+        Message::assistant(vec![dyson_core::message::ContentBlock::ToolUse {
             id: "t1".into(),
             name: "bash".into(),
             input: serde_json::json!({}),
@@ -763,7 +763,7 @@ fn summarize_for_reflection_handles_multibyte_utf8() {
 
     // And for non-error tool results (also truncated at 200).
     let messages_with_result = vec![
-        Message::assistant(vec![crate::message::ContentBlock::ToolUse {
+        Message::assistant(vec![dyson_core::message::ContentBlock::ToolUse {
             id: "t2".into(),
             name: "bash".into(),
             input: serde_json::json!({}),
@@ -781,9 +781,9 @@ fn summarize_for_reflection_handles_multibyte_utf8() {
 
 fn fb(
     turn_index: usize,
-    rating: crate::feedback::FeedbackRating,
-) -> crate::feedback::FeedbackEntry {
-    crate::feedback::FeedbackEntry {
+    rating: dyson_common::feedback::FeedbackRating,
+) -> dyson_common::feedback::FeedbackEntry {
+    dyson_common::feedback::FeedbackEntry {
         turn_index,
         rating,
         score: rating.score(),
@@ -798,7 +798,7 @@ fn format_feedback_summary_empty_returns_empty() {
 
 #[test]
 fn format_feedback_summary_mixed_ratings() {
-    use crate::feedback::FeedbackRating::*;
+    use dyson_common::feedback::FeedbackRating::*;
 
     let entries = vec![fb(3, Excellent), fb(5, Bad), fb(7, VeryGood), fb(9, Good)];
     let summary = reflection::format_feedback_summary(&entries, 20);
@@ -810,7 +810,7 @@ fn format_feedback_summary_mixed_ratings() {
 
 #[test]
 fn format_feedback_summary_all_positive() {
-    use crate::feedback::FeedbackRating::*;
+    use dyson_common::feedback::FeedbackRating::*;
 
     let entries = vec![fb(1, Good), fb(3, Good)];
     let summary = reflection::format_feedback_summary(&entries, 8);
@@ -1888,8 +1888,8 @@ async fn compact_rotates_pre_compaction_history() {
     let dir =
         std::env::temp_dir().join(format!("dyson_compact_rotate_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let store = crate::chat_history::DiskChatHistory::new(dir.clone()).unwrap();
-    let store: Arc<dyn crate::chat_history::ChatHistory> = Arc::new(store);
+    let store = dyson_persistence::DiskChatHistory::new(dir.clone()).unwrap();
+    let store: Arc<dyn dyson_persistence::ChatHistory> = Arc::new(store);
 
     agent.set_chat_history(store.clone(), "test_chat".to_string());
 
@@ -2096,10 +2096,10 @@ async fn quick_response_sends_no_tools() {
 // -----------------------------------------------------------------------
 
 mod test_tool_calling_integration {
-    use super::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
     use super::result_formatter::ResultFormatter;
     use super::tool_limiter::ToolLimiter;
     use super::*;
+    use dyson_harness::scheduler::{DependencyAnalyzer, ExecutionPhase};
 
     #[test]
     fn full_pipeline_single_call() {
@@ -2945,7 +2945,7 @@ async fn token_estimate_cache_matches_naive_recount_across_mutations() {
     let (mut agent, _output) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
 
     fn naive(agent: &Agent, system: &str) -> usize {
-        crate::message::estimate_text_tokens(system)
+        dyson_core::message::estimate_text_tokens(system)
             + agent
                 .conversation
                 .messages
@@ -3039,7 +3039,7 @@ async fn token_estimate_stays_correct_through_compaction() {
 
     agent.compact(&mut output).await.unwrap();
 
-    let naive: usize = crate::message::estimate_text_tokens(sys)
+    let naive: usize = dyson_core::message::estimate_text_tokens(sys)
         + agent
             .conversation
             .messages

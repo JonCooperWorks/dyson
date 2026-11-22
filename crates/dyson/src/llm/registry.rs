@@ -4,14 +4,14 @@
 // LEARNING OVERVIEW
 //
 // What this file does:
-//   Centralizes all per-provider metadata (aliases, default model, env var,
+//   Centralizes all per-provider metadata (name, default model, env var,
 //   factory function) into a static registry.  Before this registry existed,
 //   adding a new provider required touching 7 match arms across 4 files.
 //   Now it's: add an enum variant, implement LlmClient, add a ProviderEntry.
 //
 // How it works:
 //   `registry()` returns a static slice of `ProviderEntry` structs — one per
-//   `LlmProvider` variant.  Helper functions (`lookup`, `from_str_loose`,
+//   `LlmProvider` variant.  Helper functions (`lookup`, `from_name`,
 //   `all_canonical_names`) query the slice.  All other modules delegate to
 //   these helpers instead of matching on `LlmProvider` directly.
 //
@@ -24,10 +24,10 @@
 
 use crate::auth::Credential;
 use crate::config::LlmProvider;
-use crate::error::{DysonError, Result};
 use crate::llm::LlmClient;
 use crate::secret::{SecretRegistry, SecretValue};
 use crate::workspace::WorkspaceHandle;
+use dyson_core::error::{DysonError, Result};
 
 // ---------------------------------------------------------------------------
 // ProviderEntry — one row in the registry.
@@ -41,13 +41,9 @@ pub struct ProviderEntry {
     /// The enum variant this entry describes.
     pub provider: LlmProvider,
 
-    /// Canonical name (used in display, serialization, error messages).
+    /// The provider's one name: `providers.*.type` in dyson.json, the CLI
+    /// `--provider` value, display and error messages.
     pub canonical_name: &'static str,
-
-    /// All recognized aliases for loose string parsing (must be lowercase).
-    ///
-    /// Used by `from_str_loose()` to map user input to `LlmProvider`.
-    pub aliases: &'static [&'static str],
 
     /// Environment variable name for API key fallback.
     ///
@@ -174,7 +170,6 @@ pub fn registry() -> &'static [ProviderEntry] {
             ProviderEntry {
                 provider: LlmProvider::Anthropic,
                 canonical_name: "anthropic",
-                aliases: &["anthropic"],
                 env_var: Some("ANTHROPIC_API_KEY"),
                 requires_api_key: true,
                 create_client: |c| Box::new(anthropic::AnthropicClient::new(c.api_key)),
@@ -182,7 +177,6 @@ pub fn registry() -> &'static [ProviderEntry] {
             ProviderEntry {
                 provider: LlmProvider::OpenAi,
                 canonical_name: "openai",
-                aliases: &["openai", "gpt"],
                 env_var: Some("OPENAI_API_KEY"),
                 requires_api_key: true,
                 create_client: |c| match c.base_url {
@@ -195,7 +189,6 @@ pub fn registry() -> &'static [ProviderEntry] {
             ProviderEntry {
                 provider: LlmProvider::OpenRouter,
                 canonical_name: "openrouter",
-                aliases: &["openrouter", "open-router", "open_router"],
                 env_var: Some("OPENROUTER_API_KEY"),
                 requires_api_key: true,
                 create_client: |c| {
@@ -205,7 +198,6 @@ pub fn registry() -> &'static [ProviderEntry] {
             ProviderEntry {
                 provider: LlmProvider::ClaudeCode,
                 canonical_name: "claude-code",
-                aliases: &["claude-code", "claude_code", "cc"],
                 env_var: None,
                 requires_api_key: false,
                 create_client: |c| {
@@ -219,7 +211,6 @@ pub fn registry() -> &'static [ProviderEntry] {
             ProviderEntry {
                 provider: LlmProvider::Codex,
                 canonical_name: "codex",
-                aliases: &["codex", "codex-cli"],
                 env_var: None,
                 requires_api_key: false,
                 create_client: |c| {
@@ -233,7 +224,6 @@ pub fn registry() -> &'static [ProviderEntry] {
             ProviderEntry {
                 provider: LlmProvider::OllamaCloud,
                 canonical_name: "ollama-cloud",
-                aliases: &["ollama-cloud", "ollama_cloud", "ollama"],
                 env_var: Some("OLLAMA_API_KEY"),
                 requires_api_key: true,
                 create_client: |c| {
@@ -243,7 +233,6 @@ pub fn registry() -> &'static [ProviderEntry] {
             ProviderEntry {
                 provider: LlmProvider::Gemini,
                 canonical_name: "gemini",
-                aliases: &["gemini", "google"],
                 env_var: Some("GEMINI_API_KEY"),
                 requires_api_key: true,
                 create_client: |c| Box::new(gemini::GeminiClient::new(c.api_key, c.base_url)),
@@ -269,15 +258,13 @@ pub fn lookup(provider: &LlmProvider) -> &'static ProviderEntry {
         .expect("registry is missing a LlmProvider variant — add a ProviderEntry")
 }
 
-/// Parse a loose provider string (case-insensitive, with aliases).
+/// Map a provider's canonical name to its `LlmProvider`.
 ///
-/// Returns `None` for unrecognized strings.  This replaces the
-/// `LlmProvider::from_str_loose` method body.
-pub fn from_str_loose(s: &str) -> Option<LlmProvider> {
-    let lower = s.to_lowercase();
+/// Returns `None` for any other string.
+pub fn from_name(s: &str) -> Option<LlmProvider> {
     registry()
         .iter()
-        .find(|e| e.aliases.iter().any(|a| *a == lower))
+        .find(|e| e.canonical_name == s)
         .map(|e| e.provider.clone())
 }
 
@@ -333,21 +320,24 @@ mod tests {
     }
 
     #[test]
-    fn from_str_loose_matches_aliases() {
-        assert_eq!(from_str_loose("anthropic"), Some(LlmProvider::Anthropic));
-        assert_eq!(from_str_loose("OPENAI"), Some(LlmProvider::OpenAi));
-        assert_eq!(from_str_loose("gpt"), Some(LlmProvider::OpenAi));
-        assert_eq!(from_str_loose("open-router"), Some(LlmProvider::OpenRouter));
-        assert_eq!(from_str_loose("cc"), Some(LlmProvider::ClaudeCode));
-        assert_eq!(from_str_loose("codex-cli"), Some(LlmProvider::Codex));
-        assert_eq!(
-            from_str_loose("ollama-cloud"),
-            Some(LlmProvider::OllamaCloud)
-        );
-        assert_eq!(from_str_loose("ollama"), Some(LlmProvider::OllamaCloud));
-        assert_eq!(from_str_loose("gemini"), Some(LlmProvider::Gemini));
-        assert_eq!(from_str_loose("google"), Some(LlmProvider::Gemini));
-        assert_eq!(from_str_loose("unknown"), None);
+    fn from_name_accepts_only_canonical_names() {
+        for entry in registry() {
+            assert_eq!(
+                from_name(entry.canonical_name),
+                Some(entry.provider.clone())
+            );
+        }
+        for retired in [
+            "gpt",
+            "open-router",
+            "cc",
+            "codex-cli",
+            "ollama",
+            "google",
+            "OPENAI",
+        ] {
+            assert_eq!(from_name(retired), None, "{retired}");
+        }
     }
 
     #[test]
@@ -363,16 +353,11 @@ mod tests {
     }
 
     #[test]
-    fn no_duplicate_aliases() {
-        let mut all_aliases = Vec::new();
-        for entry in registry() {
-            for alias in entry.aliases {
-                assert!(
-                    !all_aliases.contains(alias),
-                    "duplicate alias '{alias}' in registry"
-                );
-                all_aliases.push(alias);
-            }
-        }
+    fn no_duplicate_names() {
+        let mut names = all_canonical_names();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "duplicate provider name in registry");
     }
 }

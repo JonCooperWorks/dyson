@@ -17,7 +17,7 @@ use serde_json::{Map, Value, json};
 
 use super::sse_parser::{SseJsonParser, ToolBufferContext};
 use super::stream::{StopReason, StreamEvent};
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 /// Whether `model` is OpenAI's own and should go over Responses. Only
 /// namespaced ids (`openai/gpt-6-luna`): that is how Swarm's catalogue and

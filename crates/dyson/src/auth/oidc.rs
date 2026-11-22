@@ -45,7 +45,7 @@ use tokio::sync::RwLock;
 use dyson_common::oidc::{Jwk, JwkSet, decoding_key_from_jwk};
 
 use crate::auth::{Auth, AuthInfo};
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 /// Minimum refresh gap between JWKS fetches.  A rotating IdP typically
 /// keeps old keys around for hours past rotation, so refreshing at

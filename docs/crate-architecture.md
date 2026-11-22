@@ -22,13 +22,12 @@ all focused crates ── dyson (providers, tools, controllers, CLI composition)
 | `dyson-harness` | Tool-call and execution contracts, scheduler, durable run protocol, replay, deterministic grading | Controllers, providers, persistence implementations |
 | `dyson-ast` | Grammar registry, parsing, structural navigation, taint primitives | Tools, controllers, provider APIs |
 | `dyson-dependency-analysis` | Manifest parsers, dependency discovery, OSV client | Tool presentation, controllers, agent loop |
-| `dyson-persistence` | Chat-history trait, disk store, migrations, run journal, coalesced checkpoints | Configuration schema, controllers, providers |
+| `dyson-persistence` | Chat-history trait, disk store, run journal, coalesced checkpoints | Configuration schema, controllers, providers |
 | `dyson` | Configuration, provider and tool implementations, agent orchestration, controllers, CLI | Nothing below it may depend back on this package |
 
-The `dyson` package keeps compatibility façades at the old module paths, such
-as `dyson::message`, `dyson::agent::protocol`, and `dyson::chat_history`.
-Consumers can migrate to focused crates without a flag day, while existing
-integrations keep compiling.
+Code imports each type from the crate that owns it (`dyson_core::message`,
+`dyson_harness::protocol`, `dyson_persistence::ChatHistory`, ...); the `dyson`
+package does not re-export the focused crates under its own module paths.
 
 ## Boundary rules
 

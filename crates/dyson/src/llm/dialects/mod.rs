@@ -28,9 +28,9 @@ use std::task::{Context, Poll};
 
 use tokio_stream::Stream;
 
-use crate::error::Result;
 use crate::llm::ToolDefinition;
 use crate::llm::stream::{StopReason, StreamEvent};
+use dyson_core::error::Result;
 
 // ---------------------------------------------------------------------------
 // TextToolHandler trait and types

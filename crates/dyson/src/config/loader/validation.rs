@@ -1,6 +1,6 @@
 //! Validate cross-references after resolving configuration.
 use crate::config::{Settings, SkillConfig};
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 /// Refuse to boot with an unconfigured agent model.
 ///

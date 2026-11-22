@@ -12,10 +12,10 @@ use std::sync::Arc;
 use crate::agent::rate_limiter::RateLimitedHandle;
 use crate::config::{AgentSettings, LlmProvider};
 use crate::llm::LlmClient;
-use crate::message::ArtefactKind;
 use crate::sandbox::Sandbox;
 use crate::tool::{Tool, ToolOutput};
 use crate::workspace::WorkspaceHandle;
+use dyson_core::message::ArtefactKind;
 
 use super::types::{SecurityCheckpoint, SecurityHarnessStage};
 use crate::skill::subagent::orchestrator::OrchestratorInput;
@@ -132,8 +132,8 @@ pub(super) fn merge_stage_tool_output(target: &mut ToolOutput, mut stage: ToolOu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{Artefact, ArtefactKind};
     use crate::tool::CheckpointEvent;
+    use dyson_core::message::{Artefact, ArtefactKind};
 
     fn meta(input: u64, output: u64, calls: u64) -> serde_json::Value {
         serde_json::json!({

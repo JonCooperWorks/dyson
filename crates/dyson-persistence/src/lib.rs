@@ -32,7 +32,6 @@
 
 mod coalesce;
 pub mod disk;
-pub mod migrate;
 
 pub use coalesce::CoalescingPersister;
 pub use disk::DiskChatHistory;

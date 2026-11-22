@@ -68,7 +68,6 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': { target: 'http://127.0.0.1:7878', changeOrigin: false },
-      '/artefacts': { target: 'http://127.0.0.1:7878', changeOrigin: false },
     },
   },
   build: {

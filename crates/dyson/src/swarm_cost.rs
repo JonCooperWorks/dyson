@@ -8,8 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use crate::message::MessageCostMetadata;
-use dyson_common::state_sync::{ENV_PROXY_TOKEN, ENV_PROXY_URL};
+use dyson_core::message::MessageCostMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CostLookupConfig {
@@ -55,13 +54,6 @@ impl CostLookupConfig {
         ))
     }
 
-    fn from_env() -> Option<Self> {
-        Self::internal_from_proxy(
-            &std::env::var(ENV_PROXY_URL).ok()?,
-            &std::env::var(ENV_PROXY_TOKEN).ok()?,
-        )
-    }
-
     fn call_url(&self, audit_id: i64) -> String {
         format!(
             "{}/costs/calls/{audit_id}",
@@ -102,15 +94,11 @@ pub fn config_snapshot() -> Option<CostLookupConfig> {
     runtime_config().read().ok().and_then(|guard| guard.clone())
 }
 
-pub fn config_snapshot_or_env() -> Option<CostLookupConfig> {
-    config_snapshot().or_else(CostLookupConfig::from_env)
-}
-
 /// Return the source-IP-bound Swarm runtime route currently injected into
 /// this Dyson. The provider credential itself remains sealed in Swarm; the
 /// bearer returned here is only the ordinary instance-scoped `pt_` token.
 pub(crate) fn runtime_proxy_parts() -> Option<(String, String)> {
-    config_snapshot_or_env()?.proxy_parts()
+    config_snapshot()?.proxy_parts()
 }
 
 /// Budget for the per-message display-cost lookup.  This runs inline in the
@@ -121,8 +109,8 @@ const COST_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 pub async fn lookup_runtime_display_metadata(
     audit_id: i64,
-) -> crate::Result<Option<MessageCostMetadata>> {
-    let Some(config) = config_snapshot_or_env() else {
+) -> dyson_core::error::Result<Option<MessageCostMetadata>> {
+    let Some(config) = config_snapshot() else {
         return Ok(None);
     };
     let call = match tokio::time::timeout(
@@ -170,7 +158,7 @@ pub async fn fetch_cost_call(
     client: &reqwest::Client,
     config: &CostLookupConfig,
     audit_id: i64,
-) -> crate::Result<Option<SwarmCostCall>> {
+) -> dyson_core::error::Result<Option<SwarmCostCall>> {
     let mut req = client
         .get(config.call_url(audit_id))
         .header("accept", "application/json");
@@ -219,7 +207,7 @@ pub async fn fetch_audit_calls(
     client: &reqwest::Client,
     config: &CostLookupConfig,
     query: &str,
-) -> crate::Result<Vec<SwarmAuditCall>> {
+) -> dyson_core::error::Result<Vec<SwarmAuditCall>> {
     let mut req = client
         .get(config.audit_list_url(query))
         .header("accept", "application/json");
@@ -294,6 +282,20 @@ fn now_secs() -> i64 {
 /// Serialises tests that mutate the process-wide runtime cost config so
 /// parallel test threads can't observe each other's endpoint.  Async-aware
 /// because the guarded tests await while holding it.
+/// Overlay finalized cost fields from Swarm onto a message's provisional
+/// metadata, keeping any field the source leaves empty.
+pub fn merge_cost(target: &mut MessageCostMetadata, source: MessageCostMetadata) {
+    target.swarm_llm_audit_id = source.swarm_llm_audit_id.or(target.swarm_llm_audit_id);
+    target.display_cost_usd = source.display_cost_usd.or(target.display_cost_usd);
+    target.cost_source = source.cost_source.or_else(|| target.cost_source.clone());
+    target.cost_finalized_at = source.cost_finalized_at.or(target.cost_finalized_at);
+    target.provider = source.provider.or_else(|| target.provider.clone());
+    target.model = source.model.or_else(|| target.model.clone());
+    target.input_tokens = source.input_tokens.or(target.input_tokens);
+    target.output_tokens = source.output_tokens.or(target.output_tokens);
+    target.key_source = source.key_source.or_else(|| target.key_source.clone());
+}
+
 #[cfg(test)]
 pub(crate) async fn test_config_guard() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -430,5 +432,37 @@ mod tests {
         assert_eq!(out["audit_id"], 1);
         assert_eq!(out["status_code"], 200);
         assert!(out.get("core").is_none(), "core must not nest on the wire");
+    }
+
+    #[test]
+    fn merge_cost_preserves_existing_when_source_lacks_optional_values() {
+        let mut target = MessageCostMetadata {
+            swarm_llm_audit_id: Some(1),
+            display_cost_usd: None,
+            cost_source: Some("provider_reported".into()),
+            cost_finalized_at: None,
+            provider: Some("openrouter".into()),
+            model: Some("model-a".into()),
+            input_tokens: Some(1),
+            output_tokens: None,
+            key_source: None,
+        };
+        let source = MessageCostMetadata {
+            swarm_llm_audit_id: Some(1),
+            display_cost_usd: Some(0.0031),
+            cost_source: None,
+            cost_finalized_at: Some(5),
+            provider: None,
+            model: None,
+            input_tokens: None,
+            output_tokens: Some(2),
+            key_source: Some("platform".into()),
+        };
+        merge_cost(&mut target, source);
+        assert_eq!(target.display_cost_usd, Some(0.0031));
+        assert_eq!(target.cost_source.as_deref(), Some("provider_reported"));
+        assert_eq!(target.provider.as_deref(), Some("openrouter"));
+        assert_eq!(target.output_tokens, Some(2));
+        assert_eq!(target.key_source.as_deref(), Some("platform"));
     }
 }

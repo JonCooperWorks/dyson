@@ -10,7 +10,7 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::error::DysonError;
+use dyson_core::error::DysonError;
 
 use super::types::*;
 

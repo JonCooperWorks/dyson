@@ -39,12 +39,12 @@ use serde::Deserialize;
 use crate::agent::rate_limiter::RateLimitedHandle;
 use crate::config::{AgentSettings, LlmProvider, SubagentAgentConfig};
 use crate::controller::Output;
-use crate::error::{DysonError, Result};
 use crate::llm::LlmClient;
 use crate::sandbox::Sandbox;
 use crate::skill::Skill;
 use crate::tool::{MAX_SUBAGENT_DEPTH, Tool, ToolContext, ToolOutput};
 use crate::workspace::WorkspaceHandle;
+use dyson_core::error::{DysonError, Result};
 
 /// An `Output` that accumulates a child agent's streamed text into a
 /// buffer.  Tool events are logged at `debug` and (when the parent
@@ -85,7 +85,7 @@ use crate::workspace::WorkspaceHandle;
 ///   into any LLM prompt — it's pure UI.
 pub struct CaptureOutput {
     text: String,
-    artefacts: Vec<crate::message::Artefact>,
+    artefacts: Vec<dyson_core::message::Artefact>,
     /// Optional UI side-channel.  `None` for non-HTTP controllers and
     /// for tests; `Some` when the HTTP controller wired
     /// `Agent::set_subagent_events` for this turn.
@@ -142,7 +142,7 @@ impl CaptureOutput {
     /// Drain the buffered artefacts out of the capture.  Called by
     /// `spawn_child` after the child agent completes so the artefacts
     /// bubble up to the parent controller.
-    pub fn take_artefacts(&mut self) -> Vec<crate::message::Artefact> {
+    pub fn take_artefacts(&mut self) -> Vec<dyson_core::message::Artefact> {
         std::mem::take(&mut self.artefacts)
     }
 
@@ -191,14 +191,14 @@ impl Output for CaptureOutput {
         tracing::debug!(path = %path.display(), "subagent file send (ignored in capture)");
         // We deliberately don't broadcast here: the file's bytes haven't
         // been mirrored into the controller's `FileStore`, so a `file`
-        // event with a real `/api/files/<id>` URL only makes sense once
+        // event with a real `/api/conversations/<chat>/files/<id>` URL only makes sense once
         // the parent's `SseOutput::send_file` runs after the subagent
         // returns.  The replay path (chat reload) reconstructs file
         // blocks from disk anyway.
         Ok(())
     }
 
-    fn send_artefact(&mut self, artefact: &crate::message::Artefact) -> Result<()> {
+    fn send_artefact(&mut self, artefact: &dyson_core::message::Artefact) -> Result<()> {
         tracing::debug!(
             kind = ?artefact.kind,
             title = %artefact.title,
@@ -361,7 +361,7 @@ pub(crate) async fn spawn_child(spec: ChildSpawn<'_>) -> Result<ToolOutput> {
                 "child agent completed successfully"
             );
             stats["run_outcome"] = serde_json::to_value(&outcome)?;
-            let mut out = if outcome.status == crate::agent::protocol::RunStatus::Completed {
+            let mut out = if outcome.status == dyson_harness::protocol::RunStatus::Completed {
                 ToolOutput::success(final_text)
             } else {
                 ToolOutput::error(final_text)

@@ -14,14 +14,14 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
         return bad_request("execution journal not configured");
     };
     match store.load_run_events(id) {
-        Ok(events) => json_ok(&crate::agent::protocol::unresolved_tool_outcomes(&events)),
+        Ok(events) => json_ok(&dyson_harness::protocol::unresolved_tool_outcomes(&events)),
         Err(_) => bad_request("cannot read execution journal"),
     }
 }
 
 #[derive(serde::Deserialize)]
 struct Resolution {
-    run_id: crate::agent::protocol::RunId,
+    run_id: dyson_harness::protocol::RunId,
     tool_use_id: String,
     resolution: String,
 }

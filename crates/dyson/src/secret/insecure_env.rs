@@ -70,8 +70,8 @@
 //   ```
 // ===========================================================================
 
-use crate::error::{DysonError, Result};
 use crate::secret::SecretResolver;
+use dyson_core::error::{DysonError, Result};
 
 // ---------------------------------------------------------------------------
 // InsecureEnvironmentVariable

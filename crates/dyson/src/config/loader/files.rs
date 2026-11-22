@@ -1,6 +1,6 @@
-//! Configuration discovery, migration, permissions, and persistence.
+//! Configuration discovery, version check, permissions, and persistence.
 use super::schema::JsonRoot;
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 use std::path::Path;
 const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
 
@@ -63,40 +63,59 @@ pub(super) fn tighten_config_perms(_path: &Path) {}
 ///
 /// Attempts to read files directly instead of checking `exists()` first,
 /// avoiding a TOCTOU race where the file could be swapped between the
-/// existence check and the read.
+/// existence check and the read.  A missing file moves on to the next
+/// location; a file that exists but cannot be loaded is an error.
 pub(super) fn try_discover_config() -> Result<Option<JsonRoot>> {
     // 1. Current directory.
     let cwd_path = Path::new("dyson.json");
-    if let Ok(root) = load_and_migrate(cwd_path) {
-        return Ok(root);
+    if cwd_path.is_file() {
+        return load_config(cwd_path);
     }
 
     // 2. ~/.config/dyson/dyson.json
     if let Some(home) = std::env::var_os("HOME") {
         let global_path = Path::new(&home).join(".config/dyson/dyson.json");
-        if let Ok(root) = load_and_migrate(&global_path) {
-            return Ok(root);
+        if global_path.is_file() {
+            return load_config(&global_path);
         }
     }
 
     Ok(None)
 }
 
-/// Read a config file, migrate it, write back if changed, and parse.
-pub(super) fn load_and_migrate(path: &Path) -> Result<Option<JsonRoot>> {
+/// Read a config file, check its `config_version`, and parse it.
+pub(super) fn load_config(path: &Path) -> Result<Option<JsonRoot>> {
     let content = read_config_file(path)?;
     let mut raw: serde_json::Value = serde_json::from_str(&content)?;
-    if crate::config::migrate::migrate(&mut raw)? {
-        write_back_config(path, &raw);
-    }
-    Ok(Some(serde_json::from_value::<JsonRoot>(raw)?))
+    check_config_version(path, &mut raw)?;
+    serde_json::from_value::<JsonRoot>(raw)
+        .map(Some)
+        .map_err(|e| DysonError::Config(format!("invalid config {}: {e}", path.display())))
 }
 
-/// Best-effort write migrated config back to disk.
+/// Refuse any file not stamped with exactly [`CONFIG_VERSION`], then strip
+/// the stamp so the schema only sees settings.
 ///
-/// Logs a warning on failure but does not propagate errors — the in-memory
-/// migration already succeeded, so the runtime can proceed.  The file will
-/// be migrated again on next load if write-back fails.
+/// [`CONFIG_VERSION`]: crate::config::CONFIG_VERSION
+pub(super) fn check_config_version(path: &Path, raw: &mut serde_json::Value) -> Result<()> {
+    let expected = crate::config::CONFIG_VERSION;
+    let found = raw
+        .as_object_mut()
+        .and_then(|root| root.remove("config_version"));
+    match found.as_ref().and_then(serde_json::Value::as_u64) {
+        Some(v) if v == expected => Ok(()),
+        _ => Err(DysonError::Config(format!(
+            "config {} has config_version {}; this Dyson reads only config_version {expected}. \
+             Rewrite the file in the current shape (see docs/configuration.md).",
+            path.display(),
+            found.map_or_else(|| "missing".to_string(), |v| v.to_string()),
+        ))),
+    }
+}
+
+/// Best-effort write of an edited config back to disk.
+///
+/// Logs a warning on failure but does not propagate errors.
 ///
 /// On Unix, the file permissions are set to 0o600 (owner read/write only)
 /// because config files may contain API keys or secret resolver references.
@@ -107,7 +126,7 @@ pub(super) fn write_back_config(path: &Path, value: &serde_json::Value) {
                 tracing::warn!(
                     path = %path.display(),
                     error = %e,
-                    "failed to write migrated config back to disk"
+                    "failed to write config back to disk"
                 );
             } else {
                 // Restrict permissions — config may contain secrets.
@@ -116,11 +135,11 @@ pub(super) fn write_back_config(path: &Path, value: &serde_json::Value) {
                     use std::os::unix::fs::PermissionsExt;
                     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
                 }
-                tracing::info!(path = %path.display(), "wrote migrated config to disk");
+                tracing::info!(path = %path.display(), "wrote config to disk");
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "failed to serialize migrated config");
+            tracing::warn!(error = %e, "failed to serialize config");
         }
     }
 }

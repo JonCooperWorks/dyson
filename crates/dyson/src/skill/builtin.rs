@@ -238,7 +238,7 @@ impl Skill for BuiltinSkill {
     /// - Current date and time in UTC (models have no clock otherwise)
     ///
     /// This runs on every turn, so keep it lightweight — no I/O, no blocking.
-    async fn before_turn(&self) -> crate::Result<Option<String>> {
+    async fn before_turn(&self) -> dyson_core::error::Result<Option<String>> {
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

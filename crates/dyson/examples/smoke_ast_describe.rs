@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use dyson::ast;
 use dyson::tool::security::ast_describe::describe_source;
 
 struct Target {
@@ -374,7 +373,7 @@ struct Totals {
 }
 
 fn check_snippet(t: &Target) -> Result<(), String> {
-    let config = ast::config_for_language_name(t.language)
+    let config = dyson_ast::config_for_language_name(t.language)
         .ok_or_else(|| format!("unknown language: {}", t.language))?;
     let out = describe_source(t.snippet, config, None, 20).map_err(|e| format!("describe: {e}"))?;
     for expected in t.expect_kinds {
@@ -406,7 +405,7 @@ fn shallow_clone(slug: &str, dest: &Path) -> Result<(), String> {
 }
 
 fn run_repo(t: &Target, path: &Path, totals: &mut Totals) -> Result<(), String> {
-    let config = ast::config_for_language_name(t.language)
+    let config = dyson_ast::config_for_language_name(t.language)
         .ok_or_else(|| format!("unknown language: {}", t.language))?;
 
     // Sample up to 5 files matching the extension, in repo walk order.

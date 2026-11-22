@@ -30,8 +30,8 @@
 
 use serde::Serialize;
 
-use crate::feedback::{FeedbackEntry, FeedbackRating};
-use crate::message::{ContentBlock, Message, Role};
+use dyson_common::feedback::{FeedbackEntry, FeedbackRating};
+use dyson_core::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
 // ShareGPT types
@@ -235,7 +235,9 @@ pub fn to_sharegpt_with_feedback(
 ///
 /// This is the format expected by most fine-tuning frameworks:
 /// a JSON array where each element is a conversation object.
-pub fn to_sharegpt_json(conversations: &[ShareGptConversation]) -> crate::Result<String> {
+pub fn to_sharegpt_json(
+    conversations: &[ShareGptConversation],
+) -> dyson_core::error::Result<String> {
     Ok(serde_json::to_string_pretty(conversations)?)
 }
 

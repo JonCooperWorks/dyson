@@ -44,9 +44,9 @@ use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 
 use crate::controller::Output;
-use crate::error::Result;
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::message::{ContentBlock, Message};
+use dyson_core::error::Result;
+use dyson_core::message::{ContentBlock, Message};
 
 pub use dyson_harness::ToolCall;
 
@@ -172,7 +172,7 @@ pub async fn process_stream(
                             output.typing_indicator(false)?;
                             typing_cleared = true;
                         }
-                        token_count += crate::message::estimate_text_tokens(&segment);
+                        token_count += dyson_core::message::estimate_text_tokens(&segment);
                         output.text_delta(&segment)?;
                         assembly.current_text.push_str(&segment);
                     }
@@ -276,7 +276,7 @@ pub async fn process_stream(
     }
 
     if !saw_message_complete && tool_calls.is_empty() {
-        return Err(crate::error::DysonError::Llm(
+        return Err(dyson_core::error::DysonError::Llm(
             "LLM stream ended without a terminal MessageComplete event".to_string(),
         ));
     }
@@ -517,8 +517,8 @@ impl ThinkTagParser {
 mod tests {
     use super::*;
     use crate::controller::recording::RecordingOutput;
-    use crate::error::DysonError;
     use crate::llm::stream::StopReason;
+    use dyson_core::error::DysonError;
 
     // -----------------------------------------------------------------------
     // Helper: create a stream from a vec of events.

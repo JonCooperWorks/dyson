@@ -64,7 +64,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 // ---------------------------------------------------------------------------
 // AuthInfo — metadata about an authenticated request.

@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::error::Result;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::truncate_output;
+use dyson_core::error::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArtefactSummary {

@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::chat_history::ChatHistory;
 use crate::llm::ToolDefinition;
-use crate::message::{ContentBlock, Message, Role};
 use crate::skill::Skill;
 use crate::tool::Tool;
+use dyson_core::message::{ContentBlock, Message, Role};
+use dyson_persistence::ChatHistory;
 
 use super::token_budget::TokenBudget;
 
@@ -17,9 +17,9 @@ fn estimate_tool_def_tokens(
     description: &str,
     input_schema: &serde_json::Value,
 ) -> usize {
-    crate::message::estimate_text_tokens(name)
-        + crate::message::estimate_text_tokens(description)
-        + crate::message::estimate_json_tokens(input_schema)
+    dyson_core::message::estimate_text_tokens(name)
+        + dyson_core::message::estimate_text_tokens(description)
+        + dyson_core::message::estimate_json_tokens(input_schema)
         + 10
 }
 
@@ -320,7 +320,7 @@ mod tool_name_tests {
             &self,
             _input: &serde_json::Value,
             _ctx: &ToolContext,
-        ) -> crate::Result<ToolOutput> {
+        ) -> dyson_core::error::Result<ToolOutput> {
             Ok(ToolOutput::success("ok"))
         }
     }

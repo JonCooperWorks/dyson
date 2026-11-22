@@ -19,8 +19,8 @@
 
 use std::collections::HashSet;
 
-use crate::error::Result;
 use crate::workspace::Workspace;
+use dyson_core::error::Result;
 
 /// Default maximum age for journal files in days.
 const DEFAULT_MAX_JOURNAL_AGE_DAYS: u32 = 90;

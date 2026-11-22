@@ -1,4 +1,4 @@
-// TaintTraceTool — thin agent-facing wrapper around `ast::taint::trace`.
+// TaintTraceTool — thin agent-facing wrapper around `dyson_ast::taint::trace`.
 // Caches the per-language SymbolIndex on ToolContext with mtime
 // invalidation; renders paths with explicit uncertainty annotations.
 
@@ -9,9 +9,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::ast::{self, taint};
-use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use dyson_ast::taint;
+use dyson_core::error::{DysonError, Result};
 
 #[derive(Deserialize)]
 struct Input {
@@ -90,7 +90,7 @@ impl Tool for TaintTraceTool {
         let parsed: Input = serde_json::from_value(input.clone())
             .map_err(|e| DysonError::tool("taint_trace", format!("invalid input: {e}")))?;
 
-        let config = match ast::config_for_language_name(&parsed.language) {
+        let config = match dyson_ast::config_for_language_name(&parsed.language) {
             Some(c) => c,
             None => {
                 return Ok(ToolOutput::error(format!(
@@ -168,8 +168,8 @@ impl Tool for TaintTraceTool {
 /// Render the first taint path as a `Taint` view (source → propagator(s)
 /// → sink).  Empty `flow` means no path was found; the panel handles that.
 fn build_taint_view(result: &taint::TraceResult) -> crate::tool::view::ToolView {
-    use crate::ast::taint::HopKind;
     use crate::tool::view::{TaintNode, ToolView};
+    use dyson_ast::taint::HopKind;
     let mut flow: Vec<TaintNode> = Vec::new();
     if let Some(path) = result.paths.first() {
         let last_idx = path.hops.len().saturating_sub(1);

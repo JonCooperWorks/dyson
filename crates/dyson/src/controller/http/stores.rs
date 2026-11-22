@@ -142,7 +142,7 @@ impl FileStore {
 
 /// Highest `f<N>` id ever persisted under `{data_dir}/files/` so the
 /// controller's monotonic counter resumes above any pre-existing
-/// entry.  Files load lazily on `GET /api/files/<id>`, so this is a
+/// entry.  Files load lazily on `GET /api/conversations/<chat>/files/<id>`, so this is a
 /// max-id scan, not a hydrate — the previous shape pretended to fill
 /// `FileStore.items` but never did.
 pub(crate) fn max_file_id(data_dir: &std::path::Path) -> u64 {
@@ -191,7 +191,7 @@ pub(crate) struct ArtefactEntry {
     /// Chat this artefact belongs to — used to filter
     /// `/api/conversations/<chat>/artefacts`.
     pub(crate) chat_id: String,
-    pub(crate) kind: crate::message::ArtefactKind,
+    pub(crate) kind: dyson_core::message::ArtefactKind,
     pub(crate) title: String,
     pub(crate) content: String,
     pub(crate) mime_type: String,
@@ -209,8 +209,6 @@ impl ArtefactStore {
     pub(crate) const MAX_ARTEFACTS: usize = 32;
 
     /// Per-chat artefact dir: `{data_dir}/{chat_id}/artefacts/`.
-    /// The migration in `chat_history::migrate` fans the legacy shared
-    /// `artefacts/` dir out into these subdirs at startup.
     pub(crate) fn dir_for_chat(data_dir: &std::path::Path, chat_id: &str) -> std::path::PathBuf {
         data_dir.join(chat_id).join("artefacts")
     }
@@ -366,10 +364,10 @@ fn load_artefact_from_subdir(sub: &std::path::Path, id: &str) -> Option<Artefact
     let body = std::fs::read_to_string(sub.join(format!("{id}.body"))).ok()?;
     let meta_txt = std::fs::read_to_string(sub.join(format!("{id}.meta.json"))).ok()?;
     let meta: serde_json::Value = serde_json::from_str(&meta_txt).ok()?;
-    let kind: crate::message::ArtefactKind = meta
+    let kind: dyson_core::message::ArtefactKind = meta
         .get("kind")
         .and_then(|k| serde_json::from_value(k.clone()).ok())
-        .unwrap_or(crate::message::ArtefactKind::Other);
+        .unwrap_or(dyson_core::message::ArtefactKind::Other);
     Some(ArtefactEntry {
         chat_id: meta
             .get("chat_id")
@@ -413,7 +411,7 @@ mod tests {
     fn art_entry(chat: &str, n: u64) -> ArtefactEntry {
         ArtefactEntry {
             chat_id: chat.to_string(),
-            kind: crate::message::ArtefactKind::Other,
+            kind: dyson_core::message::ArtefactKind::Other,
             title: format!("title-{n}"),
             content: format!("content-{n}"),
             mime_type: "text/markdown".to_string(),
@@ -491,7 +489,9 @@ mod tests {
     fn artefact_store_persists_and_loads_with_metadata_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let mut original = art_entry("c-0001", 7);
-        original.metadata = Some(serde_json::json!({"file_url": "/api/files/f1", "bytes": 1024}));
+        original.metadata = Some(
+            serde_json::json!({"file_url": "/api/conversations/c-0001/files/f1", "bytes": 1024}),
+        );
         original.tool_use_id = Some("tool_42".to_string());
         ArtefactStore::persist_static(dir.path(), "a7", &original);
         let loaded = ArtefactStore::load_from_disk(dir.path(), "a7").expect("loaded");

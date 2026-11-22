@@ -17,8 +17,7 @@
 //   The Workspace trait abstracts storage.  Implementations decide where
 //   and how files are stored:
 //
-//   - FilesystemWorkspace: reads/writes markdown files on the local filesystem
-//     in the filesystem format.  Compatible with filesystem/TARS workspaces.
+//   - FilesystemWorkspace: reads/writes markdown files on the local filesystem.
 //   - InMemoryWorkspace: in-memory HashMap, no persistence.  For tests.
 //   - (future) Cloud, database, or API-backed workspaces.
 //
@@ -42,7 +41,6 @@ pub mod channel;
 pub mod filesystem;
 pub mod in_memory;
 pub mod memory_store;
-pub mod migrate;
 
 pub use filesystem::FilesystemWorkspace;
 pub use in_memory::InMemoryWorkspace;
@@ -52,7 +50,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::config::WorkspaceConfig;
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 /// Shared, mutable handle to a `Workspace`.
 ///

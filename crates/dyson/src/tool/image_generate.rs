@@ -22,8 +22,8 @@ use base64::Engine;
 use serde_json::json;
 
 use crate::config::{LlmProvider, ProviderConfig};
-use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use dyson_core::error::{DysonError, Result};
 
 // ---------------------------------------------------------------------------
 // GeneratedImage — a single image returned by a provider.

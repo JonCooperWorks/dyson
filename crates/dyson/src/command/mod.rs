@@ -20,7 +20,6 @@
 //   This keeps main.rs short — just CLI parsing and dispatch.
 // ===========================================================================
 
-pub mod cost_backfill;
 pub mod hash_bearer;
 pub mod init;
 pub mod listen;
@@ -69,7 +68,7 @@ pub fn apply_overrides(
     provider: Option<String>,
     base_url: Option<String>,
     workspace: Option<String>,
-) -> dyson::error::Result<()> {
+) -> dyson_core::error::Result<()> {
     if let Some(provider_str) = provider {
         if let Some(pc) = settings.providers.get(&provider_str) {
             // Named provider from config.
@@ -77,7 +76,7 @@ pub fn apply_overrides(
             settings.agent.model = pc.default_model().to_string();
             settings.agent.api_key = pc.api_key.clone();
             settings.agent.base_url = pc.base_url.clone();
-        } else if let Some(provider_type) = dyson::llm::registry::from_str_loose(&provider_str) {
+        } else if let Some(provider_type) = dyson::llm::registry::from_name(&provider_str) {
             // Bare provider type string (e.g. "anthropic").
             settings.agent.provider = provider_type;
         } else {
@@ -86,7 +85,7 @@ pub fn apply_overrides(
                 .keys()
                 .map(std::string::String::as_str)
                 .collect();
-            return Err(dyson::error::DysonError::Config(format!(
+            return Err(dyson_core::error::DysonError::Config(format!(
                 "unknown provider '{provider_str}'.  \
                  Available: {available:?}.  \
                  Or use a type: '{}'.",

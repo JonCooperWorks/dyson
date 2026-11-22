@@ -64,11 +64,11 @@
 use async_trait::async_trait;
 
 use crate::auth::Auth;
-use crate::error::{DysonError, Result};
 use crate::llm::sse_parser::{BaseSseParser, SseJsonParser, ToolBufferContext};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
-use crate::message::{ContentBlock, Message, Role};
+use dyson_core::error::{DysonError, Result};
+use dyson_core::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
 // Anthropic message serialization

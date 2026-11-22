@@ -8,8 +8,8 @@
 
 use async_trait::async_trait;
 
-use crate::error::Result;
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use dyson_core::error::Result;
 
 pub struct SendFileTool;
 

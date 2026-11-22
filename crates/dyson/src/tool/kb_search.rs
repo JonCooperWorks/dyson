@@ -43,7 +43,11 @@ impl Tool for KbSearchTool {
         })
     }
 
-    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
+    async fn run(
+        &self,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> dyson_core::error::Result<ToolOutput> {
         let ws = ctx.workspace("kb_search")?;
 
         let query = input["query"].as_str().unwrap_or("").to_string();

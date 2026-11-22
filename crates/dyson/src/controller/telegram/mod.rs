@@ -113,7 +113,7 @@ impl super::Controller for TelegramController {
         &self,
         settings: &Settings,
         registry: &std::sync::Arc<super::ClientRegistry>,
-    ) -> crate::Result<()> {
+    ) -> dyson_core::error::Result<()> {
         eprintln!(
             "Dyson v{} — running as Telegram bot",
             env!("CARGO_PKG_VERSION")
@@ -173,7 +173,7 @@ impl super::Controller for TelegramController {
         let agents: Arc<tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>> =
             Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
-        let chat_store: Arc<dyn crate::chat_history::ChatHistory> = {
+        let chat_store: Arc<dyn dyson_persistence::ChatHistory> = {
             let store = crate::chat_history::create_chat_history(&settings.chat_history)?;
             Arc::from(store)
         };

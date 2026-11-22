@@ -184,7 +184,7 @@ pub(super) async fn handle_reaction(
     };
 
     // Convert emoji → rating at the Telegram boundary.
-    let Some(rating) = crate::feedback::FeedbackRating::from_emoji(emoji) else {
+    let Some(rating) = dyson_common::feedback::FeedbackRating::from_emoji(emoji) else {
         tracing::debug!(chat_id, emoji, "unknown emoji reaction — ignoring");
         return;
     };

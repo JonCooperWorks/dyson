@@ -9,7 +9,7 @@ Provider-neutral LLM client layer. `LlmClient::stream` turns messages, a system 
 - `StreamEvent`, `StopReason` [stream.rs:StreamEvent, stream.rs:StopReason]
 - Clients: `AnthropicClient` [anthropic.rs:AnthropicClient], `OpenAiClient` [openai.rs:OpenAiClient], `OpenAiCompatClient` [openai_compat.rs:OpenAiCompatClient], `GeminiClient` [gemini.rs:GeminiClient], `ClaudeCodeClient` [claude_code.rs:ClaudeCodeClient], `CodexClient` [codex.rs:CodexClient]
 - `create_client(...)` (crate) [mod.rs:create_client]; `RetryingLlmClient`, `ConcurrencyLimitedLlmClient` (crate) [mod.rs:RetryingLlmClient, mod.rs:ConcurrencyLimitedLlmClient]; `is_retryable(err)` [mod.rs:is_retryable]
-- `registry::{ProviderEntry, ClientConfig, registry(), lookup(provider), from_str_loose(s), all_canonical_names()}` [registry.rs:registry]
+- `registry::{ProviderEntry, ClientConfig, registry(), lookup(provider), from_name(s), all_canonical_names()}` [registry.rs:registry]
 - `pricing::{ModelPricing, lookup(provider, model)}` [pricing.rs:lookup]
 - `sse_parser::{SseJsonParser, BaseSseParser, ToolBufferContext}` [sse_parser.rs:BaseSseParser]
 - CLI helpers: `CliLineParser`, `cli_event_stream`, `filter_tools_for_cli`, `forwarded_tools_for_call`, `sanitized_child_env`, `subscription_proxy` [cli_subprocess.rs:cli_event_stream]

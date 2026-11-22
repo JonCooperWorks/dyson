@@ -55,7 +55,6 @@ Add a `ProviderEntry` to the registry in `src/llm/registry.rs`:
 ProviderEntry {
     provider: LlmProvider::YourProvider,
     canonical_name: "your-provider",
-    aliases: &["your-provider", "yp"],
     env_var: Some("YOUR_PROVIDER_API_KEY"),  // or None for CLI providers
     requires_api_key: true,                   // false for CLI providers
     create_client: |c| Box::new(
@@ -73,11 +72,10 @@ CLI interrogate it generically — they never match on `LlmProvider` variants.
 
 | Field | What it drives |
 |-------|---------------|
-| `aliases` | Loose string parsing (`--provider openai`, `"type": "gpt"`) |
 | `env_var` | Environment variable for API key fallback |
 | `requires_api_key` | Whether to attempt key resolution at all |
 | `create_client` | Factory function called by `ClientRegistry` to build the provider's `LlmClient` |
-| `canonical_name` | Display in `--provider` error messages |
+| `canonical_name` | The one accepted name: `providers.*.type`, `--provider`, and error messages |
 
 The `resolve_api_key()` method on `ProviderEntry` encapsulates the full
 API key resolution flow (env var fallback, custom base_url security check),

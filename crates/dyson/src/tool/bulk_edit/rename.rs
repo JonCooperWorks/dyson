@@ -16,11 +16,9 @@
 
 use std::path::Path;
 
-use crate::ast::{
-    self, MAX_FILE_SIZE, MAX_FILES, find_identifier_positions, find_word_boundary_matches,
-};
-use crate::error::Result;
 use crate::tool::ToolOutput;
+use dyson_ast::{MAX_FILE_SIZE, MAX_FILES, find_identifier_positions, find_word_boundary_matches};
+use dyson_core::error::Result;
 
 /// Method used to rename a given file.
 #[derive(Clone, Copy)]
@@ -66,7 +64,7 @@ pub fn rename_symbol(
             files.push((path, count, method));
         }
     } else if resolved_path.is_dir() {
-        for entry in ast::walk_dir(resolved_path).flatten() {
+        for entry in dyson_ast::walk_dir(resolved_path).flatten() {
             if files.len() >= MAX_FILES {
                 break;
             }
@@ -118,7 +116,7 @@ fn process_file(
 ) -> Result<Option<(String, usize, Method)>> {
     let ext = path.extension().and_then(|e| e.to_str());
     let ast_capable = ext
-        .and_then(ast::config_for_extension)
+        .and_then(dyson_ast::config_for_extension)
         .is_some_and(|c| !c.identifier_types.is_empty());
 
     if ast_capable {
@@ -148,7 +146,7 @@ fn process_file_ast(
     new_name: &str,
     dry_run: bool,
 ) -> Result<Option<(String, usize)>> {
-    let (config, parsed) = match ast::try_parse_file(path, working_dir_canon, true)? {
+    let (config, parsed) = match dyson_ast::try_parse_file(path, working_dir_canon, true)? {
         Some(pair) => pair,
         None => return Ok(None),
     };
@@ -175,7 +173,7 @@ fn process_file_ast(
         }
 
         std::fs::write(path, &result).map_err(|e| {
-            crate::error::DysonError::tool("bulk_edit", format!("write failed: {e}"))
+            dyson_core::error::DysonError::tool("bulk_edit", format!("write failed: {e}"))
         })?;
     }
 
@@ -219,7 +217,7 @@ fn process_file_text(
             result.replace_range(*start..*end, new_name);
         }
         std::fs::write(path, &result).map_err(|e| {
-            crate::error::DysonError::tool("bulk_edit", format!("write failed: {e}"))
+            dyson_core::error::DysonError::tool("bulk_edit", format!("write failed: {e}"))
         })?;
     }
 

@@ -15,10 +15,9 @@ use std::fmt::Write;
 use async_trait::async_trait;
 use tree_sitter::Node;
 
-use crate::ast;
-use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::MAX_OUTPUT_BYTES;
+use dyson_core::error::{DysonError, Result};
 
 /// Cap on tree depth rendered.  A real file's root can easily be 20+ levels
 /// deep; most structural questions are answered in the first 8.
@@ -111,12 +110,12 @@ impl Tool for AstDescribeTool {
                 let lang = input["language"].as_str().ok_or_else(|| {
                     DysonError::tool("ast_describe", "snippet mode requires `language`")
                 })?;
-                let cfg = match ast::config_for_language_name(lang) {
+                let cfg = match dyson_ast::config_for_language_name(lang) {
                     Some(c) => c,
                     None => {
                         return Ok(ToolOutput::error(format!(
                             "unknown language '{lang}'.  Supported: {}",
-                            ast::supported_language_names().join(", ")
+                            dyson_ast::supported_language_names().join(", ")
                         )));
                     }
                 };
@@ -148,7 +147,7 @@ impl Tool for AstDescribeTool {
                 };
 
                 let cfg = match input["language"].as_str() {
-                    Some(name) => match ast::config_for_language_name(name) {
+                    Some(name) => match dyson_ast::config_for_language_name(name) {
                         Some(c) => c,
                         None => {
                             return Ok(ToolOutput::error(format!("unknown language '{name}'")));
@@ -156,7 +155,7 @@ impl Tool for AstDescribeTool {
                     },
                     None => {
                         let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or("");
-                        match ast::config_for_extension(ext) {
+                        match dyson_ast::config_for_extension(ext) {
                             Some(c) => c,
                             None => {
                                 return Ok(ToolOutput::error(format!(
@@ -218,7 +217,7 @@ impl Tool for AstDescribeTool {
 /// `MAX_OUTPUT_BYTES` with a trailing truncation note.
 pub fn describe_source(
     source: &str,
-    config: &'static crate::ast::LanguageConfig,
+    config: &'static dyson_ast::LanguageConfig,
     line_range: Option<(usize, usize)>,
     max_depth: usize,
 ) -> std::result::Result<String, String> {

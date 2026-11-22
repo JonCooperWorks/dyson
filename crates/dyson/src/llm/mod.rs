@@ -56,10 +56,10 @@ use tokio_stream::Stream;
 
 use std::fmt::Write as _;
 
-use crate::error::{DysonError, Result};
 use crate::llm::stream::StreamEvent;
-use crate::message::{ContentBlock, Message, Role};
 use crate::tool::Tool;
+use dyson_core::error::{DysonError, Result};
+use dyson_core::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
 // CompletionConfig
@@ -403,7 +403,7 @@ impl SseLineBuffer {
     /// `MAX_LINE_BUFFER`.
     pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<String>> {
         if self.buffer.len() + bytes.len() > MAX_LINE_BUFFER {
-            return Err(crate::error::DysonError::Llm(
+            return Err(dyson_core::error::DysonError::Llm(
                 "SSE line buffer exceeded 10 MB — aborting stream".into(),
             ));
         }
@@ -648,11 +648,11 @@ impl LlmClient for RetryingLlmClient {
                 Ok(r) => return Ok(r),
                 Err(e) if attempt < self.max_retries && is_retryable(&e) => {
                     let input = messages.iter().map(Message::estimate_tokens).sum::<usize>()
-                        + crate::message::estimate_text_tokens(system)
-                        + crate::message::estimate_text_tokens(system_suffix)
+                        + dyson_core::message::estimate_text_tokens(system)
+                        + dyson_core::message::estimate_text_tokens(system_suffix)
                         + tools
                             .iter()
-                            .map(|t| crate::message::estimate_json_tokens(&t.input_schema))
+                            .map(|t| dyson_core::message::estimate_json_tokens(&t.input_schema))
                             .sum::<usize>();
                     crate::agent::task::budget::charge_uncertain_retry(
                         &config.model,
@@ -835,7 +835,7 @@ pub(crate) async fn start_mcp_server(
     let server = Arc::new(McpHttpServer::new(Arc::clone(workspace), extra_tools));
 
     let (port, handle, token) = server.start().await.map_err(|e| {
-        crate::error::DysonError::Llm(format!("failed to start MCP HTTP server: {e}"))
+        dyson_core::error::DysonError::Llm(format!("failed to start MCP HTTP server: {e}"))
     })?;
 
     let url = format!("http://127.0.0.1:{port}/mcp");
@@ -860,7 +860,7 @@ pub(crate) async fn start_mcp_tools_server(
 
     let server = Arc::new(McpHttpServer::new_tools_only(extra_tools));
     let (port, handle, token) = server.start().await.map_err(|e| {
-        crate::error::DysonError::Llm(format!("failed to start MCP HTTP server: {e}"))
+        dyson_core::error::DysonError::Llm(format!("failed to start MCP HTTP server: {e}"))
     })?;
     let url = format!("http://127.0.0.1:{port}/mcp");
 

@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use rand::RngExt;
 
 use crate::auth::{Auth, AuthInfo, Credential};
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 /// Bearer token authentication.
 ///

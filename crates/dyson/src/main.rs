@@ -94,11 +94,6 @@ enum Commands {
         #[arg(long)]
         daemonize: bool,
 
-        /// Import an existing filesystem workspace directory.
-        /// Copies its contents into ~/.dyson/workspace/.
-        #[arg(long)]
-        import_filesystem: Option<PathBuf>,
-
         /// Directory to initialize.  Default: ~/.dyson
         #[arg(long)]
         path: Option<PathBuf>,
@@ -128,28 +123,9 @@ enum Commands {
         stdin: bool,
     },
 
-    /// Backfill assistant-message display costs from Swarm audit rows.
-    CostBackfill {
-        /// Path to dyson.json config file.
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-
-        /// Swarm base URL, e.g. https://swarm.example.com.
-        #[arg(long)]
-        swarm_url: String,
-
-        /// Bearer token accepted by Swarm for this user's cost API.
-        #[arg(long)]
-        bearer: Option<String>,
-
-        /// Scan and print counts without rewriting transcripts.
-        #[arg(long, default_value_t = false)]
-        dry_run: bool,
-    },
-
     /// Boot inside a Swarm-managed sandbox under the dyson-orchestrator.
-    /// Reads SWARM_BEARER_TOKEN, SWARM_PROXY_URL, SWARM_PROXY_TOKEN,
-    /// SWARM_TASK, SWARM_NAME, SWARM_INSTANCE_ID from the env, then
+    /// Reads SWARM_BEARER_TOKEN, SWARM_PROXY_URL, SWARM_TASK, SWARM_NAME,
+    /// SWARM_INSTANCE_ID from the env, then
     /// synthesises a dyson.json + workspace and runs the HTTP controller.
     Swarm,
 
@@ -185,7 +161,7 @@ enum Commands {
 // ---------------------------------------------------------------------------
 
 #[tokio::main(worker_threads = 1)]
-async fn main() -> dyson::error::Result<()> {
+async fn main() -> dyson_core::error::Result<()> {
     // Install ring as the rustls crypto provider (instead of the heavier aws-lc-rs default).
     dyson::http::ensure_crypto_provider();
 
@@ -237,18 +213,10 @@ async fn main() -> dyson::error::Result<()> {
         Commands::Init {
             noinput,
             daemonize,
-            import_filesystem,
             path,
             env_vars,
             dangerous_no_sandbox,
-        } => command::init::run(
-            noinput,
-            daemonize,
-            import_filesystem,
-            path,
-            env_vars,
-            dangerous_no_sandbox,
-        ),
+        } => command::init::run(noinput, daemonize, path, env_vars, dangerous_no_sandbox),
         Commands::Listen {
             config,
             dangerous_no_sandbox,
@@ -265,7 +233,7 @@ async fn main() -> dyson::error::Result<()> {
                 let mut value = String::new();
                 std::io::stdin().take(4097).read_to_string(&mut value)?;
                 if value.len() > 4096 {
-                    return Err(dyson::error::DysonError::Config(
+                    return Err(dyson_core::error::DysonError::Config(
                         "hash-bearer input exceeds 4096 bytes".into(),
                     ));
                 }
@@ -275,12 +243,6 @@ async fn main() -> dyson::error::Result<()> {
             };
             command::hash_bearer::run(plaintext)
         }
-        Commands::CostBackfill {
-            config,
-            swarm_url,
-            bearer,
-            dry_run,
-        } => command::cost_backfill::run(config, swarm_url, bearer, dry_run).await,
         Commands::Swarm => command::swarm::run().await,
         Commands::Run {
             prompt,

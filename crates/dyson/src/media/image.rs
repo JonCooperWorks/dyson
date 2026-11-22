@@ -16,7 +16,7 @@ use image::ImageReader;
 use image::imageops::FilterType;
 use std::io::Cursor;
 
-use crate::message::ContentBlock;
+use dyson_core::message::ContentBlock;
 
 /// Maximum dimension (width or height) before resizing.
 const MAX_DIMENSION: u32 = 1568;
@@ -28,13 +28,15 @@ const MAX_BASE64_BYTES: usize = 4 * 1024 * 1024;
 ///
 /// Decodes the image, resizes if necessary, re-encodes as JPEG, and
 /// base64-encodes the result.
-pub fn process_image(data: &[u8]) -> crate::Result<ContentBlock> {
+pub fn process_image(data: &[u8]) -> dyson_core::error::Result<ContentBlock> {
     // Decode from any supported format.
     let img = ImageReader::new(Cursor::new(data))
         .with_guessed_format()
-        .map_err(crate::DysonError::Io)?
+        .map_err(dyson_core::error::DysonError::Io)?
         .decode()
-        .map_err(|e| crate::DysonError::Config(format!("failed to decode image: {e}")))?;
+        .map_err(|e| {
+            dyson_core::error::DysonError::Config(format!("failed to decode image: {e}"))
+        })?;
 
     // Resize if either dimension exceeds the limit.
     let img = if img.width() > MAX_DIMENSION || img.height() > MAX_DIMENSION {
@@ -53,13 +55,15 @@ pub fn process_image(data: &[u8]) -> crate::Result<ContentBlock> {
     let mut jpeg_buf = Vec::new();
     let mut cursor = Cursor::new(&mut jpeg_buf);
     img.write_to(&mut cursor, image::ImageFormat::Jpeg)
-        .map_err(|e| crate::DysonError::Config(format!("failed to encode image as JPEG: {e}")))?;
+        .map_err(|e| {
+            dyson_core::error::DysonError::Config(format!("failed to encode image as JPEG: {e}"))
+        })?;
 
     // Base64-encode.
     let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_buf);
 
     if b64.len() > MAX_BASE64_BYTES {
-        return Err(crate::DysonError::Config(format!(
+        return Err(dyson_core::error::DysonError::Config(format!(
             "image too large after processing: {} bytes base64 (max {})",
             b64.len(),
             MAX_BASE64_BYTES

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 
 use crate::auth::Auth;
-use crate::error::Result;
+use dyson_core::error::Result;
 
 /// Applies a static set of headers to every outgoing request.
 ///

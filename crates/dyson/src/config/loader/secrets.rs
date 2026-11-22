@@ -1,7 +1,7 @@
 //! Resolve secret references and validate credential destinations.
 use crate::config::Settings;
-use crate::error::{DysonError, Result};
 use crate::secret::{SecretRegistry, SecretValue};
+use dyson_core::error::{DysonError, Result};
 
 /// Walk a JSON value and resolve any secret references in-place.
 ///

@@ -1,4 +1,4 @@
-//! Load dyson.json: discover and migrate the file, convert settings, resolve
+//! Load dyson.json: discover the file, check its `config_version`, convert settings, resolve
 //! credentials, then validate the model and subagent references.
 mod files;
 mod parsing;
@@ -7,10 +7,10 @@ mod secrets;
 mod validation;
 
 use crate::config::Settings;
-use crate::error::Result;
 use crate::secret::SecretRegistry;
+use dyson_core::error::Result;
 pub use files::persist_model_selection;
-use files::{load_and_migrate, try_discover_config};
+use files::{load_config, try_discover_config};
 use parsing::build_settings;
 use secrets::resolve_api_keys;
 use std::path::Path;
@@ -26,12 +26,11 @@ pub use validation::validate_subagent_configs;
 /// 3. Try `~/.config/dyson/dyson.json`.
 /// 4. No file found → use built-in defaults.
 ///
-/// Config files are automatically migrated in-memory before parsing.
-/// Old formats (e.g. inline `agent.provider`/`api_key`) are upgraded
-/// to the current schema via the migration chain in `config::migrate`.
+/// A file must carry `config_version` equal to [`crate::config::CONFIG_VERSION`]
+/// and use only current keys; anything else is refused with an error.
 pub fn load_settings(path: Option<&Path>) -> Result<Settings> {
     let json_root = match path {
-        Some(p) => load_and_migrate(p)?,
+        Some(p) => load_config(p)?,
         None => try_discover_config()?,
     };
 

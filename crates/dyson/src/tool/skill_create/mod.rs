@@ -114,7 +114,11 @@ impl Tool for SkillCreateTool {
         })
     }
 
-    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
+    async fn run(
+        &self,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> dyson_core::error::Result<ToolOutput> {
         let ws = ctx.workspace("skill_create")?;
 
         let name = input["name"].as_str().unwrap_or("").trim().to_string();

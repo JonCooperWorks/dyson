@@ -54,14 +54,14 @@
 use async_trait::async_trait;
 
 use crate::auth::Auth;
-use crate::error::{DysonError, Result};
 use crate::llm::sse_parser::{BaseSseParser, SseJsonParser, ToolBufferContext};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{
     CompletionConfig, LlmClient, StreamResponse, ToolDefinition, concat_system_prompt,
 };
-use crate::message::{ContentBlock, Message, Role};
 use dyson_common::contracts::SWARM_LLM_AUDIT_ID_HEADER;
+use dyson_core::error::{DysonError, Result};
+use dyson_core::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
 // OpenAiClient

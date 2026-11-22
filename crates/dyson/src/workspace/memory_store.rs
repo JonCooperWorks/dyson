@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 /// A search result from the FTS5 index.
 pub struct SearchResult {

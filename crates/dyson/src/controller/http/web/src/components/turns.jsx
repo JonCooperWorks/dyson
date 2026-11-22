@@ -592,7 +592,7 @@ function ArtefactBlock({ block, chatId }) {
            className="fileblock image" title={block.title || 'image'}>
           {src
             ? <img src={src} alt={block.title || 'image'}/>
-            : <div style={{width:220, height:160, background:'var(--panel)', borderRadius:4}}/>}
+            : <div style={{width:220, height:160, background:'var(--bg-1)', borderRadius:4}}/>}
           <span className="cap">{block.title || 'image'}</span>
         </a>
         <ArtefactShareControl block={block} chatId={chatId}/>
@@ -606,7 +606,7 @@ function ArtefactBlock({ block, chatId }) {
       <a href={reader} onClick={open} className="fileblock" title="Open artifact">
         <Icon name="file" size={14}/>
         <span className="name">{block.title || 'Artifact'}</span>
-        <span className="sz mono" style={{color:'var(--fg-dim)'}}>{kind}</span>
+        <span className="sz mono" style={{color:'var(--fg-muted)'}}>{kind}</span>
         {typeof block.bytes === 'number' && (
           <span className="sz mono">{prettySize(block.bytes)}</span>
         )}
@@ -618,7 +618,7 @@ function ArtefactBlock({ block, chatId }) {
 }
 
 function ArtefactShareControl({ block, chatId }) {
-  const scopedChatId = chatId || block.chat_id || block.chatId || null;
+  const scopedChatId = chatId || null;
   const canShare = Boolean(block.id && scopedChatId);
   const [busy, setBusy] = useState(false);
   const [shareUrl, setShareUrl] = useState('');
@@ -968,8 +968,8 @@ function Composer({
              style={{padding:'6px 12px', fontSize:11,
                      background: /failed|error/i.test(checkpointToast) ? 'var(--err-dim, #4a1f1f)' : 'var(--ok-dim, #1f4a2a)',
                      color:'var(--fg)',
-                     borderTop:'1px solid var(--line)',
-                     fontFamily:'var(--font-mono)'}}>
+                     borderTop:'1px solid var(--border)',
+                     fontFamily:'var(--mono)'}}>
           {checkpointToast}
         </div>
       )}
@@ -1065,7 +1065,7 @@ function Composer({
             <span className="model-label next-run-label">next {nextRunModel.model}</span>
           )}
           {activeModel && (
-            <span className="model-label" style={{fontFamily:'var(--font-mono)', fontSize:10.5, color:'var(--mute)'}}>{activeModel}</span>
+            <span className="model-label" style={{fontFamily:'var(--mono)', fontSize:10.5, color:'var(--fg-faint)'}}>{activeModel}</span>
           )}
           <button className="btn send sm" onClick={sub} disabled={blocked || (!val.trim() && !atts.length)}
                   aria-label={running ? 'Queue message' : 'Send message'}>

@@ -32,12 +32,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::error::Result;
 use crate::llm::ToolDefinition;
 #[cfg(test)]
 use crate::llm::{CompletionConfig, LlmClient};
-use crate::message::{ContentBlock, Message};
 use crate::tool::{Tool, ToolContext};
+use dyson_core::error::Result;
+use dyson_core::message::{ContentBlock, Message};
 
 use super::dream::{Dream, DreamContext, DreamOutcome, DreamTrigger};
 use super::silent_output::SilentOutput;
@@ -174,10 +174,10 @@ pub(super) async fn run_mini_loop(
 
         let mut config = ctx.config.clone();
         let estimate = messages.iter().map(Message::estimate_tokens).sum::<usize>()
-            + crate::message::estimate_text_tokens(system_prompt)
+            + dyson_core::message::estimate_text_tokens(system_prompt)
             + tool_defs
                 .iter()
-                .map(|t| crate::message::estimate_json_tokens(&t.input_schema))
+                .map(|t| dyson_core::message::estimate_json_tokens(&t.input_schema))
                 .sum::<usize>();
         let (reservation, cap) = super::task::budget::Reservation::reserve(
             ctx.tool_context.harness.budget.clone(),
@@ -205,10 +205,10 @@ pub(super) async fn run_mini_loop(
             let mut silent = SilentOutput;
             let (message, calls, tokens, _) =
                 stream_handler::process_stream(response.stream, &mut silent).await?;
-            Ok::<_, crate::error::DysonError>((observed_input, message, calls, tokens))
+            Ok::<_, dyson_core::error::DysonError>((observed_input, message, calls, tokens))
         };
         let result = tokio::select! {
-            result = tokio::time::timeout(deadline, completion) => result.map_err(|_| crate::error::DysonError::Llm("background task deadline exceeded".into()))?,
+            result = tokio::time::timeout(deadline, completion) => result.map_err(|_| dyson_core::error::DysonError::Llm("background task deadline exceeded".into()))?,
             _ = ctx.tool_context.cancellation.cancelled() => break,
         };
         let (observed_input, assistant_msg, tool_calls, tokens) = match result {
@@ -290,8 +290,8 @@ pub(super) fn summarize_for_reflection(messages: &[Message]) -> String {
             match block {
                 ContentBlock::Text { text } => {
                     let role = match msg.role {
-                        crate::message::Role::User => "User",
-                        crate::message::Role::Assistant => "Assistant",
+                        dyson_core::message::Role::User => "User",
+                        dyson_core::message::Role::Assistant => "Assistant",
                     };
                     let truncated = truncate_str(text, 500);
                     writeln!(&mut summary, "{role}: {truncated}\n").unwrap();
@@ -350,7 +350,7 @@ pub(super) fn summarize_for_reflection(messages: &[Message]) -> String {
 
 /// Format feedback entries into a textual summary for dream prompts.
 pub(super) fn format_feedback_summary(
-    entries: &[crate::feedback::FeedbackEntry],
+    entries: &[dyson_common::feedback::FeedbackEntry],
     message_count: usize,
 ) -> String {
     if entries.is_empty() {

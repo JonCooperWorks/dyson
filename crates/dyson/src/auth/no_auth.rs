@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 
 use crate::auth::{Auth, AuthInfo};
-use crate::error::Result;
+use dyson_core::error::Result;
 
 /// No-op authentication.  Accepts every incoming request as `"anonymous"`
 /// and adds no credentials to outgoing requests.

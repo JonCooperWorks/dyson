@@ -39,7 +39,7 @@ impl Workspace for MockWorkspace {
             .push_str(content);
     }
 
-    fn save(&self) -> crate::error::Result<()> {
+    fn save(&self) -> dyson_core::error::Result<()> {
         Ok(())
     }
 
@@ -106,7 +106,7 @@ impl Tool for DottedNameTool {
         &self,
         _input: &serde_json::Value,
         _ctx: &ToolContext,
-    ) -> crate::error::Result<ToolOutput> {
+    ) -> dyson_core::error::Result<ToolOutput> {
         Ok(ToolOutput::success("DOTTED_TOOL_OK"))
     }
 }

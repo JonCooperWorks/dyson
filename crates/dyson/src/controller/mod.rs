@@ -70,7 +70,7 @@ pub trait Controller: Send {
         &self,
         settings: &Settings,
         registry: &std::sync::Arc<ClientRegistry>,
-    ) -> crate::Result<()>;
+    ) -> dyson_core::error::Result<()>;
 
     /// Optional system prompt fragment contributed by this controller.
     ///
@@ -110,8 +110,8 @@ pub fn active_provider_name(settings: &Settings) -> Option<String> {
         return Some(active.name().to_string());
     }
 
-    // Compatibility for Settings built by tests or older call sites that
-    // populate only the flattened agent fields.
+    // `--provider` CLI overrides and env-only configs set just the
+    // flattened agent fields; match them back to a named provider.
     settings.providers.iter().find_map(|(name, pc)| {
         if pc.provider_type == settings.agent.provider && pc.models.contains(&settings.agent.model)
         {

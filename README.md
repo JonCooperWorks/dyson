@@ -31,7 +31,7 @@ contracts; `dyson-harness` owns execution, scheduling, replay, and grading;
 `dyson-persistence` owns histories and journals; and the `dyson` package is
 the composition root for providers, tools, controllers, configuration, and
 the CLI. See [Crate architecture](docs/crate-architecture.md) for dependency
-rules and compatibility guarantees.
+rules.
 
 ```mermaid
 flowchart TB
@@ -134,8 +134,8 @@ Swarm-managed sandbox pod.
 
 ## Configuration
 
-Dyson uses `dyson.json`. Current configs use `config_version: 3`; older files
-are migrated automatically on load.
+Dyson uses `dyson.json`. Every config must carry `config_version: 3`; any
+other version, or a file in an older shape, is refused at load.
 
 Minimal config:
 
@@ -166,12 +166,12 @@ the active default for that provider. See [Configuration](docs/configuration.md)
 | Provider | Config value | Credential source | Notes |
 |---|---|---|---|
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` or `api_key` | Native Messages API and tool blocks |
-| OpenAI | `openai`, `gpt` | `OPENAI_API_KEY` or `api_key` | Native OpenAI, or compatible APIs via `base_url` |
+| OpenAI | `openai` | `OPENAI_API_KEY` or `api_key` | Native OpenAI, or compatible APIs via `base_url` |
 | OpenRouter | `openrouter` | `OPENROUTER_API_KEY` or `api_key` | OpenAI-compatible wrapper with model dialect handling |
-| Gemini | `gemini`, `google` | `GEMINI_API_KEY` or `api_key` | Gemini streaming and image generation support |
-| Ollama Cloud | `ollama-cloud`, `ollama` | `OLLAMA_API_KEY` or `api_key` | OpenAI-compatible cloud endpoint |
-| Claude Code | `claude-code`, `cc` | Claude CLI auth | Subprocess provider with internal tools |
-| Codex | `codex`, `codex-cli` | Codex CLI auth | Subprocess provider with internal tools |
+| Gemini | `gemini` | `GEMINI_API_KEY` or `api_key` | Gemini streaming and image generation support |
+| Ollama Cloud | `ollama-cloud` | `OLLAMA_API_KEY` or `api_key` | OpenAI-compatible cloud endpoint |
+| Claude Code | `claude-code` | Claude CLI auth | Subprocess provider with internal tools |
+| Codex | `codex` | Codex CLI auth | Subprocess provider with internal tools |
 
 When `base_url` is set for an API-key provider, environment fallback is blocked;
 put the intended key in that provider entry explicitly.

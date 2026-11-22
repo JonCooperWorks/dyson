@@ -29,12 +29,12 @@ const MAX_BATCH: usize = 200;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Spawn {
-    /// Empty for a launch that is not a tool call (a harness CLI). Sent even
-    /// then: Swarm before execution IDs requires the field, and drops it.
+    /// Empty for a launch that is not a tool call (a harness CLI). Always
+    /// sent: Swarm's spawn ingest requires the field.
     pub tool_use_id: String,
     pub tool_name: String,
     pub spawned_ms: i64,
-    /// The launch's `DYSON_EXECUTION_ID`. Older Swarm ignores it.
+    /// The launch's `DYSON_EXECUTION_ID`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
 }

@@ -22,10 +22,8 @@
 // an id's artefacts, files, media, and transcript all share a parent
 // directory and die together.
 //
-// A one-shot migration at `DiskChatHistory::new` moves any legacy
-// flat-layout files (`{id}.json`, `{id}.TIMESTAMP.json`, `{id}_feedback.json`,
-// `{id}_media/`) into the per-chat shape so existing deployments don't
-// need manual cleanup.
+// The root carries a `.chats_version` marker.  `DiskChatHistory::new`
+// stamps it when absent and refuses a dir stamped with any other version.
 // ===========================================================================
 
 use std::collections::HashMap;
@@ -39,6 +37,37 @@ use dyson_core::{ContentBlock, Message};
 /// Prefix used in the `data` field to indicate externalized image data.
 /// This cannot be valid base64, so there's no collision risk.
 const MEDIA_REF_PREFIX: &str = "@media/";
+
+/// The only chats-directory layout version this build reads.
+pub const CHATS_VERSION: u64 = 1;
+
+/// Marker file at the chats root holding [`CHATS_VERSION`].
+const VERSION_FILE: &str = ".chats_version";
+
+/// Stamp an unmarked chats dir with [`CHATS_VERSION`]; refuse one whose
+/// marker names any other version.
+///
+/// An unmarked dir is taken as current: the per-chat layout predates the
+/// marker, which was only ever written by the (removed) flat-layout
+/// migration, and Swarm's state mirror never carries dotfiles.
+fn check_or_stamp_version(dir: &Path) -> Result<()> {
+    let path = dir.join(VERSION_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(CHATS_VERSION) => Ok(()),
+            _ => Err(dyson_core::DysonError::Config(format!(
+                "chats dir {} is version {:?}; this Dyson reads only version {CHATS_VERSION}",
+                dir.display(),
+                raw.trim(),
+            ))),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(&path, format!("{CHATS_VERSION}\n"))?;
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // DiskChatHistory
@@ -83,13 +112,11 @@ struct CachedOutcomes {
 impl DiskChatHistory {
     /// Create a new disk chat history rooted at the given directory.
     ///
-    /// Creates the directory if it doesn't exist and runs any pending
-    /// chat-dir migrations (no-op on a current-version dir).
+    /// Creates the directory if it doesn't exist and checks its
+    /// `.chats_version` marker (see [`check_or_stamp_version`]).
     pub fn new(dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&dir)?;
-        if let Err(e) = crate::migrate::migrate(&dir) {
-            tracing::warn!(error = %e, dir = %dir.display(), "chats migration failed");
-        }
+        check_or_stamp_version(&dir)?;
         Ok(Self {
             dir,
             journal_locks: std::array::from_fn(|_| std::sync::Mutex::new(())),
@@ -800,6 +827,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let store = DiskChatHistory::new(dir.clone()).unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn chats_version_marker_is_stamped_and_enforced() {
+        let (dir, _store) = temp_store("version_marker");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(VERSION_FILE))
+                .unwrap()
+                .trim(),
+            CHATS_VERSION.to_string()
+        );
+        // Re-opening a stamped dir works.
+        DiskChatHistory::new(dir.clone()).unwrap();
+
+        std::fs::write(dir.join(VERSION_FILE), "0\n").unwrap();
+        let err = DiskChatHistory::new(dir.clone()).err().unwrap().to_string();
+        assert!(err.contains("reads only version 1"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -109,7 +109,11 @@ impl Tool for WorkspaceTool {
         })
     }
 
-    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
+    async fn run(
+        &self,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> dyson_core::error::Result<ToolOutput> {
         let ws = ctx.workspace("workspace")?;
         let op: Op = match serde_json::from_value(input.clone()) {
             Ok(op) => op,
@@ -129,7 +133,7 @@ impl Tool for WorkspaceTool {
     }
 }
 
-async fn view(ws: &WorkspaceHandle, file: &str) -> crate::Result<ToolOutput> {
+async fn view(ws: &WorkspaceHandle, file: &str) -> dyson_core::error::Result<ToolOutput> {
     if let Err(msg) = super::validate_workspace_path(file) {
         return Ok(ToolOutput::error(msg));
     }
@@ -150,7 +154,7 @@ async fn view(ws: &WorkspaceHandle, file: &str) -> crate::Result<ToolOutput> {
     }
 }
 
-async fn list(ws: &WorkspaceHandle) -> crate::Result<ToolOutput> {
+async fn list(ws: &WorkspaceHandle) -> dyson_core::error::Result<ToolOutput> {
     let files = ws.read().await.list_files();
     if files.is_empty() {
         Ok(ToolOutput::success("Workspace is empty."))
@@ -165,7 +169,7 @@ async fn list(ws: &WorkspaceHandle) -> crate::Result<ToolOutput> {
     }
 }
 
-async fn search(ws: &WorkspaceHandle, pattern: &str) -> crate::Result<ToolOutput> {
+async fn search(ws: &WorkspaceHandle, pattern: &str) -> dyson_core::error::Result<ToolOutput> {
     let results = ws.read().await.search(pattern);
     if results.is_empty() {
         return Ok(ToolOutput::success(format!("No matches for '{pattern}'.")));
@@ -186,7 +190,7 @@ async fn update(
     file: &str,
     content: &str,
     mode: UpdateMode,
-) -> crate::Result<ToolOutput> {
+) -> dyson_core::error::Result<ToolOutput> {
     if let Err(msg) = super::validate_workspace_path(file) {
         return Ok(ToolOutput::error(msg));
     }

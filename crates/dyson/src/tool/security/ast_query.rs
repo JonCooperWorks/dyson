@@ -25,10 +25,9 @@ use async_trait::async_trait;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
 
-use crate::ast;
-use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::MAX_OUTPUT_BYTES;
+use dyson_core::error::{DysonError, Result};
 
 /// Per-file query timeout: 5 seconds.
 const QUERY_TIMEOUT_MICROS: u64 = 5_000_000;
@@ -99,16 +98,16 @@ impl Tool for AstQueryTool {
         // via its extension — sidesteps the common LLM mistake of omitting
         // the field after `"include": "*.rs"`.
         let config = match input["language"].as_str() {
-            Some(name) => match ast::config_for_language_name(name) {
+            Some(name) => match dyson_ast::config_for_language_name(name) {
                 Some(c) => c,
                 None => {
                     return Ok(ToolOutput::error(format!(
                         "unknown language '{name}'.  Supported: {}",
-                        ast::supported_language_names().join(", ")
+                        dyson_ast::supported_language_names().join(", ")
                     )));
                 }
             },
-            None => match include_glob.as_deref().and_then(ast::config_for_glob) {
+            None => match include_glob.as_deref().and_then(dyson_ast::config_for_glob) {
                 Some(c) => c,
                 None => {
                     return Ok(ToolOutput::error(
@@ -206,7 +205,7 @@ impl Tool for AstQueryTool {
 /// Errors on compile failure or capture-less queries.
 pub fn execute_query_string(
     query_str: &str,
-    config: &'static ast::LanguageConfig,
+    config: &'static dyson_ast::LanguageConfig,
     search_dir: &std::path::Path,
     include_glob: Option<&str>,
 ) -> std::result::Result<Vec<String>, String> {
@@ -227,7 +226,7 @@ pub fn execute_query_string(
 /// Run the compiled query against all matching files in `search_dir`.
 fn run_query(
     query: &Query,
-    config: &ast::LanguageConfig,
+    config: &dyson_ast::LanguageConfig,
     search_dir: &std::path::Path,
     working_dir_canon: &std::path::Path,
     include_glob: Option<&str>,
@@ -238,10 +237,10 @@ fn run_query(
 
     let capture_names: Vec<&str> = query.capture_names().to_vec();
 
-    for entry in ast::walk_dir_filtered(search_dir, include_glob).flatten() {
+    for entry in dyson_ast::walk_dir_filtered(search_dir, include_glob).flatten() {
         if results.len() >= MAX_MATCHES
             || total_bytes >= MAX_OUTPUT_BYTES
-            || file_count >= ast::MAX_FILES
+            || file_count >= dyson_ast::MAX_FILES
         {
             break;
         }
@@ -256,7 +255,7 @@ fn run_query(
             Some(e) => e,
             None => continue,
         };
-        let file_config = match ast::config_for_extension(ext) {
+        let file_config = match dyson_ast::config_for_extension(ext) {
             Some(c) => c,
             None => continue,
         };
@@ -265,7 +264,7 @@ fn run_query(
             continue;
         }
 
-        let parsed = match ast::try_parse_file(path, working_dir_canon, false) {
+        let parsed = match dyson_ast::try_parse_file(path, working_dir_canon, false) {
             Ok(Some((_cfg, pf))) => pf,
             _ => continue,
         };

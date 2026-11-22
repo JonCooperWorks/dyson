@@ -16,5 +16,3 @@ export const FALLBACK_SLASH_COMMANDS = Object.freeze([
   // download button in the transcript header that hits
   // GET /api/conversations/<id>/export directly.
 ].map(Object.freeze));
-
-export const SLASH_COMMANDS = FALLBACK_SLASH_COMMANDS;

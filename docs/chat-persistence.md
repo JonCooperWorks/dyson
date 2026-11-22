@@ -7,7 +7,6 @@ history. History is saved to disk after each turn and restored on startup.
 **Key files:**
 - `src/chat_history/mod.rs` — `ChatHistory` trait
 - `src/chat_history/disk.rs` — `DiskChatHistory` (per-chat directory persistence)
-- `src/chat_history/migrate.rs` — one-shot flat-layout migration
 - `src/controller/telegram.rs` — per-chat agent management, `/clear` and `/memory` commands
 - `src/agent/mod.rs` — `Agent::messages()`, `Agent::set_messages()`, `Agent::clear()`
 
@@ -61,9 +60,9 @@ The default implementation stores one directory per chat:
 conversation history. Large inline image/document payloads are externalized to
 `media/*.b64` and restored on load so the transcript stays small.
 
-On startup, `DiskChatHistory::new` migrates the older flat layout
-(`{id}.json`, `{id}.TIMESTAMP.json`, `{id}_feedback.json`, `{id}_media/`, and
-shared `artefacts/`) into this per-chat shape.
+The chats root carries `.chats_version` (currently 1). `DiskChatHistory::new`
+stamps it when missing and refuses a directory whose marker names any other
+version; there is no automatic migration.
 
 ---
 

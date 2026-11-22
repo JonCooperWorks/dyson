@@ -17,7 +17,6 @@
 //   dyson-persistence   — Chat histories and durable run journals
 //   dyson (composition crate)
 //     ├── auth          — Auth trait, Credential, BearerToken/ApiKey/Composite auth
-//     ├── error/message — Compatibility façades over dyson-core
 //     ├── config        — Settings, loaders (dyson.json)
 //     ├── tool          — Tool trait, ToolContext, ToolOutput, built-in tools
 //     ├── skill         — Skill trait, BuiltinSkill
@@ -46,20 +45,15 @@
 
 pub mod advisor;
 pub mod agent;
-pub mod ast;
 pub mod auth;
 pub mod chat_history;
 pub mod config;
 pub mod controller;
-pub mod dependency_analysis;
-pub mod error;
 pub mod export;
 pub mod feedback;
 pub mod http;
 pub mod llm;
 pub mod media;
-pub mod message;
-pub mod message_cost_backfill;
 pub mod sandbox;
 pub mod secret;
 pub mod security_spawns;
@@ -67,16 +61,9 @@ pub mod skill;
 pub mod subscription_models;
 pub mod swarm_cost;
 pub mod swarm_state_sync;
-pub mod tokens;
 pub mod tool;
 pub(crate) mod tool_hooks;
 pub(crate) mod util;
 pub mod workspace;
-
-// ---------------------------------------------------------------------------
-// Re-exports for convenience
-// ---------------------------------------------------------------------------
-
-pub use error::{DysonError, Result};
 
 pub mod telemetry;

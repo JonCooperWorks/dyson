@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use hyper::Request;
 
-use crate::message::{ContentBlock, Message, Role};
+use dyson_core::message::{ContentBlock, Message, Role};
 
 use super::super::responses::{
     Resp, bad_request, json_ok, not_found, read_json_capped, safe_store_id,
@@ -468,7 +468,7 @@ async fn has_disk_artefact_meta(sub: &std::path::Path) -> bool {
 }
 
 fn sent_file_block_for_artefact(a: &ArtefactDto) -> Option<BlockDto> {
-    if matches!(a.kind, crate::message::ArtefactKind::Image) {
+    if matches!(a.kind, dyson_core::message::ArtefactKind::Image) {
         return None;
     }
     let meta = a.metadata.as_ref()?;

@@ -110,7 +110,7 @@ Agent calls → Output methods for display
 
 ## Message Types
 
-All conversation state flows through three types defined in `src/message.rs`:
+All conversation state flows through three types defined in `crates/dyson-core/src/message.rs`:
 
 ```rust
 enum Role { User, Assistant }
@@ -188,7 +188,7 @@ the provider's tool events instead of running them a second time.
 
 ## Error Handling
 
-All errors flow through a single `DysonError` enum (`src/error.rs`):
+All errors flow through a single `DysonError` enum (`crates/dyson-core/src/error.rs`):
 
 ```rust
 enum DysonError {

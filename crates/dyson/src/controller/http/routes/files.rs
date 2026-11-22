@@ -1,5 +1,5 @@
 // ===========================================================================
-// /api/files/:id — serve agent-produced bytes from the in-memory FIFO
+// /api/conversations/<chat>/files/:id — serve agent-produced bytes from the in-memory FIFO
 // cache, falling back to disk for entries that have aged out.
 // ===========================================================================
 

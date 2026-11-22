@@ -2,9 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::controller::Output;
-use crate::error::{LlmRecovery, Result};
-use crate::message::{Artefact, Message, MessageCostMetadata};
 use crate::tool::{CheckpointEvent, ToolOutput};
+use dyson_core::error::{LlmRecovery, Result};
+use dyson_core::message::{Artefact, Message, MessageCostMetadata};
 
 use super::dream::DreamEvent;
 use super::retry::{MAXTOKENS_TOOL_CALL_TRUNCATED, StreamResult};
@@ -45,16 +45,19 @@ impl<'a> StreamRetryOutput<'a> {
 }
 
 impl Output for StreamRetryOutput<'_> {
-    fn text_delta(&mut self, text: &str) -> std::result::Result<(), crate::error::DysonError> {
+    fn text_delta(&mut self, text: &str) -> std::result::Result<(), dyson_core::error::DysonError> {
         if !text.is_empty() {
             self.emitted_visible_output = true;
         }
-        self.estimated_output_tokens += crate::message::estimate_text_tokens(text);
+        self.estimated_output_tokens += dyson_core::message::estimate_text_tokens(text);
         self.inner.text_delta(text)
     }
 
-    fn thinking_delta(&mut self, text: &str) -> std::result::Result<(), crate::error::DysonError> {
-        self.estimated_output_tokens += crate::message::estimate_text_tokens(text);
+    fn thinking_delta(
+        &mut self,
+        text: &str,
+    ) -> std::result::Result<(), dyson_core::error::DysonError> {
+        self.estimated_output_tokens += dyson_core::message::estimate_text_tokens(text);
         self.inner.thinking_delta(text)
     }
 
@@ -62,13 +65,13 @@ impl Output for StreamRetryOutput<'_> {
         &mut self,
         id: &str,
         name: &str,
-    ) -> std::result::Result<(), crate::error::DysonError> {
+    ) -> std::result::Result<(), dyson_core::error::DysonError> {
         self.emitted_visible_output = true;
         self.emitted_tool_use = true;
         self.inner.tool_use_start(id, name)
     }
 
-    fn tool_use_complete(&mut self) -> std::result::Result<(), crate::error::DysonError> {
+    fn tool_use_complete(&mut self) -> std::result::Result<(), dyson_core::error::DysonError> {
         self.emitted_visible_output = true;
         self.emitted_tool_use = true;
         self.inner.tool_use_complete()
@@ -77,12 +80,12 @@ impl Output for StreamRetryOutput<'_> {
     fn tool_result(
         &mut self,
         output: &ToolOutput,
-    ) -> std::result::Result<(), crate::error::DysonError> {
+    ) -> std::result::Result<(), dyson_core::error::DysonError> {
         self.emitted_visible_output = true;
         self.inner.tool_result(output)
     }
 
-    fn send_file(&mut self, path: &Path) -> std::result::Result<(), crate::error::DysonError> {
+    fn send_file(&mut self, path: &Path) -> std::result::Result<(), dyson_core::error::DysonError> {
         self.emitted_visible_output = true;
         self.inner.send_file(path)
     }
@@ -90,38 +93,38 @@ impl Output for StreamRetryOutput<'_> {
     fn checkpoint(
         &mut self,
         event: &CheckpointEvent,
-    ) -> std::result::Result<(), crate::error::DysonError> {
+    ) -> std::result::Result<(), dyson_core::error::DysonError> {
         self.inner.checkpoint(event)
     }
 
     fn send_artefact(
         &mut self,
         artefact: &Artefact,
-    ) -> std::result::Result<(), crate::error::DysonError> {
+    ) -> std::result::Result<(), dyson_core::error::DysonError> {
         self.emitted_visible_output = true;
         self.inner.send_artefact(artefact)
     }
 
     fn error(
         &mut self,
-        error: &crate::error::DysonError,
-    ) -> std::result::Result<(), crate::error::DysonError> {
+        error: &dyson_core::error::DysonError,
+    ) -> std::result::Result<(), dyson_core::error::DysonError> {
         self.emitted_visible_output = true;
         self.inner.error(error)
     }
 
-    fn on_llm_error(&mut self, error: &crate::error::DysonError) -> LlmRecovery {
+    fn on_llm_error(&mut self, error: &dyson_core::error::DysonError) -> LlmRecovery {
         self.inner.on_llm_error(error)
     }
 
     fn typing_indicator(
         &mut self,
         visible: bool,
-    ) -> std::result::Result<(), crate::error::DysonError> {
+    ) -> std::result::Result<(), dyson_core::error::DysonError> {
         self.inner.typing_indicator(visible)
     }
 
-    fn flush(&mut self) -> std::result::Result<(), crate::error::DysonError> {
+    fn flush(&mut self) -> std::result::Result<(), dyson_core::error::DysonError> {
         self.inner.flush()
     }
 }
@@ -185,12 +188,12 @@ impl Agent {
         output: &mut dyn Output,
     ) -> Result<Option<crate::llm::StreamResponse>> {
         if !self.conversation.token_budget.has_budget() {
-            self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
-            return Err(crate::error::DysonError::Llm(
+            self.last_run_status = dyson_harness::protocol::RunStatus::BudgetExceeded;
+            return Err(dyson_core::error::DysonError::Llm(
                 "token budget exhausted".into(),
             ));
         }
-        self.emit_run_event(super::protocol::RunEventKind::LlmAttemptStarted {
+        self.emit_run_event(dyson_harness::protocol::RunEventKind::LlmAttemptStarted {
             iteration,
             attempt,
         });
@@ -215,10 +218,10 @@ impl Agent {
     fn emit_failed_attempt(
         &self,
         iteration: usize,
-        error: &crate::error::DysonError,
+        error: &dyson_core::error::DysonError,
         after_tool_use: bool,
     ) {
-        self.emit_run_event(super::protocol::RunEventKind::LlmAttemptFailed {
+        self.emit_run_event(dyson_harness::protocol::RunEventKind::LlmAttemptFailed {
             iteration,
             error_kind: llm_error_kind(error).to_string(),
             retryable: crate::llm::is_retryable(error),
@@ -262,7 +265,7 @@ impl Agent {
         }
         self.tool_context.harness.checkpoint()?;
         let transport_retryable_mid_stream =
-            matches!(&stream_result, Err(crate::error::DysonError::Http(_)));
+            matches!(&stream_result, Err(dyson_core::error::DysonError::Http(_)));
         match stream_result {
             Ok((assistant_msg, tool_calls, output_tokens, stop_reason)) => {
                 Ok(StreamAttempt::Complete(Box::new(StreamCompletion {
@@ -366,7 +369,7 @@ impl Agent {
                 output_tokens,
                 stop_reason,
             } = *completion;
-            self.emit_run_event(super::protocol::RunEventKind::LlmAttemptCompleted {
+            self.emit_run_event(dyson_harness::protocol::RunEventKind::LlmAttemptCompleted {
                 iteration,
                 output_tokens,
                 tool_calls: tool_calls.len(),
@@ -439,9 +442,9 @@ impl Agent {
                 format!("{}{}", progress.continuation_prefix, progress.final_text);
         }
         self.last_run_status = if assistant_msg.last_text().is_some() {
-            super::protocol::RunStatus::Completed
+            dyson_harness::protocol::RunStatus::Completed
         } else {
-            super::protocol::RunStatus::Partial
+            dyson_harness::protocol::RunStatus::Partial
         };
         self.conversation.messages.push(assistant_msg);
         output.flush()
@@ -473,9 +476,9 @@ impl Agent {
             .max_output_tokens
             .is_some_and(|max| self.conversation.token_budget.output_tokens_used > max)
         {
-            let error = crate::error::DysonError::Llm("token budget exceeded".into());
+            let error = dyson_core::error::DysonError::Llm("token budget exceeded".into());
             self.conversation.messages.push(assistant_msg);
-            self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+            self.last_run_status = dyson_harness::protocol::RunStatus::BudgetExceeded;
             tracing::warn!(
                 used = self.conversation.token_budget.output_tokens_used,
                 "token budget exceeded — stopping agent loop"
@@ -573,13 +576,13 @@ impl Agent {
             .messages
             .iter()
             .rev()
-            .find(|m| matches!(m.role, crate::message::Role::User))
+            .find(|m| matches!(m.role, dyson_core::message::Role::User))
         {
             let text = message
                 .content
                 .iter()
                 .filter_map(|b| match b {
-                    crate::message::ContentBlock::Text { text } => Some(text.as_str()),
+                    dyson_core::message::ContentBlock::Text { text } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -599,7 +602,7 @@ impl Agent {
         let deadline = match deadline {
             Ok(d) => d,
             Err(e) => {
-                self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+                self.last_run_status = dyson_harness::protocol::RunStatus::BudgetExceeded;
                 tracing::Span::current().record("otel.status_code", "ERROR");
                 return Err(e);
             }
@@ -627,8 +630,8 @@ impl Agent {
             Ok(value) => value,
             Err(_) => {
                 self.pending_task_budget.take();
-                self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
-                Err(crate::error::DysonError::Llm(
+                self.last_run_status = dyson_harness::protocol::RunStatus::BudgetExceeded;
+                Err(dyson_core::error::DysonError::Llm(
                     "task elapsed-time budget exhausted".into(),
                 ))
             }
@@ -696,12 +699,12 @@ impl Agent {
                 .unwrap_or_else(|e| e.into_inner())
                 .exhausted()
             {
-                self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+                self.last_run_status = dyson_harness::protocol::RunStatus::BudgetExceeded;
                 break;
             }
             let stagnant = self.tool_context.harness.stagnant_calls();
             if stagnant >= 16 {
-                self.last_run_status = super::protocol::RunStatus::Partial;
+                self.last_run_status = dyson_harness::protocol::RunStatus::Partial;
                 progress.final_text = "Task paused: repeated attempts have produced no new successful evidence. Review the durable task checkpoint and blockers before continuing.".into();
                 output.text_delta(&progress.final_text)?;
                 break;
@@ -711,12 +714,12 @@ impl Agent {
                 progress_nudged = true;
             }
             if !self.conversation.token_budget.has_budget() {
-                self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+                self.last_run_status = dyson_harness::protocol::RunStatus::BudgetExceeded;
                 break;
             }
             let budget = &self.conversation.token_budget;
             if budget.summary_reserve() > 0 && budget.remaining() <= budget.summary_reserve() {
-                self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+                self.last_run_status = dyson_harness::protocol::RunStatus::BudgetExceeded;
                 progress.final_text = self
                     .summarize_on_max_iterations(&skill_fragments, output)
                     .await?;
@@ -725,7 +728,7 @@ impl Agent {
             // Check for cooperative cancellation (used by /stop).
             if self.tool_context.cancellation.is_cancelled() {
                 tracing::info!("agent cancelled — breaking loop");
-                self.last_run_status = super::protocol::RunStatus::Cancelled;
+                self.last_run_status = dyson_harness::protocol::RunStatus::Cancelled;
                 break;
             }
 
@@ -789,7 +792,7 @@ impl Agent {
             progress.hit_max_iterations = true;
         }
         if progress.hit_max_iterations {
-            self.last_run_status = super::protocol::RunStatus::IterationLimit;
+            self.last_run_status = dyson_harness::protocol::RunStatus::IterationLimit;
             progress.final_text = self
                 .summarize_on_max_iterations(&skill_fragments, output)
                 .await?;
@@ -813,7 +816,7 @@ impl Agent {
         let mut admitted = Vec::new();
         let count = {
             let mut admit =
-                |message: Message| -> std::result::Result<(), crate::error::DysonError> {
+                |message: Message| -> std::result::Result<(), dyson_core::error::DysonError> {
                     self.conversation.messages.push(message.clone());
                     self.persist();
                     admitted.push(message);
@@ -898,30 +901,34 @@ impl Agent {
         if tracing::enabled!(tracing::Level::DEBUG) {
             for (i, msg) in self.conversation.messages.iter().enumerate() {
                 let role = match msg.role {
-                    crate::message::Role::User => "user",
-                    crate::message::Role::Assistant => "assistant",
+                    dyson_core::message::Role::User => "user",
+                    dyson_core::message::Role::Assistant => "assistant",
                 };
                 let block_summary: Vec<String> = msg
                     .content
                     .iter()
                     .map(|b| match b {
-                        crate::message::ContentBlock::Text { text } => {
+                        dyson_core::message::ContentBlock::Text { text } => {
                             format!("text({})", text.len())
                         }
-                        crate::message::ContentBlock::ToolUse { name, .. } => {
+                        dyson_core::message::ContentBlock::ToolUse { name, .. } => {
                             format!("tool_use({name})")
                         }
-                        crate::message::ContentBlock::ToolResult {
+                        dyson_core::message::ContentBlock::ToolResult {
                             tool_use_id,
                             is_error,
                             ..
                         } => {
                             format!("tool_result({tool_use_id}, error={is_error})")
                         }
-                        crate::message::ContentBlock::Image { .. } => "image".to_string(),
-                        crate::message::ContentBlock::Document { .. } => "document".to_string(),
-                        crate::message::ContentBlock::Thinking { .. } => "thinking".to_string(),
-                        crate::message::ContentBlock::Artefact { kind, .. } => {
+                        dyson_core::message::ContentBlock::Image { .. } => "image".to_string(),
+                        dyson_core::message::ContentBlock::Document { .. } => {
+                            "document".to_string()
+                        }
+                        dyson_core::message::ContentBlock::Thinking { .. } => {
+                            "thinking".to_string()
+                        }
+                        dyson_core::message::ContentBlock::Artefact { kind, .. } => {
                             format!("artefact({kind:?})")
                         }
                     })
@@ -962,7 +969,7 @@ impl Agent {
             loop {
                 match self.client.access() {
                     Ok(c) => break c,
-                    Err(crate::error::DysonError::RateLimit { limit, window_secs }) => {
+                    Err(dyson_core::error::DysonError::RateLimit { limit, window_secs }) => {
                         // The oldest event ages out of the sliding window
                         // after at most `window_secs`, so a bound of one
                         // full window (plus slack, capped for sanity)
@@ -972,7 +979,7 @@ impl Agent {
                             .saturating_add(std::time::Duration::from_secs(1))
                             .min(std::time::Duration::from_secs(300));
                         if waited >= max_wait {
-                            return StreamResult::Error(crate::error::DysonError::RateLimit {
+                            return StreamResult::Error(dyson_core::error::DysonError::RateLimit {
                                 limit,
                                 window_secs,
                             });
@@ -989,7 +996,7 @@ impl Agent {
                             _ = tokio::time::sleep(poll) => {}
                             _ = self.tool_context.cancellation.cancelled() => {
                                 tracing::info!("rate-limit wait interrupted — agent cancelled");
-                                return StreamResult::Error(crate::error::DysonError::RateLimit {
+                                return StreamResult::Error(dyson_core::error::DysonError::RateLimit {
                                     limit,
                                     window_secs,
                                 });
@@ -1017,8 +1024,8 @@ impl Agent {
             .iter()
             .map(Message::estimate_tokens)
             .sum::<usize>()
-            + crate::message::estimate_text_tokens(&self.system_prompt)
-            + crate::message::estimate_text_tokens(skill_fragments)
+            + dyson_core::message::estimate_text_tokens(&self.system_prompt)
+            + dyson_core::message::estimate_text_tokens(skill_fragments)
             + self.tool_registry.cached_tokens;
         let (reservation, max_output) = match super::task::budget::Reservation::reserve(
             self.tool_context.harness.budget.clone(),
@@ -1028,7 +1035,7 @@ impl Agent {
         ) {
             Ok(value) => value,
             Err(error) => {
-                self.last_run_status = super::protocol::RunStatus::BudgetExceeded;
+                self.last_run_status = dyson_harness::protocol::RunStatus::BudgetExceeded;
                 return StreamResult::Error(error);
             }
         };
@@ -1102,14 +1109,14 @@ impl Agent {
     }
 }
 
-fn llm_error_kind(error: &crate::error::DysonError) -> &'static str {
+fn llm_error_kind(error: &dyson_core::error::DysonError) -> &'static str {
     match error {
-        crate::error::DysonError::Llm(_) => "llm",
-        crate::error::DysonError::LlmRateLimit { .. } => "provider_rate_limit",
-        crate::error::DysonError::LlmOverloaded { .. } => "provider_overloaded",
-        crate::error::DysonError::RateLimit { .. } => "local_rate_limit",
-        crate::error::DysonError::Http(_) => "transport",
-        crate::error::DysonError::Cancelled => "cancelled",
+        dyson_core::error::DysonError::Llm(_) => "llm",
+        dyson_core::error::DysonError::LlmRateLimit { .. } => "provider_rate_limit",
+        dyson_core::error::DysonError::LlmOverloaded { .. } => "provider_overloaded",
+        dyson_core::error::DysonError::RateLimit { .. } => "local_rate_limit",
+        dyson_core::error::DysonError::Http(_) => "transport",
+        dyson_core::error::DysonError::Cancelled => "cancelled",
         _ => "internal",
     }
 }
@@ -1120,7 +1127,7 @@ async fn finalize_cost_metadata(mut metadata: MessageCostMetadata) -> MessageCos
     };
     match crate::swarm_cost::lookup_runtime_display_metadata(audit_id).await {
         Ok(Some(finalized)) => {
-            crate::message_cost_backfill::merge_cost(&mut metadata, finalized);
+            crate::swarm_cost::merge_cost(&mut metadata, finalized);
         }
         Ok(None) => {}
         Err(err) => {

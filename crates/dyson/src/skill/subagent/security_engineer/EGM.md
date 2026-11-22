@@ -6,7 +6,7 @@ Staged security-research harness behind the parent-facing `security_engineer` to
 ## Interface
 - `run_security_harness(rt: SecurityHarnessRuntime) -> Result<ToolOutput>` (crate) - harness entry [mod.rs:run_security_harness]
 - `security_engineer_config() -> OrchestratorConfig`, `harness_stages()`, `resolve_stage_models()` [mod.rs:security_engineer_config, mod.rs:harness_stages, mod.rs:resolve_stage_models]
-- Constants: `SECURITY_HARNESS_SCHEMA_VERSION = 1`, `SECURITY_HARNESS_VERSION = "security-harness-v3"`, `SUPPORTED_HARNESS_VERSIONS` (v1..v3), `HUNT_SPECIALIST_BACKSTOP = 64` [mod.rs:SECURITY_HARNESS_VERSION]
+- Constants: `SECURITY_HARNESS_SCHEMA_VERSION = 1`, `SECURITY_HARNESS_VERSION = "security-harness-v3"`, `HUNT_SPECIALIST_BACKSTOP = 64` [mod.rs:SECURITY_HARNESS_VERSION]
 - Re-exported data types: `SecurityCheckpoint`, `SecurityFinding`, `SecurityTask`, `SecurityHarnessStage`, `SecurityHarnessReport`, `ValidationDecision`, `ValidationDecisionKind`, `TraceResult`, `JudgmentResult`, `DedupeGroup`, `CoverageGap`, `RunHealth`, `LedgerSummary`, `TaskStatus`, `TargetRef`, `ModelMetadata`, and others [mod.rs, types.rs:SecurityCheckpoint]
 - `validate_report_json(...)` [parse.rs:validate_report_json], `dedupe_findings(findings)` [report.rs:dedupe_findings]
 - `VulnerabilityClassDefinition`, `vulnerability_taxonomy()` - static class table [taxonomy.rs:vulnerability_taxonomy]

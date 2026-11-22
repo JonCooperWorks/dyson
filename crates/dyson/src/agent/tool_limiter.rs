@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::DysonError;
+use dyson_core::error::DysonError;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -79,7 +79,7 @@ impl ToolLimiter {
     ///
     /// This method also records the call — it increments the counter and
     /// updates the last-call timestamp on success.
-    pub fn check(&mut self, tool_name: &str) -> crate::Result<()> {
+    pub fn check(&mut self, tool_name: &str) -> dyson_core::error::Result<()> {
         // Check per-turn limit.
         let count = self.turn_counts.entry(tool_name.to_string()).or_insert(0);
         if *count >= self.per_turn_limit {

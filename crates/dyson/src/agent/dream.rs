@@ -41,11 +41,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::error::Result;
-use crate::feedback::FeedbackEntry;
 use crate::llm::{CompletionConfig, LlmClient};
-use crate::message::Message;
 use crate::tool::ToolContext;
+use dyson_common::feedback::FeedbackEntry;
+use dyson_core::error::Result;
+use dyson_core::message::Message;
 
 use super::rate_limiter::RateLimitedHandle;
 use super::reflection;
@@ -101,7 +101,7 @@ pub struct DreamContext {
     /// LLM configuration (model, max_tokens, temperature).
     pub config: CompletionConfig,
     pub sandbox: Arc<dyn crate::sandbox::Sandbox>,
-    pub history: Option<(Arc<dyn crate::chat_history::ChatHistory>, String)>,
+    pub history: Option<(Arc<dyn dyson_persistence::ChatHistory>, String)>,
 
     /// Tool context with workspace access, working dir, cancellation.
     pub tool_context: ToolContext,
@@ -317,7 +317,7 @@ pub(crate) struct DreamRequest {
     pub(crate) client: RateLimitedHandle<Box<dyn LlmClient>>,
     pub(crate) config: CompletionConfig,
     pub(crate) sandbox: Arc<dyn crate::sandbox::Sandbox>,
-    pub(crate) history: Option<(Arc<dyn crate::chat_history::ChatHistory>, String)>,
+    pub(crate) history: Option<(Arc<dyn dyson_persistence::ChatHistory>, String)>,
     pub(crate) tool_context: ToolContext,
     /// Shared snapshot of the conversation — avoids cloning the entire Vec
     /// on every dream event.  The dream thread converts to a slice reference

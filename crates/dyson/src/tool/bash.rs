@@ -40,9 +40,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::error::{DysonError, Result};
 use crate::sandbox::policy_sandbox::redact_secrets;
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use dyson_core::error::{DysonError, Result};
 
 // ---------------------------------------------------------------------------
 // Constants

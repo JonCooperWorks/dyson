@@ -18,13 +18,13 @@ use dyson::agent::Agent;
 use dyson::agent::rate_limiter::RateLimitedHandle;
 use dyson::config::AgentSettings;
 use dyson::controller::recording::RecordingOutput;
-use dyson::error::Result;
 use dyson::llm::stream::{StopReason, StreamEvent};
 use dyson::llm::{CompletionConfig, LlmClient, ToolDefinition};
-use dyson::message::Message;
 use dyson::sandbox::{Sandbox, SandboxDecision};
 use dyson::skill::Skill;
 use dyson::tool::ToolContext;
+use dyson_core::error::Result;
+use dyson_core::message::Message;
 
 // ===========================================================================
 // Mock infrastructure

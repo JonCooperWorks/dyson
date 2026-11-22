@@ -10,7 +10,7 @@
 // ===========================================================================
 
 use super::super::responses::{Resp, json_ok, parse_query};
-use crate::swarm_cost::{config_snapshot_or_env, fetch_audit_calls};
+use crate::swarm_cost::{config_snapshot, fetch_audit_calls};
 
 /// Query params we forward to swarm.  Everything else is dropped so the
 /// agent can't be used to smuggle arbitrary query strings upstream.
@@ -19,7 +19,7 @@ const FORWARDED_PARAMS: [&str; 4] = ["range", "since", "until", "limit"];
 pub(super) async fn get(query: &str) -> Resp {
     let forwarded = sanitize_query(query);
 
-    let Some(config) = config_snapshot_or_env() else {
+    let Some(config) = config_snapshot() else {
         return json_ok(&serde_json::json!({
             "requests": [],
             "source": "unavailable",

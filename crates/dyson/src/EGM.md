@@ -1,20 +1,17 @@
 # Dyson Crate Source Blueprint (`dyson/crates/dyson/src`)
 
 ## System Overview
-`dyson` is a streaming, composable AI agent: an LLM streams tool calls in a loop until it has an answer, and everything else (built-in tools, MCP servers, workspace skills, subagents) plugs into that loop through traits. The library (`lib.rs`) exposes the agent loop, LLM clients, sandbox, skills/tools, workspace, configuration, controllers (HTTP web UI, Telegram, terminal), and Swarm integration. The `dyson` binary (`main.rs`) is a clap CLI dispatching to `command/`. Several modules are facades over sibling workspace crates (`dyson-core`, `dyson-harness`, `dyson-ast`, `dyson-dependency-analysis`, `dyson-persistence`, `dyson-common`).
+`dyson` is a streaming, composable AI agent: an LLM streams tool calls in a loop until it has an answer, and everything else (built-in tools, MCP servers, workspace skills, subagents) plugs into that loop through traits. The library (`lib.rs`) exposes the agent loop, LLM clients, sandbox, skills/tools, workspace, configuration, controllers (HTTP web UI, Telegram, terminal), and Swarm integration. The `dyson` binary (`main.rs`) is a clap CLI dispatching to `command/`. Domain types are imported directly from the sibling workspace crates that own them (`dyson-core`, `dyson-harness`, `dyson-ast`, `dyson-dependency-analysis`, `dyson-persistence`, `dyson-common`); this crate does not re-export them.
 
 ## Local Interface & Invariants
-- `lib.rs` declares `pub mod` `advisor`, `agent`, `ast`, `auth`, `chat_history`, `config`, `controller`, `dependency_analysis`, `error`, `export`, `feedback`, `http`, `llm`, `media`, `message`, `message_cost_backfill`, `sandbox`, `secret`, `security_spawns`, `skill`, `subscription_models`, `swarm_cost`, `swarm_state_sync`, `telemetry`, `tokens`, `tool`, `workspace`; `pub(crate)` `tool_hooks`, `util`; re-exports `DysonError`, `Result` [lib.rs]
-- `main.rs` - CLI subcommands `listen`, `init`, `hash-bearer`, `cost-backfill`, `swarm`, `run` [main.rs:Commands]; installs the rustls ring provider, logs to `~/.dyson`, initialises telemetry [main.rs:main]
-- `error`, `message` - facades `pub use dyson_core::{error,message}::*` [error.rs, message.rs]
+- `lib.rs` declares `pub mod` `advisor`, `agent`, `auth`, `chat_history`, `config`, `controller`, `export`, `feedback`, `http`, `llm`, `media`, `sandbox`, `secret`, `security_spawns`, `skill`, `subscription_models`, `swarm_cost`, `swarm_state_sync`, `telemetry`, `tool`, `workspace`; `pub(crate)` `tool_hooks`, `util` [lib.rs]
+- `main.rs` - CLI subcommands `listen`, `init`, `hash-bearer`, `swarm`, `run` [main.rs:Commands]; installs the rustls ring provider, logs to `~/.dyson`, initialises telemetry [main.rs:main]
 - `http` - shared `client()` (connect 10 s, read 120 s, request 300 s, at most 4 redirects), `safe_redirect_policy`, `strict_untrusted_redirect_policy`, `validate_url_safe` / `verify_url_safe` (reject private IPv4/IPv6 literals and cloud metadata hosts), plus redirect policies with the same checks, `pinned_client_for_validated_url`, `ensure_crypto_provider`, re-exported `is_private_v4/v6`, `host_from_url` [http.rs:client, http.rs:validate_url_safe, http.rs:MAX_REDIRECTS]
-- `feedback` - `FeedbackStore` writing `{dir}/{chat_id}/feedback.json`; re-exports `FeedbackEntry`, `FeedbackRating` [feedback.rs:FeedbackStore]
-- `swarm_state_sync` - background worker mirroring durable state files to Swarm every 5 s (files <= 5 MiB, backoff up to 10 min) via `/v1/internal/state/file`; `spawn_worker`, `config_from_env`, `persist_model_selection` (`/v1/internal/model-selection`) [swarm_state_sync.rs:spawn_worker, swarm_state_sync.rs:SYNC_INTERVAL, swarm_state_sync.rs:MAX_SYNC_FILE_BYTES]
-- `swarm_cost` - display-only lookup of Swarm cost rows (2 s timeout); Swarm remains the billing source of truth [swarm_cost.rs:lookup_runtime_display_metadata, swarm_cost.rs:COST_LOOKUP_TIMEOUT]
-- `message_cost_backfill` - `backfill_history`, `CostBackfillOptions`, `CostBackfillReport`, `merge_cost` [message_cost_backfill.rs:backfill_history]
+- `feedback` - `FeedbackStore` writing `{dir}/{chat_id}/feedback.json` of `dyson_common::feedback::FeedbackEntry` [feedback.rs:FeedbackStore]
+- `swarm_state_sync` - background worker mirroring durable state files to Swarm every 5 s (files <= 5 MiB, backoff up to 10 min) via `/v1/internal/state/file`; `spawn_worker`, `set_config`, `persist_model_selection` (`/v1/internal/model-selection`) [swarm_state_sync.rs:spawn_worker, swarm_state_sync.rs:SYNC_INTERVAL, swarm_state_sync.rs:MAX_SYNC_FILE_BYTES]
+- `swarm_cost` - display-only lookup of Swarm cost rows (2 s timeout) and `merge_cost`; Swarm remains the billing source of truth [swarm_cost.rs:lookup_runtime_display_metadata, swarm_cost.rs:COST_LOOKUP_TIMEOUT]
 - `security_spawns` - reports tool-shell spawns (ids and names only, never commands) to Swarm `/v1/internal/security/tool-spawns`; queue max 2000, batch 200, flush every 2 s, best effort; `correlate`, `record` [security_spawns.rs:record, security_spawns.rs:MAX_QUEUED]
 - `telemetry` - OpenTelemetry tracing (`init`, `layer`, `inject_proxy_context`); disabled by `OTEL_SDK_DISABLED=true`; never exports application log events [telemetry.rs:init]
-- `tokens` - typed Swarm bearers `pt_` (LLM proxy), `it_` (artefact ingest), `st_` (state sync) re-exported from `dyson_common::tokens` [tokens.rs]
 - `subscription_models` - `CHATGPT`, `CLAUDE` model catalogues [subscription_models.rs:CHATGPT]
 - `tool_hooks` (crate) - `ToolHook`, `ToolHookEvent`, `HookDecision`, `dispatch_hooks` [tool_hooks.rs:dispatch_hooks]
 - `util` (crate) - `MAX_OUTPUT_BYTES = 100 KiB`, `truncate_output`, `resolve_tilde`, `backoff_with_jitter` [util.rs:MAX_OUTPUT_BYTES]
@@ -22,13 +19,11 @@
 ## Subdirectories & System Boundaries
 - advisor: [./advisor/EGM.md](./advisor/EGM.md) - native Anthropic or generic child-agent advisor
 - agent: [./agent/EGM.md](./agent/EGM.md) - the streaming tool-use loop, dreams, continuations, task budgets/leases
-- ast: [./ast/EGM.md](./ast/EGM.md) - facade over `dyson-ast`
 - auth: [./auth/EGM.md](./auth/EGM.md) - `Auth` trait: API key, bearer, Argon2 bearer, OAuth, OIDC
-- chat_history: [./chat_history/EGM.md](./chat_history/EGM.md) - persistence facade and factory (`disk`)
+- chat_history: [./chat_history/EGM.md](./chat_history/EGM.md) - persistence backend factory (`disk`)
 - command: [./command/EGM.md](./command/EGM.md) - CLI subcommands (binary only)
-- config: [./config/EGM.md](./config/EGM.md) - `Settings`, loader, migration, hot reload
+- config: [./config/EGM.md](./config/EGM.md) - `Settings`, loader, hot reload
 - controller: [./controller/EGM.md](./controller/EGM.md) - controllers, outputs, HTTP and Telegram transports
-- dependency_analysis: [./dependency_analysis/EGM.md](./dependency_analysis/EGM.md) - facade over `dyson-dependency-analysis`
 - export: [./export/EGM.md](./export/EGM.md) - ShareGPT conversation export
 - llm: [./llm/EGM.md](./llm/EGM.md) - provider clients, SSE parsing, retries, registry, pricing
 - media: [./media/EGM.md](./media/EGM.md) - image/audio/PDF/Office attachment ingestion

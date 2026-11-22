@@ -49,8 +49,8 @@ pub mod policy_sandbox;
 
 use async_trait::async_trait;
 
-use crate::error::Result;
 use crate::tool::{ToolContext, ToolOutput};
+use dyson_core::error::Result;
 
 /// Maximum tool output size (characters) before truncation.
 ///

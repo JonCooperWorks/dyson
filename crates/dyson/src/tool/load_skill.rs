@@ -45,7 +45,11 @@ impl Tool for LoadSkillTool {
         })
     }
 
-    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
+    async fn run(
+        &self,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> dyson_core::error::Result<ToolOutput> {
         let ws = ctx.workspace("load_skill")?;
 
         let skill_name = input["skill_name"]

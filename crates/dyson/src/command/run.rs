@@ -24,7 +24,7 @@ pub async fn run(
     provider: Option<String>,
     base_url: Option<String>,
     workspace: Option<String>,
-) -> dyson::error::Result<()> {
+) -> dyson_core::error::Result<()> {
     let config_path = super::resolve_config_path(config);
 
     let mut settings = dyson::config::loader::load_settings(config_path.as_deref())?;

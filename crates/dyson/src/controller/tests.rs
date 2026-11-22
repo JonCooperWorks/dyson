@@ -211,8 +211,8 @@ fn format_background_result_variants() {
 
 #[test]
 fn persist_background_result_appends_to_chat_history() {
-    use crate::chat_history::{ChatHistory, DiskChatHistory};
-    use crate::message::{ContentBlock, Message, Role};
+    use dyson_core::message::{ContentBlock, Message, Role};
+    use dyson_persistence::{ChatHistory, DiskChatHistory};
 
     let dir = tempfile::tempdir().unwrap();
     let store = DiskChatHistory::new(dir.path().to_path_buf()).unwrap();

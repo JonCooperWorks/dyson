@@ -7,23 +7,29 @@
 // Office document input — Markdown text is the only representation we need.
 // ===========================================================================
 
-use crate::message::ContentBlock;
+use dyson_core::message::ContentBlock;
 
 /// Process raw Office document bytes into a `ContentBlock::Text`.
 ///
 /// Supports docx, xlsx, and pptx.  Extracts content as Markdown via `undoc`.
 /// The `file_name` is used purely for labelling in the prompt.
-pub fn process_office(data: &[u8], file_name: Option<&str>) -> crate::Result<ContentBlock> {
-    let doc = undoc::parse_bytes(data)
-        .map_err(|e| crate::DysonError::Config(format!("failed to parse Office document: {e}")))?;
+pub fn process_office(
+    data: &[u8],
+    file_name: Option<&str>,
+) -> dyson_core::error::Result<ContentBlock> {
+    let doc = undoc::parse_bytes(data).map_err(|e| {
+        dyson_core::error::DysonError::Config(format!("failed to parse Office document: {e}"))
+    })?;
 
     let options = undoc::render::RenderOptions::default();
     let markdown = undoc::render::to_markdown(&doc, &options).map_err(|e| {
-        crate::DysonError::Config(format!("failed to render Office document as markdown: {e}"))
+        dyson_core::error::DysonError::Config(format!(
+            "failed to render Office document as markdown: {e}"
+        ))
     })?;
 
     if markdown.trim().is_empty() {
-        return Err(crate::DysonError::Config(
+        return Err(dyson_core::error::DysonError::Config(
             "Office document appears to be empty — no text content extracted".into(),
         ));
     }

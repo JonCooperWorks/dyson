@@ -1,19 +1,19 @@
 use std::sync::Arc;
 
-use crate::chat_history::ChatHistory;
+use dyson_persistence::ChatHistory;
 
-use super::protocol::{RunEvent, RunEventKind, RunId, RunStatus};
 use super::{Agent, HistoryBackend, PersistHook};
+use dyson_harness::protocol::{RunEvent, RunEventKind, RunId, RunStatus};
 
 impl Agent {
-    pub(crate) fn try_emit_run_event(&self, kind: RunEventKind) -> crate::error::Result<()> {
+    pub(crate) fn try_emit_run_event(&self, kind: RunEventKind) -> dyson_core::error::Result<()> {
         self.try_emit_run_events([kind])
     }
 
     pub(crate) fn try_emit_run_events<const N: usize>(
         &self,
         kinds: [RunEventKind; N],
-    ) -> crate::error::Result<()> {
+    ) -> dyson_core::error::Result<()> {
         let mut sequence = self
             .event_sequence
             .lock()
@@ -42,22 +42,22 @@ impl Agent {
         }
     }
 
-    pub(crate) fn begin_run_protocol(&mut self) -> crate::error::Result<()> {
+    pub(crate) fn begin_run_protocol(&mut self) -> dyson_core::error::Result<()> {
         self.begin_run_protocol_with_mode(false)
     }
 
     pub(super) fn begin_run_protocol_with_mode(
         &mut self,
         direct: bool,
-    ) -> crate::error::Result<()> {
+    ) -> dyson_core::error::Result<()> {
         self.tool_context.harness.ensure_loaded()?;
         if let Some(input) = self
             .conversation
             .messages
             .iter()
             .rev()
-            .find(|m| m.role == crate::message::Role::User)
-            .and_then(crate::message::Message::last_text)
+            .find(|m| m.role == dyson_core::message::Role::User)
+            .and_then(dyson_core::message::Message::last_text)
         {
             self.tool_context.harness.seed_objective(input);
         }
@@ -96,12 +96,12 @@ impl Agent {
                 .push(warning.clone());
             self.conversation
                 .messages
-                .push(crate::message::Message::user(&warning));
+                .push(dyson_core::message::Message::user(&warning));
         }
         Ok(())
     }
 
-    pub(crate) fn finish_run_protocol<T>(&mut self, result: &crate::error::Result<T>) {
+    pub(crate) fn finish_run_protocol<T>(&mut self, result: &dyson_core::error::Result<T>) {
         if let Err(error) = self.tool_context.harness.checkpoint() {
             self.run_warnings
                 .lock()
@@ -177,11 +177,10 @@ impl Agent {
         run_id: &RunId,
         tool_use_id: &str,
         resolution: &str,
-    ) -> crate::error::Result<()> {
-        let backend = self
-            .history_backend
-            .as_ref()
-            .ok_or_else(|| crate::error::DysonError::Llm("No execution journal attached".into()))?;
+    ) -> dyson_core::error::Result<()> {
+        let backend = self.history_backend.as_ref().ok_or_else(|| {
+            dyson_core::error::DysonError::Llm("No execution journal attached".into())
+        })?;
         Self::reconcile_stored_tool_outcome(
             backend.store.clone(),
             &backend.chat_id,
@@ -201,18 +200,18 @@ impl Agent {
         run_id: &RunId,
         tool_use_id: &str,
         resolution: &str,
-    ) -> crate::error::Result<()> {
+    ) -> dyson_core::error::Result<()> {
         if resolution.trim().is_empty() {
-            return Err(crate::error::DysonError::Llm(
+            return Err(dyson_core::error::DysonError::Llm(
                 "A reconciliation requires evidence of the outcome".into(),
             ));
         }
         let events = store.load_run_events(chat_id)?;
-        if !super::protocol::unresolved_tool_outcomes(&events)
+        if !dyson_harness::protocol::unresolved_tool_outcomes(&events)
             .iter()
             .any(|t| &t.run_id == run_id && t.tool_use_id == tool_use_id)
         {
-            return Err(crate::error::DysonError::Llm(
+            return Err(dyson_core::error::DysonError::Llm(
                 "No matching unresolved invocation".into(),
             ));
         }
@@ -280,7 +279,7 @@ impl Agent {
     /// the agent never retries an unknown outcome automatically.
     pub fn unresolved_tool_outcomes(
         &self,
-    ) -> crate::error::Result<Vec<super::protocol::UnresolvedToolOutcome>> {
+    ) -> dyson_core::error::Result<Vec<dyson_harness::protocol::UnresolvedToolOutcome>> {
         let Some(backend) = &self.history_backend else {
             return Ok(Vec::new());
         };

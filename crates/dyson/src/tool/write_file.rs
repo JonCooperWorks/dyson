@@ -4,8 +4,8 @@
 
 use async_trait::async_trait;
 
-use crate::error::Result;
 use crate::tool::{Tool, ToolContext, ToolOutput, path_err};
+use dyson_core::error::Result;
 
 pub struct WriteFileTool;
 

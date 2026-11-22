@@ -134,11 +134,11 @@ pub(super) fn parse_checkpoint(body: &str) -> std::result::Result<SecurityCheckp
             checkpoint.schema_version, SECURITY_HARNESS_SCHEMA_VERSION
         ));
     }
-    if !super::SUPPORTED_HARNESS_VERSIONS.contains(&checkpoint.harness_version.as_str()) {
+    if checkpoint.harness_version != super::SECURITY_HARNESS_VERSION {
         return Err(format!(
-            "unsupported checkpoint harness_version {}; supported {:?}",
+            "unsupported checkpoint harness_version {}; expected {}",
             checkpoint.harness_version,
-            super::SUPPORTED_HARNESS_VERSIONS
+            super::SECURITY_HARNESS_VERSION
         ));
     }
     Ok(checkpoint)
@@ -297,26 +297,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_checkpoint_accepts_every_supported_harness_version_and_rejects_others() {
-        // The v1→v2 changes are additive/defaulted, so a v1 checkpoint must
-        // still resume on a v2 binary. An unknown version is rejected loudly.
+    fn parse_checkpoint_accepts_only_the_current_harness_version() {
         let base = fresh_checkpoint("sec-ver-1", "/repo", 1);
-        for version in super::super::SUPPORTED_HARNESS_VERSIONS {
+        let body = serde_json::to_string(&base).expect("serialize");
+        assert!(super::parse_checkpoint(&body).is_ok());
+        for old in [
+            "security-harness-v1",
+            "security-harness-v2",
+            "security-harness-v0",
+        ] {
             let mut cp = base.clone();
-            cp.harness_version = (*version).to_string();
+            cp.harness_version = old.into();
             let body = serde_json::to_string(&cp).expect("serialize");
             assert!(
-                super::parse_checkpoint(&body).is_ok(),
-                "supported version {version} should parse"
+                super::parse_checkpoint(&body).is_err(),
+                "harness_version {old} must be rejected"
             );
         }
-        let mut bad = base;
-        bad.harness_version = "security-harness-v0".into();
-        let body = serde_json::to_string(&bad).expect("serialize");
-        assert!(
-            super::parse_checkpoint(&body).is_err(),
-            "an unknown harness_version must be rejected"
-        );
     }
 
     #[test]

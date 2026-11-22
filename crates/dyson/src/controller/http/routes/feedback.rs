@@ -4,7 +4,7 @@
 
 use hyper::Request;
 
-use crate::feedback::{FeedbackEntry, FeedbackRating};
+use dyson_common::feedback::{FeedbackEntry, FeedbackRating};
 
 use super::super::responses::{Resp, bad_request, json_ok, read_json_capped};
 use super::super::state::HttpState;

@@ -15,12 +15,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::error::{DysonError, Result};
 use crate::llm::stream::StreamEvent;
 use crate::llm::{
     MAX_ACTIVE_TOOL_BUFFERS, MAX_TOOL_JSON, MAX_TOTAL_TOOL_JSON, SseLineBuffer, SseStreamParser,
     ToolCallBuffer, finalize_tool_call,
 };
+use dyson_core::error::{DysonError, Result};
 
 /// Provider-specific SSE JSON parsing.
 ///

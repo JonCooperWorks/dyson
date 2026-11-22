@@ -95,13 +95,14 @@ impl ClientRegistry {
     pub fn get(
         &self,
         provider_name: &str,
-    ) -> crate::Result<crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>>
-    {
+    ) -> dyson_core::error::Result<
+        crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
+    > {
         let mut inner = self.inner.lock().expect("ClientRegistry poisoned");
 
         if !inner.clients.contains_key(provider_name) {
             let pc = inner.settings.providers.get(provider_name).ok_or_else(|| {
-                crate::error::DysonError::Config(format!("unknown provider '{provider_name}'"))
+                dyson_core::error::DysonError::Config(format!("unknown provider '{provider_name}'"))
             })?;
 
             let agent_settings = crate::config::AgentSettings {
@@ -140,8 +141,8 @@ impl ClientRegistry {
     /// Looks up the provider name that matches the current agent config,
     /// or falls back to creating a client directly from the agent settings.
     /// HTTP turn admission rejects named-provider configs without an active
-    /// provider before reaching this fallback; keep it for legacy/direct
-    /// controllers that do not use a `providers` map.
+    /// provider before reaching this fallback; it serves configs with no
+    /// `providers` map (env keys or a bare `--provider <type>`).
     pub fn get_default(
         &self,
     ) -> crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>> {

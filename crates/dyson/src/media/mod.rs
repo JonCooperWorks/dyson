@@ -26,7 +26,7 @@ pub mod pdf;
 
 use std::sync::Arc;
 
-use crate::message::ContentBlock;
+use dyson_core::message::ContentBlock;
 
 pub use dyson_telegram::media::{
     is_office_extension, is_office_mime, is_text_extension, is_text_like_mime,
@@ -64,17 +64,19 @@ pub struct Attachment {
 pub async fn resolve_attachment(
     attachment: Attachment,
     transcriber: Option<&Arc<dyn audio::Transcriber>>,
-) -> crate::Result<Vec<ContentBlock>> {
+) -> dyson_core::error::Result<Vec<ContentBlock>> {
     let mime = attachment.mime_type.as_str();
     if mime.starts_with("image/") {
         let data = attachment.data;
         let block = tokio::task::spawn_blocking(move || image::process_image(&data))
             .await
-            .map_err(|e| crate::DysonError::Config(format!("image task panicked: {e}")))??;
+            .map_err(|e| {
+                dyson_core::error::DysonError::Config(format!("image task panicked: {e}"))
+            })??;
         Ok(vec![block])
     } else if mime.starts_with("audio/") {
         let t = transcriber.ok_or_else(|| {
-            crate::DysonError::Config(
+            dyson_core::error::DysonError::Config(
                 "audio attachment received but no transcriber configured".into(),
             )
         })?;
@@ -84,7 +86,9 @@ pub async fn resolve_attachment(
         let data = attachment.data;
         let block = tokio::task::spawn_blocking(move || pdf::process_pdf(&data))
             .await
-            .map_err(|e| crate::DysonError::Config(format!("PDF task panicked: {e}")))??;
+            .map_err(|e| {
+                dyson_core::error::DysonError::Config(format!("PDF task panicked: {e}"))
+            })??;
         Ok(vec![block])
     } else if is_office_mime(mime) {
         let file_name = attachment.file_name.clone();
@@ -93,11 +97,13 @@ pub async fn resolve_attachment(
             office::process_office(&data, file_name.as_deref())
         })
         .await
-        .map_err(|e| crate::DysonError::Config(format!("Office task panicked: {e}")))??;
+        .map_err(|e| {
+            dyson_core::error::DysonError::Config(format!("Office task panicked: {e}"))
+        })??;
         Ok(vec![block])
     } else if is_text_like_mime(mime) {
         let text = std::str::from_utf8(&attachment.data).map_err(|_| {
-            crate::DysonError::Config(format!(
+            dyson_core::error::DysonError::Config(format!(
                 "attachment {} is labelled as text but is not valid UTF-8",
                 attachment.file_name.as_deref().unwrap_or("<unnamed>")
             ))
@@ -106,7 +112,7 @@ pub async fn resolve_attachment(
         let wrapped = format!("=== file: {label} ({mime}) ===\n{text}");
         Ok(vec![ContentBlock::Text { text: wrapped }])
     } else {
-        Err(crate::DysonError::Config(format!(
+        Err(dyson_core::error::DysonError::Config(format!(
             "unsupported media type: {mime}"
         )))
     }

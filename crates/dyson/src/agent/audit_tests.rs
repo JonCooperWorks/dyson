@@ -1,5 +1,5 @@
 use super::*;
-use crate::chat_history::ChatHistory;
+use dyson_persistence::ChatHistory;
 
 fn text(text: &str, reason: StopReason) -> Vec<StreamEvent> {
     vec![
@@ -128,7 +128,7 @@ async fn journal_failure_prevents_file_mutation() {
 async fn unresolved_prior_mutation_blocks_new_mutation() {
     let dir = tempfile::tempdir().unwrap();
     let store =
-        Arc::new(crate::chat_history::DiskChatHistory::new(dir.path().join("history")).unwrap());
+        Arc::new(dyson_persistence::DiskChatHistory::new(dir.path().join("history")).unwrap());
     let id = protocol::RunId::new();
     store
         .append_run_event(
@@ -329,7 +329,7 @@ async fn repeated_failures_trigger_a_change_of_approach() {
 async fn explicit_reconciliation_releases_mutations() {
     let dir = tempfile::tempdir().unwrap();
     let store =
-        Arc::new(crate::chat_history::DiskChatHistory::new(dir.path().join("history")).unwrap());
+        Arc::new(dyson_persistence::DiskChatHistory::new(dir.path().join("history")).unwrap());
     let id = protocol::RunId::new();
     store
         .append_run_event(
@@ -458,7 +458,7 @@ async fn task_completion_requires_observed_evidence() {
 async fn task_checkpoint_survives_agent_reconstruction() {
     let dir = tempfile::tempdir().unwrap();
     let store =
-        Arc::new(crate::chat_history::DiskChatHistory::new(dir.path().to_path_buf()).unwrap());
+        Arc::new(dyson_persistence::DiskChatHistory::new(dir.path().to_path_buf()).unwrap());
     let (mut agent, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
     agent.set_chat_history(store.clone(), "durable".into());
     let result = agent.execute_tool_direct("task_control", serde_json::json!({"action":"plan","objective":"ship invoices","criteria":[{"id":"test","description":"passes","tool":"bash","contains":"ok"}]})).await.unwrap();
@@ -599,7 +599,7 @@ async fn original_evidence_survives_compaction_and_restart() {
     )
     .unwrap();
     let store =
-        Arc::new(crate::chat_history::DiskChatHistory::new(dir.path().join("history")).unwrap());
+        Arc::new(dyson_persistence::DiskChatHistory::new(dir.path().join("history")).unwrap());
     let (mut a, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
     a.set_chat_history(store.clone(), "evidence".into());
     let read = a
@@ -673,7 +673,7 @@ impl Tool for KeyedReceiptTool {
 async fn keyed_receipts_deduplicate_across_restart_and_reject_changed_inputs() {
     let dir = tempfile::tempdir().unwrap();
     let store =
-        Arc::new(crate::chat_history::DiskChatHistory::new(dir.path().join("history")).unwrap());
+        Arc::new(dyson_persistence::DiskChatHistory::new(dir.path().join("history")).unwrap());
     let count = Arc::new(AtomicUsize::new(0));
     let (mut a, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
     a.set_chat_history(store.clone(), "receipts".into());
@@ -892,7 +892,7 @@ async fn recovered_foreign_mutation_blocks_conflicting_writes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("shared");
     let store =
-        Arc::new(crate::chat_history::DiskChatHistory::new(dir.path().join("history")).unwrap());
+        Arc::new(dyson_persistence::DiskChatHistory::new(dir.path().join("history")).unwrap());
     let (mut old, _) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
     old.set_chat_history(store.clone(), "other".into());
     old.tool_context.harness.checkpoint().unwrap();
@@ -961,7 +961,7 @@ async fn explicit_user_resumption_releases_no_progress_pause() {
 fn restored_task_respects_tighter_operator_budget() {
     let dir = tempfile::tempdir().unwrap();
     let store =
-        Arc::new(crate::chat_history::DiskChatHistory::new(dir.path().to_path_buf()).unwrap());
+        Arc::new(dyson_persistence::DiskChatHistory::new(dir.path().to_path_buf()).unwrap());
     let original = super::task::TaskRuntime::default();
     original.attach(store.clone(), "limits".into());
     original.budget.lock().unwrap().limits.max_input_tokens = Some(1000);

@@ -1,7 +1,7 @@
 # Security Analysis Tools (`tool/security`)
 
 ## Overview
-AST-aware security analysis tools used chiefly by the `security_engineer` and `pentester` subagents. Rather than hardcoded vulnerability checks, they expose tree-sitter queries, AST outlines, attack-surface enumeration, and taint tracing over the shared `crate::ast` infrastructure (a facade over `dyson-ast`), plus a static proof-of-concept template generator.
+AST-aware security analysis tools used chiefly by the `security_engineer` and `pentester` subagents. Rather than hardcoded vulnerability checks, they expose tree-sitter queries, AST outlines, attack-surface enumeration, and taint tracing over the shared `dyson-ast` infrastructure, plus a static proof-of-concept template generator.
 
 ## Interface
 - `AstQueryTool` (`ast_query`) - runs tree-sitter S-expression queries across files; `execute_query_string(...)` [ast_query.rs:AstQueryTool, ast_query.rs:execute_query_string]

@@ -23,7 +23,7 @@ use crate::config::Settings;
 use crate::controller::Output;
 use crate::llm::stream::StreamEvent;
 use crate::llm::{CompletionConfig, LlmClient};
-use crate::message::{ContentBlock, Message};
+use dyson_core::message::{ContentBlock, Message};
 
 use super::super::output::SseOutput;
 use super::super::responses::{
@@ -77,7 +77,7 @@ impl ReadyTurnConfig {
     fn client(
         &self,
         registry: &ClientRegistry,
-    ) -> crate::Result<RateLimitedHandle<Box<dyn LlmClient>>> {
+    ) -> dyson_core::error::Result<RateLimitedHandle<Box<dyn LlmClient>>> {
         match self.provider_name.as_deref() {
             Some(provider) => registry.get(provider),
             None => Ok(registry.get_default()),
@@ -355,7 +355,7 @@ async fn dispatch(
         return enqueue_turn(&handle, body).await;
     }
     // Reject replacing a saved continuation before touching its transcript.
-    let preflight = (|| -> crate::Result<()> {
+    let preflight = (|| -> dyson_core::error::Result<()> {
         use crate::agent::continuation::{RunCheckpoint, RunState};
         let record = state
             .history
@@ -367,9 +367,11 @@ async fn dispatch(
             (Some(record), Some(request)) => {
                 record.validate_resume(&request.run_id, request.answer.as_ref())
             }
-            (None, Some(_)) => Err(crate::DysonError::Llm("no saved run to resume".into())),
+            (None, Some(_)) => Err(dyson_core::error::DysonError::Llm(
+                "no saved run to resume".into(),
+            )),
             (Some(record), None) if !matches!(record.cursor.state, RunState::Finished { .. }) => {
-                Err(crate::DysonError::Llm(
+                Err(dyson_core::error::DysonError::Llm(
                     "resume or cancel the unfinished run before starting another turn".into(),
                 ))
             }
@@ -436,13 +438,14 @@ async fn dispatch(
     if let Some(request) = &resume
         && let Some(answer) = &request.answer
     {
-        let saved = (|| -> crate::Result<()> {
-            let store = history
-                .as_ref()
-                .ok_or_else(|| crate::DysonError::Llm("durable history is required".into()))?;
-            let mut record =
-                crate::agent::continuation::RunCheckpoint::load(store.as_ref(), id)?
-                    .ok_or_else(|| crate::DysonError::Llm("missing continuation".into()))?;
+        let saved = (|| -> dyson_core::error::Result<()> {
+            let store = history.as_ref().ok_or_else(|| {
+                dyson_core::error::DysonError::Llm("durable history is required".into())
+            })?;
+            let mut record = crate::agent::continuation::RunCheckpoint::load(store.as_ref(), id)?
+                .ok_or_else(|| {
+                dyson_core::error::DysonError::Llm("missing continuation".into())
+            })?;
             record.accept_answer(store.as_ref(), id, answer)
         })();
         if let Err(error) = saved {
@@ -690,9 +693,9 @@ async fn dispatch(
         if let Some(store) = &history {
             agent.set_chat_history(Arc::clone(store), chat_id.clone());
         }
-        let persister = history.as_ref().map(|h| {
-            crate::chat_history::coalesce::CoalescingPersister::new(Arc::clone(h), chat_id.clone())
-        });
+        let persister = history
+            .as_ref()
+            .map(|h| dyson_persistence::CoalescingPersister::new(Arc::clone(h), chat_id.clone()));
         if let Some(p) = persister.clone() {
             agent.set_persist_hook(std::sync::Arc::new(move |messages| {
                 p.schedule(messages.to_vec());
@@ -731,7 +734,7 @@ async fn dispatch(
                 r = async {
                     if let Some(request) = resume.take() {
                         let outcome = agent.resume_detailed(&request.run_id, request.answer, &mut output).await?;
-                        suspended = matches!(outcome.status, crate::agent::protocol::RunStatus::Paused | crate::agent::protocol::RunStatus::WaitingForInput);
+                        suspended = matches!(outcome.status, dyson_harness::protocol::RunStatus::Paused | dyson_harness::protocol::RunStatus::WaitingForInput);
                         let text = outcome.final_text.clone();
                         chat_handle.emit(SseEvent::RunOutcome { outcome });
                         return Ok(text);
@@ -754,7 +757,7 @@ async fn dispatch(
                         };
                         tracing::info!(chat_id = %chat_id, ok = r.is_ok(), "TURN_WORKER: agent.run returned");
                         r.map(|outcome| {
-                            suspended = matches!(outcome.status, crate::agent::protocol::RunStatus::Paused | crate::agent::protocol::RunStatus::WaitingForInput);
+                            suspended = matches!(outcome.status, dyson_harness::protocol::RunStatus::Paused | dyson_harness::protocol::RunStatus::WaitingForInput);
                             let text = outcome.final_text.clone();
                             chat_handle.emit(SseEvent::RunOutcome { outcome });
                             text
@@ -925,10 +928,10 @@ fn spawn_direct_slash_turn(
 
 async fn checkpoint_accepted_turn(
     handle: &Arc<ChatHandle>,
-    history: Option<&Arc<dyn crate::chat_history::ChatHistory>>,
+    history: Option<&Arc<dyn dyson_persistence::ChatHistory>>,
     chat_id: &str,
     checkpoint: &Message,
-) -> crate::Result<bool> {
+) -> dyson_core::error::Result<bool> {
     let Some(history) = history else {
         return Ok(false);
     };
@@ -1009,7 +1012,7 @@ async fn maybe_execute_slash_turn(
     settings: &Settings,
     prompt: &str,
     attachments: &[crate::media::Attachment],
-) -> crate::Result<Option<String>> {
+) -> dyson_core::error::Result<Option<String>> {
     match crate::controller::slash::dispatch_executable(
         agent,
         output,
@@ -1072,7 +1075,7 @@ async fn generate_title(
     client: RateLimitedHandle<Box<dyn LlmClient>>,
     model: String,
     prompt: String,
-) -> crate::error::Result<String> {
+) -> dyson_core::error::Result<String> {
     let config = CompletionConfig {
         model,
         // Reasoning models can spend hundreds of tokens on hidden
@@ -1109,7 +1112,7 @@ async fn generate_title(
         }
     }
     clean_generated_title(&raw).ok_or_else(|| {
-        crate::error::DysonError::Llm("title generation returned empty title".into())
+        dyson_core::error::DysonError::Llm("title generation returned empty title".into())
     })
 }
 
@@ -1210,7 +1213,7 @@ mod tests {
                 std::sync::Arc<dyn crate::tool::Tool>,
             >,
             _config: &CompletionConfig,
-        ) -> crate::Result<crate::llm::StreamResponse> {
+        ) -> dyson_core::error::Result<crate::llm::StreamResponse> {
             panic!("slash skill dispatch must not call the LLM");
         }
     }
@@ -1424,7 +1427,7 @@ mod tests {
                 file_name: Some("notes\n.txt".into()),
             }],
         );
-        assert_eq!(msg.role, crate::message::Role::User);
+        assert_eq!(msg.role, dyson_core::message::Role::User);
         assert_eq!(
             msg.content,
             vec![

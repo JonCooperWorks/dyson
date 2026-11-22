@@ -15,10 +15,10 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::error::DysonError;
 use crate::export::sharegpt;
 use crate::feedback::FeedbackStore;
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use dyson_core::error::DysonError;
 
 pub struct ExportConversationTool;
 
@@ -62,7 +62,11 @@ impl Tool for ExportConversationTool {
         })
     }
 
-    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
+    async fn run(
+        &self,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> dyson_core::error::Result<ToolOutput> {
         // Read messages from the workspace's conversation context.
         // The agent loop passes messages via a special metadata channel —
         // but since tools don't have direct access to the agent's message
@@ -176,8 +180,8 @@ impl ExportConversationTool {
     async fn find_messages_with_metadata(
         &self,
         ctx: &ToolContext,
-    ) -> crate::Result<(
-        Vec<crate::message::Message>,
+    ) -> dyson_core::error::Result<(
+        Vec<dyson_core::message::Message>,
         Option<std::path::PathBuf>,
         Option<String>,
     )> {
@@ -220,7 +224,8 @@ impl ExportConversationTool {
 
             if let Some(entry) = entries.last() {
                 let content = std::fs::read_to_string(entry.path()).map_err(DysonError::Io)?;
-                if let Ok(messages) = serde_json::from_str::<Vec<crate::message::Message>>(&content)
+                if let Ok(messages) =
+                    serde_json::from_str::<Vec<dyson_core::message::Message>>(&content)
                 {
                     // Extract chat_id from filename (e.g., "12345.json" → "12345").
                     let chat_id = entry
@@ -244,7 +249,7 @@ impl ExportConversationTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{ContentBlock, Message};
+    use dyson_core::message::{ContentBlock, Message};
     use std::collections::HashMap;
 
     fn make_ctx_with_history(messages: &[Message]) -> (ToolContext, tempfile::TempDir) {

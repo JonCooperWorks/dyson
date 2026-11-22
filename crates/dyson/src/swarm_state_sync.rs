@@ -13,10 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use dyson_common::state_sync::{
-    ENV_STATE_SYNC_TOKEN, ENV_STATE_SYNC_URL, has_hidden_or_unclean_component,
-    is_durable_state_path,
-};
+use dyson_common::state_sync::{has_hidden_or_unclean_component, is_durable_state_path};
 use serde::Serialize;
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(5);
@@ -58,23 +55,14 @@ pub struct StateSyncStatus {
     pub last_error: Option<String>,
 }
 
-pub fn config_from_env() -> Option<StateSyncConfig> {
-    let url = std::env::var(ENV_STATE_SYNC_URL).unwrap_or_default();
-    let token = std::env::var(ENV_STATE_SYNC_TOKEN).unwrap_or_default();
-    if url.is_empty() || token.is_empty() {
-        None
-    } else {
-        Some(StateSyncConfig { url, token })
-    }
-}
-
-pub fn install_config(initial: Option<StateSyncConfig>) -> Arc<Mutex<Option<StateSyncConfig>>> {
+/// Reset the shared config to unconfigured; `/api/admin/configure` installs
+/// the live URL and token.
+fn install_unconfigured() -> Arc<Mutex<Option<StateSyncConfig>>> {
     let handle = config_handle();
-    let configured = initial.is_some();
     if let Ok(mut guard) = handle.lock() {
-        *guard = initial;
+        *guard = None;
     }
-    update_configured_status(configured);
+    update_configured_status(false);
     handle
 }
 
@@ -174,8 +162,8 @@ fn record_error(error: impl Into<String>) {
     }
 }
 
-pub fn spawn_worker(workspace: PathBuf, chats: PathBuf, initial: Option<StateSyncConfig>) {
-    let config = install_config(initial);
+pub fn spawn_worker(workspace: PathBuf, chats: PathBuf) {
+    let config = install_unconfigured();
     let _handle = tokio::spawn(async move {
         let mut worker = StateSyncWorker::new(vec![
             SyncRoot {

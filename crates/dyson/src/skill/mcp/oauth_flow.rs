@@ -1,9 +1,9 @@
 //! OAuth completion shared by callback and submit tool.
 use crate::auth::oauth;
 use crate::config::McpAuthConfig;
-use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use async_trait::async_trait;
+use dyson_core::error::{DysonError, Result};
 use std::sync::Arc;
 use std::time::Duration;
 

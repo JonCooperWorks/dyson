@@ -2,7 +2,7 @@
 // TokenBudget — tracks and limits token usage across the agent session.
 // ===========================================================================
 
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 /// Token usage tracking and optional budget enforcement.
 ///

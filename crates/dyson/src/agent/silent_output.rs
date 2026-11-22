@@ -3,8 +3,8 @@
 // ===========================================================================
 
 use crate::controller::Output;
-use crate::error::{DysonError, Result};
 use crate::tool::ToolOutput;
+use dyson_core::error::{DysonError, Result};
 
 /// A no-op output sink used for side-channel LLM calls where we want
 /// tool execution but don't need to stream text to the user.

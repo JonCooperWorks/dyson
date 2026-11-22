@@ -24,9 +24,9 @@
 
 use async_trait::async_trait;
 
-use crate::error::Result;
 use crate::sandbox::{Sandbox, SandboxBypassGuard, SandboxDecision};
 use crate::tool::ToolContext;
+use dyson_core::error::Result;
 
 // ---------------------------------------------------------------------------
 // DangerousNoSandbox

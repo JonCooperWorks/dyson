@@ -138,7 +138,7 @@ and hard ceiling that the curator aims for.
 ```rust
 use async_trait::async_trait;
 use crate::agent::dream::*;
-use crate::error::Result;
+use dyson_core::error::Result;
 
 pub struct MyDream;
 

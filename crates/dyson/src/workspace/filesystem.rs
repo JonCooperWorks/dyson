@@ -35,9 +35,9 @@ use std::path::{Component, Path, PathBuf};
 use regex::RegexBuilder;
 
 use crate::config::MemoryConfig;
-use crate::error::{DysonError, Result};
 use crate::workspace::Workspace;
 use crate::workspace::memory_store::MemoryStore;
+use dyson_core::error::{DysonError, Result};
 
 // ---------------------------------------------------------------------------
 // FilesystemWorkspace — the persistent state directory.
@@ -64,6 +64,40 @@ pub struct FilesystemWorkspace {
     memory_store: MemoryStore,
 }
 
+/// The only workspace layout version this build reads.
+pub const WORKSPACE_VERSION: u64 = 3;
+
+/// Marker file at the workspace root holding [`WORKSPACE_VERSION`].
+const VERSION_FILE: &str = ".workspace_version";
+
+/// Stamp an unmarked workspace with [`WORKSPACE_VERSION`]; refuse one whose
+/// marker names any other version.
+///
+/// An unmarked workspace is taken as current: `dyson swarm` writes
+/// `IDENTITY.md` into a fresh workspace before the first load, and Swarm's
+/// state mirror restores workspace files without dotfiles.
+fn check_or_stamp_version(path: &Path) -> Result<()> {
+    let marker = path.join(VERSION_FILE);
+    match std::fs::read_to_string(&marker) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(WORKSPACE_VERSION) => Ok(()),
+            _ => Err(DysonError::Config(format!(
+                "workspace {} is version {:?}; this Dyson reads only workspace version {WORKSPACE_VERSION}",
+                path.display(),
+                raw.trim(),
+            ))),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(&marker, format!("{WORKSPACE_VERSION}\n"))
+                .map_err(|e| DysonError::Config(format!("cannot write {}: {e}", marker.display())))
+        }
+        Err(e) => Err(DysonError::Config(format!(
+            "cannot read {}: {e}",
+            marker.display()
+        ))),
+    }
+}
+
 impl FilesystemWorkspace {
     /// Load a workspace from a directory.
     ///
@@ -71,7 +105,7 @@ impl FilesystemWorkspace {
     /// Reads all .md files in the root and the memory/ subdirectory.
     pub fn load(path: &Path, memory_config: MemoryConfig) -> Result<Self> {
         // Create the directory structure if it doesn't exist.
-        for subdir in ["", "memory", "skills", "kb/raw", "kb/wiki"] {
+        for subdir in ["", "memory", "memory/notes", "skills", "kb/raw", "kb/wiki"] {
             std::fs::create_dir_all(path.join(subdir)).map_err(|e| {
                 DysonError::Config(format!(
                     "cannot create {}: {e}",
@@ -80,11 +114,7 @@ impl FilesystemWorkspace {
             })?;
         }
 
-        // Run workspace migrations before reading files.
-        let migrated = crate::workspace::migrate::migrate(path)?;
-        if migrated {
-            tracing::info!(path = %path.display(), "workspace migrated");
-        }
+        check_or_stamp_version(path)?;
 
         let mut files = HashMap::new();
 
@@ -984,7 +1014,7 @@ mod tests {
         let (dir, ws) = temp_workspace();
         let skills_dir = dir.join("skills");
 
-        // A flat .md file should not be discovered (legacy format)
+        // A flat .md file is not a skill.
         std::fs::write(skills_dir.join("legacy.md"), "old style").unwrap();
 
         // A proper skill directory
@@ -1010,6 +1040,33 @@ mod tests {
             dir.join("skills").is_dir(),
             "workspace load should create skills/ directory"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fresh_workspace_gets_layout_and_version_marker() {
+        let (dir, _ws) = temp_workspace();
+        for sub in ["memory", "memory/notes", "skills", "kb/raw", "kb/wiki"] {
+            assert!(dir.join(sub).is_dir(), "load should create {sub}/");
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join(VERSION_FILE))
+                .unwrap()
+                .trim(),
+            WORKSPACE_VERSION.to_string()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workspace_with_other_version_marker_is_refused() {
+        let (dir, _ws) = temp_workspace();
+        std::fs::write(dir.join(VERSION_FILE), "2\n").unwrap();
+        let err = FilesystemWorkspace::load(&dir, MemoryConfig::default())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("reads only workspace version 3"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

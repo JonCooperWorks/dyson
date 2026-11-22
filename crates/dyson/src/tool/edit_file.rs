@@ -4,8 +4,8 @@
 
 use async_trait::async_trait;
 
-use crate::error::Result;
 use crate::tool::{Tool, ToolContext, ToolOutput, path_err};
+use dyson_core::error::Result;
 
 /// Maximum file size we'll load into memory for editing (10 MB).
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;

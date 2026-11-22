@@ -366,8 +366,6 @@ pub struct StageHistoryEntry {
     /// different model than the run default (e.g. Validate on a different
     /// model than Hunt for cross-model adversarial separation), so the
     /// per-run `ModelMetadata` is not enough to know what judged what.
-    /// Defaulted for backward-compatible reads of pre-v2 checkpoints.
-    #[serde(default)]
     pub model: String,
 }
 

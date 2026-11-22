@@ -1,6 +1,6 @@
 # Configuration
 
-Dyson loads a JSON config file, applies schema migrations, resolves secrets,
+Dyson loads a JSON config file, checks its `config_version`, resolves secrets,
 then merges CLI overrides into one `Settings` value. Runtime code does not
 care whether a value came from `dyson.json`, an environment-backed resolver, or
 a command-line flag.
@@ -9,14 +9,13 @@ Key files:
 
 - `crates/dyson/src/config/mod.rs`
 - `crates/dyson/src/config/loader.rs`
-- `crates/dyson/src/config/migrate.rs`
 - `crates/dyson/src/command/`
 
 ## CLI Shape
 
 ```text
 dyson listen [--config PATH] [--provider NAME] [--base-url URL] [--workspace DIR] [--dangerous-no-sandbox]
-dyson init [--noinput] [--daemonize] [--path DIR] [--import-filesystem DIR] [--env KEY=VALUE] [--dangerous-no-sandbox]
+dyson init [--noinput] [--daemonize] [--path DIR] [--env KEY=VALUE] [--dangerous-no-sandbox]
 dyson hash-bearer <plaintext>
 dyson swarm
 dyson run [OPTIONS] <prompt>
@@ -27,9 +26,9 @@ dyson run [OPTIONS] <prompt>
 config, and starts the HTTP controller inside the sandbox.
 
 Important swarm env values include `SWARM_BEARER_TOKEN`, `SWARM_PROXY_URL`,
-`SWARM_PROXY_TOKEN`, `SWARM_MODEL`, `SWARM_NAME`,
-`SWARM_TASK`, `SWARM_INSTANCE_ID`, `SWARM_STATE_SYNC_URL`,
-`SWARM_STATE_SYNC_TOKEN`, and `SWARM_TOOLS`. When `SWARM_TOOLS` is absent,
+`SWARM_MODEL`, `SWARM_NAME`, `SWARM_TASK`, `SWARM_INSTANCE_ID`, and
+`SWARM_TOOLS`. The runtime tokens (proxy, ingest, state sync) are never in the
+env: Swarm pushes them through `/api/admin/configure` after boot. When `SWARM_TOOLS` is absent,
 all default builtin tools are enabled; when it is present, Dyson uses it as an
 exact comma-separated allowlist, so an empty value enables no builtin tools.
 Image generation in swarm-managed instances is normally patched after boot by
@@ -53,20 +52,13 @@ one-shot config must resolve an active provider with at least one model.
 
 ## Schema Version
 
-The current `config_version` is **3**.
+Every config file must carry `"config_version": 3`. A file with any other
+version, no version, or keys from an older schema (`workspace.path`,
+`providers.*.model`, inline `agent.api_key`) is refused with an error; rewrite
+it in the current shape. There is no automatic migration.
 
-| Migration | Behaviour |
-|---|---|
-| v0 -> v1 | Moves inline `agent.provider`, `agent.api_key`, and `agent.base_url` into `providers.default` |
-| v1 -> v2 | Renames each provider's `model` string to a `models` array and removes the migrated copy of `agent.model` |
-| v2 -> v3 | Marker migration for OIDC controller `allowed_sub`; no structural rewrite |
-
-The loader writes migrated configs back to disk so later starts skip the same
-work. A config with a version newer than the binary refuses to load.
-
-`agent.model` is still accepted as an explicit active-model override and is
-what the HTTP model switch writes back to `dyson.json`. The v1 -> v2 migration
-only removed the stale model value copied from legacy provider config.
+`agent.model` is an explicit active-model override and is what the HTTP model
+switch writes back to `dyson.json`.
 
 ## Minimal Config
 
@@ -99,29 +91,30 @@ contains the resolved backend type/API fields and `Settings.active_provider`
 keeps the selected provider name plus model for HTTP model switching.
 
 When a `providers` map exists, HTTP turns require a resolvable active provider;
-they do not fall back to an ad hoc default client. Direct fallback is only for
-legacy configs without a provider map.
+they do not fall back to an ad hoc default client. The direct client built from
+the flattened agent fields serves configs without a provider map (env keys or a
+bare `--provider <type>`).
 
 Each provider entry uses:
 
 | Field | Required | Notes |
 |---|---|---|
-| `type` | yes | Provider backend or alias |
+| `type` | yes | Provider backend name (exactly as listed below) |
 | `models` | yes | Non-empty array; first model is the active default |
 | `api_key` | API providers | Literal string or secret resolver |
 | `base_url` | no | Alternate API endpoint |
 
 Provider types:
 
-| Config value | Aliases | Credential fallback | Notes |
-|---|---|---|---|
-| `anthropic` | | `ANTHROPIC_API_KEY` | Anthropic Messages API |
-| `openai` | `gpt` | `OPENAI_API_KEY` | OpenAI Chat Completions; compatible APIs through `base_url` |
-| `openrouter` | `open-router`, `open_router` | `OPENROUTER_API_KEY` | OpenAI-compatible OpenRouter wrapper |
-| `gemini` | `google` | `GEMINI_API_KEY` | Gemini streaming and image generation |
-| `ollama-cloud` | `ollama_cloud`, `ollama` | `OLLAMA_API_KEY` | Ollama Cloud |
-| `claude-code` | `claude_code`, `cc` | none | Uses the local `claude` CLI credentials |
-| `codex` | `codex-cli` | none | Uses the local `codex` CLI credentials |
+| Config value | Credential fallback | Notes |
+|---|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` | Anthropic Messages API |
+| `openai` | `OPENAI_API_KEY` | OpenAI Chat Completions; compatible APIs through `base_url` |
+| `openrouter` | `OPENROUTER_API_KEY` | OpenAI-compatible OpenRouter wrapper |
+| `gemini` | `GEMINI_API_KEY` | Gemini streaming and image generation |
+| `ollama-cloud` | `OLLAMA_API_KEY` | Ollama Cloud |
+| `claude-code` | none | Uses the local `claude` CLI credentials |
+| `codex` | none | Uses the local `codex` CLI credentials |
 
 If an API-key provider has `base_url`, env-var fallback is disabled. Put the
 intended key in that provider entry so a default provider key is not silently
@@ -279,9 +272,6 @@ backend is `disk`.
   }
 }
 ```
-
-`workspace.path` is still accepted as a legacy alias when
-`workspace.connection_string` is absent.
 
 The filesystem workspace also creates `programs/`; agents use it as their
 working directory for coding and shell tools.

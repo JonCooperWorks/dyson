@@ -199,9 +199,9 @@ describe('DysonClient — GET endpoints', () => {
       text: async () => 'plain report',
     }));
     const client = new DysonClient({ fetch });
-    const out = await client.loadFileText('/api/files/f2');
+    const out = await client.loadFileText('/api/conversations/c1/files/f2');
     expect(out).toBe('plain report');
-    expect(args(fetch)[0]).toBe('/api/files/f2');
+    expect(args(fetch)[0]).toBe('/api/conversations/c1/files/f2');
     expect(new Headers(args(fetch)[1].headers).get('accept')).toContain('text/*');
   });
 

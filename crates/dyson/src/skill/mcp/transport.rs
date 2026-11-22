@@ -51,7 +51,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, oneshot};
 
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 use super::protocol::{JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 
@@ -751,7 +751,10 @@ impl HttpTransport {
     }
 
     /// Build a request with common headers.
-    async fn build_request(&self, body: &str) -> crate::error::Result<reqwest::RequestBuilder> {
+    async fn build_request(
+        &self,
+        body: &str,
+    ) -> dyson_core::error::Result<reqwest::RequestBuilder> {
         let req = self
             .client
             .post(&self.url)
@@ -766,7 +769,7 @@ impl HttpTransport {
     /// Send an HTTP request and capture the session ID from the response.
     ///
     /// Shared by the normal path and the 401 retry path to avoid duplication.
-    async fn send_http(&self, json: &str) -> crate::error::Result<reqwest::Response> {
+    async fn send_http(&self, json: &str) -> dyson_core::error::Result<reqwest::Response> {
         let mut req = self.build_request(json).await?;
 
         {
@@ -812,7 +815,7 @@ impl HttpTransport {
     async fn parse_rpc_response(
         &self,
         response: reqwest::Response,
-    ) -> crate::error::Result<serde_json::Value> {
+    ) -> dyson_core::error::Result<serde_json::Value> {
         if !response.status().is_success() {
             let status = response.status();
             let body = match read_response_text_capped(response, &self.url).await {
@@ -855,7 +858,7 @@ impl HttpTransport {
     async fn stream_sse_response(
         &self,
         mut response: reqwest::Response,
-    ) -> crate::error::Result<serde_json::Value> {
+    ) -> dyson_core::error::Result<serde_json::Value> {
         let mut parser = SseStreamParser::new();
         let mut total_bytes = 0usize;
         let mut answer: Option<Value> = None;
@@ -895,7 +898,7 @@ impl HttpTransport {
 
     /// Turn a parsed JSON-RPC response value into the `result`, mapping a
     /// JSON-RPC `error` object onto a `DysonError`.
-    fn finish_rpc_value(&self, value: Value) -> crate::error::Result<serde_json::Value> {
+    fn finish_rpc_value(&self, value: Value) -> dyson_core::error::Result<serde_json::Value> {
         let rpc_response: JsonRpcResponse =
             serde_json::from_value(value).map_err(|e| DysonError::Mcp {
                 server: self.url.clone(),
@@ -918,7 +921,7 @@ impl HttpTransport {
 
 /// Parse one JSON-RPC frame (a single `data:` payload or a non-SSE body)
 /// into a `Value`, attributing parse failures to `server`.
-fn parse_rpc_value(raw: &str, server: &str) -> crate::error::Result<Value> {
+fn parse_rpc_value(raw: &str, server: &str) -> dyson_core::error::Result<Value> {
     serde_json::from_str(raw).map_err(|e| DysonError::Mcp {
         server: server.to_string(),
         message: format!("failed to parse response: {e}"),

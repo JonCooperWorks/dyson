@@ -8,8 +8,8 @@
 use std::time::Duration;
 
 use crate::agent::stream_handler::ToolCall;
-use crate::error::DysonError;
 use crate::tool::ToolOutput;
+use dyson_core::error::DysonError;
 
 // ---------------------------------------------------------------------------
 // ToolHookEvent

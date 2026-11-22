@@ -14,7 +14,6 @@ The streaming tool-use loop at the heart of Dyson. `Agent` sends the conversatio
 - `ResultFormatter`, `FormattedResult`, `sanitize_tool_output` [result_formatter.rs:ResultFormatter, result_formatter.rs:sanitize_tool_output]
 - `ToolLimiter` [tool_limiter.rs:ToolLimiter], `TokenBudget` [token_budget.rs:TokenBudget], `SlidingWindow` [sliding_window.rs:SlidingWindow], `SilentOutput` [silent_output.rs:SilentOutput]
 - `task` (pub): `PROMPT`, `digest`, `canonical_json`, `acquire`, `reconcile_lease` [task.rs:digest] - see [task](./task/EGM.md)
-- Facades: `protocol` re-exports `dyson_harness::protocol::*` [protocol.rs]; `dependency_analyzer` re-exports `dyson_harness::scheduler::*` [dependency_analyzer.rs]
 
 ## Invariants
 - Every tool call passes through the sandbox before and after execution [mod.rs:Agent]

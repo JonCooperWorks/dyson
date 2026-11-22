@@ -412,8 +412,8 @@ async fn rust_method_calls_mostly_resolve() {
                }\n";
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("app.rs"), src).unwrap();
-    let config = dyson::ast::config_for_language_name("rust").unwrap();
-    let index = dyson::ast::taint::build_index(config, tmp.path())
+    let config = dyson_ast::config_for_language_name("rust").unwrap();
+    let index = dyson_ast::taint::build_index(config, tmp.path())
         .await
         .unwrap();
     assert_eq!(
@@ -463,8 +463,8 @@ async fn rust_macro_invocation_resolves_callee() {
     let src = "fn handle(req: String) {\n    log!(req);\n    execute(req);\n}\nfn execute(s: String) {}\nmacro_rules! log { ($x:expr) => {{ let _ = $x; }} }\n";
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("app.rs"), src).unwrap();
-    let config = dyson::ast::config_for_language_name("rust").unwrap();
-    let idx = dyson::ast::taint::build_index(config, tmp.path())
+    let config = dyson_ast::config_for_language_name("rust").unwrap();
+    let idx = dyson_ast::taint::build_index(config, tmp.path())
         .await
         .unwrap();
     let log_call = idx
@@ -616,8 +616,8 @@ async fn haskell_indexes_apply_cleanly() {
         "execute s = s\nhandle req = execute req\nprocess x = foo (bar x)\n",
     )
     .unwrap();
-    let config = dyson::ast::config_for_language_name("haskell").unwrap();
-    let idx = dyson::ast::taint::build_index(config, tmp.path())
+    let config = dyson_ast::config_for_language_name("haskell").unwrap();
+    let idx = dyson_ast::taint::build_index(config, tmp.path())
         .await
         .unwrap();
     assert!(
@@ -649,8 +649,8 @@ async fn erlang_indexes_call_cleanly() {
          execute(Data) -> Data.\n",
     )
     .unwrap();
-    let config = dyson::ast::config_for_language_name("erlang").unwrap();
-    let idx = dyson::ast::taint::build_index(config, tmp.path())
+    let config = dyson_ast::config_for_language_name("erlang").unwrap();
+    let idx = dyson_ast::taint::build_index(config, tmp.path())
         .await
         .unwrap();
     assert!(
@@ -687,8 +687,8 @@ async fn functional_languages_at_least_index_cleanly() {
     let ocaml = "let execute s = s\nlet handle req = execute req\n";
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("a.ml"), ocaml).unwrap();
-    let config = dyson::ast::config_for_language_name("ocaml").unwrap();
-    let idx = dyson::ast::taint::build_index(config, tmp.path())
+    let config = dyson_ast::config_for_language_name("ocaml").unwrap();
+    let idx = dyson_ast::taint::build_index(config, tmp.path())
         .await
         .unwrap();
     assert!(
@@ -700,8 +700,8 @@ async fn functional_languages_at_least_index_cleanly() {
     let haskell = "execute s = s\nhandle req = execute req\n";
     let tmp2 = tempfile::tempdir().unwrap();
     fs::write(tmp2.path().join("A.hs"), haskell).unwrap();
-    let config = dyson::ast::config_for_language_name("haskell").unwrap();
-    let idx = dyson::ast::taint::build_index(config, tmp2.path())
+    let config = dyson_ast::config_for_language_name("haskell").unwrap();
+    let idx = dyson_ast::taint::build_index(config, tmp2.path())
         .await
         .unwrap();
     assert!(
@@ -715,8 +715,8 @@ async fn functional_languages_at_least_index_cleanly() {
     let nix = "{ result = execute \"hi\"; }\n";
     let tmp3 = tempfile::tempdir().unwrap();
     fs::write(tmp3.path().join("a.nix"), nix).unwrap();
-    let config = dyson::ast::config_for_language_name("nix").unwrap();
-    let idx = dyson::ast::taint::build_index(config, tmp3.path())
+    let config = dyson_ast::config_for_language_name("nix").unwrap();
+    let idx = dyson_ast::taint::build_index(config, tmp3.path())
         .await
         .unwrap();
     assert!(
@@ -728,8 +728,8 @@ async fn functional_languages_at_least_index_cleanly() {
     let erlang = "-module(app).\nhandle(Req) -> execute(Req).\nexecute(Data) -> Data.\n";
     let tmp4 = tempfile::tempdir().unwrap();
     fs::write(tmp4.path().join("app.erl"), erlang).unwrap();
-    let config = dyson::ast::config_for_language_name("erlang").unwrap();
-    let idx = dyson::ast::taint::build_index(config, tmp4.path())
+    let config = dyson_ast::config_for_language_name("erlang").unwrap();
+    let idx = dyson_ast::taint::build_index(config, tmp4.path())
         .await
         .unwrap();
     assert!(
@@ -893,7 +893,7 @@ async fn many_file_python_project_indexes_cleanly() {
 /// taint_trace builds once per session, so indexing more files amortises.
 #[tokio::test]
 async fn index_flags_taint_max_files_truncation() {
-    use dyson::ast::taint::index::TAINT_MAX_FILES;
+    use dyson_ast::taint::index::TAINT_MAX_FILES;
     let tmp = tempfile::tempdir().unwrap();
     let overshoot = TAINT_MAX_FILES + 20;
     for i in 0..overshoot {
@@ -903,8 +903,8 @@ async fn index_flags_taint_max_files_truncation() {
         )
         .unwrap();
     }
-    let config = dyson::ast::config_for_language_name("python").unwrap();
-    let index = dyson::ast::taint::build_index(config, tmp.path())
+    let config = dyson_ast::config_for_language_name("python").unwrap();
+    let index = dyson_ast::taint::build_index(config, tmp.path())
         .await
         .unwrap();
     assert!(
@@ -1296,7 +1296,7 @@ async fn go_selector_expression_precision_separates_siblings() {
 
 #[test]
 fn confidence_tiers_match_observed_smoke_ratios() {
-    use dyson::ast::taint::Confidence;
+    use dyson_ast::taint::Confidence;
     assert_eq!(
         Confidence::from_unresolved_ratio(0, 100),
         (0, Confidence::High)

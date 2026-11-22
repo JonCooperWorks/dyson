@@ -129,7 +129,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
-use crate::error::Result;
+use dyson_core::error::Result;
 
 /// Maximum number of concurrent connections the MCP server will accept.
 const MAX_CONCURRENT_CONNECTIONS: usize = 64;

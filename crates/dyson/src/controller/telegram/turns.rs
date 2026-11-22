@@ -33,7 +33,7 @@ pub(super) async fn run_telegram_turn(
     settings: &Settings,
     text: &str,
     attachments: Vec<crate::media::Attachment>,
-) -> crate::Result<String> {
+) -> dyson_core::error::Result<String> {
     match crate::controller::slash::dispatch_executable(
         agent,
         output,
@@ -63,14 +63,14 @@ pub(super) async fn run_telegram_turn(
 
 pub(super) async fn record_telegram_turn(
     entry: &ChatEntry,
-    chat_store: &dyn crate::chat_history::ChatHistory,
+    chat_store: &dyn dyson_persistence::ChatHistory,
     chat_key: &str,
-    messages: Vec<crate::message::Message>,
+    messages: Vec<dyson_core::message::Message>,
     sent_ids: &[types::MessageId],
 ) {
     if let Some(turn_index) = messages
         .iter()
-        .rposition(|message| message.role == crate::message::Role::Assistant)
+        .rposition(|message| message.role == dyson_core::message::Role::Assistant)
     {
         let mut id_map = entry.message_id_map.write().await;
         for message_id in sent_ids {
@@ -90,7 +90,7 @@ pub(super) async fn run_agent_for_message(
     msg: types::Message,
     text: String,
     entry: Arc<ChatEntry>,
-    chat_store: Arc<dyn crate::chat_history::ChatHistory>,
+    chat_store: Arc<dyn dyson_persistence::ChatHistory>,
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
     download_limits: Arc<DownloadLimits>,
     settings: Settings,

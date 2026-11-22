@@ -22,10 +22,8 @@ struct RestoreStateFileBody {
     body_b64: Option<String>,
     /// The mirrored file's own modification time (Unix seconds), as Dyson
     /// pushed it. Restored files keep it as their mtime so a replay does
-    /// not make every conversation look updated at the roll time. Older
-    /// Swarms omit it; the file then keeps the write time.
-    #[serde(default)]
-    updated_at: Option<i64>,
+    /// not make every conversation look updated at the roll time.
+    updated_at: i64,
 }
 
 pub(in super::super) async fn post_state_file(
@@ -128,11 +126,8 @@ pub(in super::super) async fn post_state_file(
 
 /// The mtime a restored file should carry: the mirror's recorded time when
 /// it is plausible (after 2001, not in the future beyond clock skew).
-fn restored_mtime(
-    updated_at: Option<i64>,
-    now: std::time::SystemTime,
-) -> Option<std::time::SystemTime> {
-    let secs = u64::try_from(updated_at?)
+fn restored_mtime(updated_at: i64, now: std::time::SystemTime) -> Option<std::time::SystemTime> {
+    let secs = u64::try_from(updated_at)
         .ok()
         .filter(|s| *s > 1_000_000_000)?;
     let at = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))?;
@@ -196,12 +191,11 @@ mod tests {
     fn restored_files_keep_the_mirrors_time_when_plausible() {
         let now = UNIX_EPOCH + Duration::from_secs(1_763_200_000);
         assert_eq!(
-            restored_mtime(Some(1_763_000_000), now),
+            restored_mtime(1_763_000_000, now),
             Some(UNIX_EPOCH + Duration::from_secs(1_763_000_000))
         );
-        assert_eq!(restored_mtime(None, now), None);
-        assert_eq!(restored_mtime(Some(-5), now), None);
-        assert_eq!(restored_mtime(Some(12), now), None);
-        assert_eq!(restored_mtime(Some(1_763_200_000 + 86_400), now), None);
+        assert_eq!(restored_mtime(-5, now), None);
+        assert_eq!(restored_mtime(12, now), None);
+        assert_eq!(restored_mtime(1_763_200_000 + 86_400, now), None);
     }
 }

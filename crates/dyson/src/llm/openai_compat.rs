@@ -17,14 +17,14 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 
 use crate::auth::Auth;
-use crate::error::Result;
 use crate::llm::dialects::{TextToolExtractorStream, deepseek, text_tool_handler_for_model};
 use crate::llm::openai::{OpenAiClient, OpenAiJsonParser, message_to_openai};
 use crate::llm::sse_parser::BaseSseParser;
 use crate::llm::{
     CompletionConfig, LlmClient, StreamResponse, ToolDefinition, concat_system_prompt,
 };
-use crate::message::{ContentBlock, Message, Role};
+use dyson_core::error::Result;
+use dyson_core::message::{ContentBlock, Message, Role};
 
 const MAX_TEXT_TOOL_TRANSCRIPT_STRING_CHARS: usize = 2_000;
 

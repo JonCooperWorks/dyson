@@ -35,9 +35,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::controller::Output;
-use crate::error::DysonError;
-use crate::message::{Artefact, Message};
 use crate::tool::{CheckpointEvent, ToolOutput};
+use dyson_core::error::DysonError;
+use dyson_core::message::{Artefact, Message};
 
 // ---------------------------------------------------------------------------
 // Event types

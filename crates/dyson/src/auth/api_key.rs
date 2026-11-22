@@ -12,7 +12,7 @@
 use async_trait::async_trait;
 
 use crate::auth::{Auth, AuthInfo, Credential};
-use crate::error::Result;
+use dyson_core::error::Result;
 
 /// API key authentication via a custom header.
 ///
@@ -58,7 +58,7 @@ impl Auth for ApiKeyAuth {
         if valid {
             Ok(AuthInfo::new(format!("api-key:{}", self.header_name)))
         } else {
-            Err(crate::error::DysonError::Config("unauthorized".into()))
+            Err(dyson_core::error::DysonError::Config("unauthorized".into()))
         }
     }
 }

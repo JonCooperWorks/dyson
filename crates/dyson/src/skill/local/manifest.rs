@@ -2,7 +2,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{DysonError, Result};
+use dyson_core::error::{DysonError, Result};
 
 pub const DEFAULT_SCRIPT_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_SCRIPT_TIMEOUT_MS: u64 = 300_000;

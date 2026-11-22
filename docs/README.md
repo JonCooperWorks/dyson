@@ -18,7 +18,7 @@ across turns.
 | [Tool Execution Pipeline](tool-execution-pipeline.md) | Rate limits, dependency analysis, formatting, hooks |
 | [AST-Aware Code Editing & Reading](ast.md) | Tree-sitter-backed reads, searches, and multi-file edits |
 | [Sandbox](sandbox.md) | `PolicySandbox`, OS wrappers, app-level path/network checks |
-| [Configuration](configuration.md) | `dyson.json`, schema migrations, providers, controllers, skills |
+| [Configuration](configuration.md) | `dyson.json`, version check, providers, controllers, skills |
 | [Secrets](secrets.md) | Secret resolver routing and env-backed credentials |
 | [LLM Prompt Caching](prompt-caching.md) | Stable/ephemeral prompt segments and Anthropic cache breakpoints |
 | [Tool Forwarding over MCP](tool-forwarding-over-mcp.md) | Dyson as an MCP server for CLI-subprocess providers |
@@ -46,21 +46,20 @@ crates/dyson-core/          Provider-neutral messages and errors
 crates/dyson-harness/       Execution contracts, scheduler, replay, grading
 crates/dyson-ast/           Tree-sitter parsing and taint primitives
 crates/dyson-dependency-analysis/  Manifest parsers and OSV analysis
-crates/dyson-persistence/   Chat histories, journals, migrations, checkpoints
+crates/dyson-persistence/   Chat histories, journals, checkpoints
 crates/dyson/src/
   main.rs                 CLI entry: listen, init, hash-bearer, swarm, run
   command/                Subcommand implementations and config overrides
-  config/                 Settings, loader, migrations, hot reload
+  config/                 Settings, loader, hot reload
   llm/                    Provider registry, API clients, CLI-subprocess clients, SSE parsers
   agent/                  Agent loop, stream handler, compaction, rate limits, dependency analysis
   tool/                   Built-in tools, web/search/file/workspace tools
-  ast/                    Compatibility façade over dyson-ast
   skill/                  Builtin, local, MCP, subagent, marketplace-loaded skills
   media/                  Attachments, generated artefacts, PDF/image/audio handling
   sandbox/                Policy sandbox, OS command builders, no-sandbox bypass
   controller/             Terminal, HTTP/web, Telegram, background controllers
-  chat_history/           Configured factory and persistence compatibility façade
-  workspace/              Filesystem/in-memory workspace, memory store, migrations
+  chat_history/           Configured chat-history backend factory
+  workspace/              Filesystem/in-memory workspace, memory store
   auth/                   Bearer, hashed bearer, OIDC/no-auth shared auth traits
   secret/                 Secret resolver registry
   swarm_state_sync.rs     Swarm-mode state mirror worker

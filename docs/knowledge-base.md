@@ -16,7 +16,6 @@ wiki/knowledge base
 - `src/tool/kb_status.rs` — `KbStatusTool` (file counts, sizes, directory listing)
 - `src/workspace/filesystem.rs` — KB loading, `INDEX.md` injection into system prompt
 - `src/workspace/memory_store.rs` — FTS5 indexing (`memory_fts` virtual table)
-- `src/workspace/migrate.rs` — v2 → v3 migration (creates `kb/` structure)
 
 ---
 
@@ -113,17 +112,10 @@ Useful for understanding what's in the KB before searching or adding content.
 
 ---
 
-## Workspace Migration
+## Directory Layout
 
-The `kb/` directory structure is created automatically by the v2 → v3
-workspace migration.  Existing workspaces upgrade on next startup.
-
-| Version | Migration |
-|---------|-----------|
-| 2 → 3 | Create `kb/`, `kb/raw/`, `kb/wiki/` |
-
-New workspaces get the directories directly from `load()` (via
-`create_dir_all`).
+`FilesystemWorkspace::load()` creates `kb/`, `kb/raw/` and `kb/wiki/` on every
+load (via `create_dir_all`).
 
 ---
 
@@ -175,7 +167,6 @@ on `memory/`.  Both use the same underlying `MemoryStore::search()` method.
 | KbStatusTool | `src/tool/kb_status.rs` |
 | KB loading & INDEX.md | `src/workspace/filesystem.rs` |
 | FTS5 index | `src/workspace/memory_store.rs` |
-| v2 → v3 migration | `src/workspace/migrate.rs` |
 | Workspace trait | `src/workspace/mod.rs` |
 
 ---

@@ -16,7 +16,7 @@ contracts come from `dyson-common` pinned to a release tag [Cargo.toml:workspace
 
 - crates: [./crates/EGM.md](./crates/EGM.md) - the six workspace crates (`dyson` composition root plus core, harness, persistence, ast, dependency-analysis)
 - deploy: [./deploy/EGM.md](./deploy/EGM.md) - managed-Dyson container entrypoint that sets up tmpfs-only Codex/Claude credential dirs, then execs `dyson`
-- scripts: [./scripts/EGM.md](./scripts/EGM.md) - operator update scripts (`update.sh`, `update-swarm.sh`)
+- scripts: [./scripts/EGM.md](./scripts/EGM.md) - operator update script (`update.sh`)
 
 ## Global Invariants
 

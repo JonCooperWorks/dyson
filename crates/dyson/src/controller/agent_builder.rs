@@ -24,7 +24,7 @@ pub async fn build_agent(
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
     registry: &ClientRegistry,
     channel_id: Option<&str>,
-) -> crate::Result<crate::agent::Agent> {
+) -> dyson_core::error::Result<crate::agent::Agent> {
     if mode == AgentMode::Public {
         let ch = channel_id.unwrap_or("unknown");
         return build_public_agent(settings, controller_prompt, client, ch);
@@ -148,7 +148,7 @@ fn build_public_agent(
     controller_prompt: Option<&str>,
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
     channel_id: &str,
-) -> crate::Result<crate::agent::Agent> {
+) -> dyson_core::error::Result<crate::agent::Agent> {
     let filter: Vec<String> = PUBLIC_AGENT_TOOLS
         .iter()
         .map(|s| (*s).to_string())

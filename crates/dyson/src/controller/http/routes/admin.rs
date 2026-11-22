@@ -66,9 +66,7 @@ pub(super) struct ConfigureBody {
     #[serde(default)]
     models: Vec<String>,
     /// Provider entry the swarm-owned model list/token/base URL belong to.
-    /// Older Swarm callers omit this field; credential-bearing legacy payloads
-    /// are mapped to the stable `openrouter` entry. Other callers fall back to
-    /// `agent.provider`.
+    /// Required whenever `models`, `proxy_token` or `proxy_base` is sent.
     #[serde(default)]
     provider_name: Option<String>,
     /// Swarm-owned active chat provider restored after a managed instance is
@@ -90,7 +88,7 @@ pub(super) struct ConfigureBody {
     /// `SWARM_PROXY_TOKEN` keeps the `warmup-placeholder` literal
     /// as its api_key.
     #[serde(default)]
-    proxy_token: Option<crate::tokens::ProxyToken>,
+    proxy_token: Option<dyson_common::tokens::ProxyToken>,
     /// Replacement value for `providers.<agent.provider>.base_url` —
     /// swarm's `/llm` URL the agent should call.  Like
     /// `proxy_token`, the boot-time value is empty / loopback
@@ -128,12 +126,9 @@ pub(super) struct ConfigureBody {
     /// Reset the `skills` block in dyson.json to "use defaults".
     /// Removes the key entirely so the loader's
     /// no-skills-block branch fires and every builtin tool registers
-    /// (`bash`, `read_file`, `image_generate`, etc.).  Originally
-    /// added because earlier `dyson swarm` boots wrote
-    /// `"skills": { "builtin": { "tools": [] } }`, which the loader
-    /// parses as "register zero builtin tools" — every instance
-    /// shipped without a single tool.  Setting this flag on a sweep
-    /// is the retroactive fix.
+    /// (`bash`, `read_file`, `image_generate`, etc.).  Swarm sends this
+    /// when the operator picks "use defaults"; `tools: []` would instead
+    /// register zero builtins.
     #[serde(default)]
     reset_skills: bool,
     /// Explicit builtin-tool allowlist.  When `Some`, dyson rewrites
@@ -167,7 +162,7 @@ pub(super) struct ConfigureBody {
     /// Per-instance `it_<32hex>` bearer for the ingest endpoint.
     /// Mirrors `SWARM_INGEST_TOKEN`.  See `ingest_url` for posture.
     #[serde(default)]
-    ingest_token: Option<crate::tokens::IngestToken>,
+    ingest_token: Option<dyson_common::tokens::IngestToken>,
     /// Full URL the swarm-mode background state worker POSTs selected
     /// workspace files to. Mirrors `SWARM_STATE_SYNC_URL`; pushed here
     /// because warmup env is frozen for the running dyson process.
@@ -175,7 +170,7 @@ pub(super) struct ConfigureBody {
     state_sync_url: Option<String>,
     /// Per-instance `st_<32hex>` bearer for the state-file endpoint.
     #[serde(default)]
-    state_sync_token: Option<crate::tokens::StateSyncToken>,
+    state_sync_token: Option<dyson_common::tokens::StateSyncToken>,
     /// Token-isolated Telegram proxy settings supplied by swarm.
     /// Patches/creates the Telegram controller in webhook mode.
     #[serde(default)]
@@ -282,6 +277,15 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     {
         return bad_request("task must be mission text; use identity_doc for full IDENTITY.md");
     }
+    let provider_fields_sent = !body.models.is_empty()
+        || body
+            .proxy_token
+            .as_ref()
+            .is_some_and(|t| has_text(Some(t.as_str())))
+        || has_text(body.proxy_base.as_deref());
+    if provider_fields_sent && !has_text(body.provider_name.as_deref()) {
+        return bad_request("provider_name is required with models, proxy_token or proxy_base");
+    }
     let http_auth = match auth::prepare_http_auth(body.http_bearer.as_ref(), state).await {
         Ok(auth) => auth,
         Err(response) => return *response,
@@ -309,7 +313,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     let want_api_key = has_text(
         body.proxy_token
             .as_ref()
-            .map(crate::tokens::ProxyToken::as_str),
+            .map(dyson_common::tokens::ProxyToken::as_str),
     );
     let want_base_url = has_text(body.proxy_base.as_deref());
     let provider_requested = want_models || want_api_key || want_base_url;
@@ -333,9 +337,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //    `agent.provider` is `openrouter` (LlmProvider::OpenAi under
     //    the hood) but the image factory dispatches on real
     //    LlmProvider variants, so the two need separate provider
-    //    entries.  Existing dysons (created before this field was
-    //    plumbed) get retroactively rewired by the swarm-side sweep
-    //    that pushes a configure with these set.
+    //    entries.
     let want_image_block =
         has_text(body.image_provider_name.as_deref()) && body.image_provider_block.is_some();
     let want_image_provider = has_text(body.image_generation_provider.as_deref());
@@ -346,9 +348,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //    `skills.builtin.tools` to that exact set; otherwise
     //    `reset_skills` drops the `skills` key so the loader's
     //    defaults path registers every builtin.  Independent of the
-    //    chat / image patches — swarm's sweep flips one of these on
-    //    every push so toolless instances self-heal on the next
-    //    configure.  `tools` wins if both are set.
+    //    chat / image patches.  `tools` wins if both are set.
     let skills_requested = body.tools.is_some() || body.reset_skills;
     let skills_applied = skills_requested && has_config;
 
@@ -369,7 +369,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
                 api_key: if want_api_key {
                     body.proxy_token
                         .as_ref()
-                        .map(crate::tokens::ProxyToken::as_str)
+                        .map(dyson_common::tokens::ProxyToken::as_str)
                 } else {
                     None
                 },
@@ -394,7 +394,6 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
                 reset_skills: body.reset_skills,
                 mcp_servers: body.mcp_servers.as_ref(),
                 telegram_proxy: body.telegram_proxy.as_ref(),
-                refresh_subscription_models: want_api_key || want_base_url,
             },
         )
         .await
@@ -429,7 +428,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         body.proxy_base.as_deref(),
         body.proxy_token
             .as_ref()
-            .map(crate::tokens::ProxyToken::as_str),
+            .map(dyson_common::tokens::ProxyToken::as_str),
         body.instance_id.as_deref(),
     );
     let swarm_runtime_applied = swarm_patch.is_some();
@@ -494,7 +493,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         body.ingest_url.as_deref(),
         body.ingest_token
             .as_ref()
-            .map(crate::tokens::IngestToken::as_str),
+            .map(dyson_common::tokens::IngestToken::as_str),
     );
     let ingest_applied = ingest_patch.is_some();
     let ingest_changed = match &ingest_patch {
@@ -520,7 +519,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         body.state_sync_url.as_deref(),
         body.state_sync_token
             .as_ref()
-            .map(crate::tokens::StateSyncToken::as_str),
+            .map(dyson_common::tokens::StateSyncToken::as_str),
     );
     let state_sync_applied = state_sync_patch.is_some();
     let state_sync_changed = match &state_sync_patch {
@@ -706,6 +705,3 @@ pub(super) use skills::{delete_skill, get_skills, post_skill_install};
 
 mod lifecycle;
 pub(super) use lifecycle::{get_idle, post_quiesce, post_unquiesce};
-
-mod costs;
-pub(super) use costs::post_cost_backfill;

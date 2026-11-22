@@ -625,7 +625,7 @@ mod tests {
     fn url_decoded_traversal_attempts_are_blocked_by_safe_store_id() {
         // dispatch hands the URL-decoded value to safe_store_id, so
         // walk through the decode + check pipeline that
-        // `/api/files/<id>` actually performs.
+        // `/api/conversations/<chat>/files/<id>` actually performs.
         let percent_traversal = url_decode("%2F..%2Fetc%2Fpasswd");
         assert_eq!(percent_traversal, "/../etc/passwd");
         assert!(!safe_store_id(&percent_traversal));

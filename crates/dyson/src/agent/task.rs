@@ -1,11 +1,9 @@
 //! Durable task contracts and evidence. Independent from Swarm evaluation.
 pub mod budget;
 mod leases;
-use crate::{
-    chat_history::ChatHistory,
-    error::{DysonError, Result},
-    tool::{Tool, ToolContext, ToolExecutionPlan, ToolOutput},
-};
+use crate::tool::{Tool, ToolContext, ToolExecutionPlan, ToolOutput};
+use dyson_core::error::{DysonError, Result};
+use dyson_persistence::ChatHistory;
 pub use leases::{acquire, reconcile as reconcile_lease};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,11 +19,12 @@ pub fn digest(s: &str) -> String {
 }
 
 /// JSON text with every object's keys sorted, for digests stored in
-/// checkpoints.  `cedar-policy-core` switches on serde_json's
-/// `preserve_order`, so plain `to_string` of a `Value` follows insertion
-/// order; sorted is what it produced before, so checkpoints written by
-/// older binaries still resume.  Structs come out with sorted fields too,
-/// so only use it on `Value`s, tuples and sequences of them.
+/// checkpoints and idempotency receipts.  `cedar-policy-core` switches on
+/// serde_json's `preserve_order`, so plain `to_string` of a `Value` follows
+/// insertion order; sorting makes the digest independent of the key order
+/// a model happens to emit when it repeats a tool call.  Structs come out
+/// with sorted fields too, so only use it on `Value`s, tuples and
+/// sequences of them.
 pub fn canonical_json(value: &impl Serialize) -> serde_json::Result<String> {
     fn sort_keys(value: serde_json::Value) -> serde_json::Value {
         use serde_json::Value;

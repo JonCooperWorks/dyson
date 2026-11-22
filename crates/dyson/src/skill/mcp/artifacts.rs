@@ -1,7 +1,7 @@
 //! Decode MCP image and resource content into local artifacts.
 use super::protocol::McpResourceContents;
-use crate::error::{DysonError, Result};
 use base64::Engine as _;
+use dyson_core::error::{DysonError, Result};
 use std::path::PathBuf;
 
 pub(super) fn save_mcp_image(

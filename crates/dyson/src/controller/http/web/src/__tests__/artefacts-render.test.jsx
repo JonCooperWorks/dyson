@@ -255,7 +255,7 @@ describe('ArtefactReader — sent files', () => {
       kind: 'other',
       created_at: 0,
       metadata: {
-        file_url: '/api/files/f1',
+        file_url: '/api/conversations/c1/files/f1',
         file_name: 'findings.md',
         mime_type: 'text/markdown',
         bytes: md.length,
@@ -284,7 +284,7 @@ describe('ArtefactReader — sent files', () => {
       kind: 'other',
       created_at: 0,
       metadata: {
-        file_url: '/api/files/f2',
+        file_url: '/api/conversations/c1/files/f2',
         file_name: 'screenshot_result.txt',
         mime_type: 'text/plain; charset=utf-8',
         bytes: report.length,
@@ -293,7 +293,7 @@ describe('ArtefactReader — sent files', () => {
     seedChatArtefacts('c1', [art]);
     const client = {
       listArtefacts: async () => [art],
-      loadArtefact: async () => ({ body: '/api/files/f2', chatId: 'c1' }),
+      loadArtefact: async () => ({ body: '/api/conversations/c1/files/f2', chatId: 'c1' }),
       loadFileText: vi.fn(async () => report),
     };
     const { container } = renderWithApi(<ArtefactReader id={art.id} chatId="c1"/>, client);
@@ -303,7 +303,7 @@ describe('ArtefactReader — sent files', () => {
     expect(preview, 'text files must render in the inline preview reader').toBeTruthy();
     expect(preview.textContent).toContain('targetpractice.network');
     expect(container.querySelector('.artefact-file-card')).toBeNull();
-    expect(client.loadFileText).toHaveBeenCalledWith('/api/files/f2');
+    expect(client.loadFileText).toHaveBeenCalledWith('/api/conversations/c1/files/f2');
   });
 
   it('renders an image artefact as <img>, not as "image no longer available"', async () => {
@@ -311,7 +311,7 @@ describe('ArtefactReader — sent files', () => {
     // explicitly nulled out for kind:image, so every image reader fell
     // through to the empty-state copy.  Pin: a kind:image artefact with
     // the URL on metadata.file_url renders an <img src> pointing at it.
-    const url = '/api/files/f7';
+    const url = '/api/conversations/c1/files/f7';
     const { container, queryByText } = await mountReader('c1', {
       id: 'a3',
       title: 'cat.png',
@@ -340,7 +340,7 @@ describe('ArtefactReader — sent files', () => {
     setConversations([]);
     const client = {
       listArtefacts: async () => [],
-      loadArtefact: async () => ({ body: '/api/files/f8', chatId: 'c1' }),
+      loadArtefact: async () => ({ body: '/api/conversations/c1/files/f8', chatId: 'c1' }),
     };
     const { container } = renderWithApi(<ArtefactReader id={'a4'}/>, client);
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
@@ -359,12 +359,12 @@ describe('ArtefactReader — sent files', () => {
       kind: 'other',
       created_at: 0,
       metadata: {
-        file_url: '/api/files/f1',
+        file_url: '/api/conversations/c1/files/f1',
         file_name: 'data.bin',
         mime_type: 'application/octet-stream',
         bytes: 12,
       },
-    }, '/api/files/f1');
+    }, '/api/conversations/c1/files/f1');
 
     // Download card — the visible Download button anchors the branch.
     expect(queryByText('Download')).toBeTruthy();

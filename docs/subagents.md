@@ -205,7 +205,7 @@ belt-and-suspenders guard.
 
 ## Parallel Execution
 
-The dependency analyzer (`agent/dependency_analyzer.rs`) only tracks resource
+The dependency analyzer (`dyson-harness` `scheduler.rs`) only tracks resource
 conflicts for `file_read`, `file_write`, and `bash` (git).  Subagent tool calls
 return no resource accesses — they fall into the catch-all `_ => {}` branch.
 This means multiple subagent calls in a single LLM response are placed in
