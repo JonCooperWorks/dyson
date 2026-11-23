@@ -537,7 +537,6 @@ impl Output for SseOutput {
 fn file_id_from_controller_url(url: &str) -> Option<String> {
     let parts: Vec<&str> = url.split('/').collect();
     match parts.as_slice() {
-        ["", "api", "files", file_id] if !file_id.is_empty() => Some((*file_id).to_string()),
         ["", "api", "conversations", chat_id, "files", file_id]
             if !chat_id.is_empty() && !file_id.is_empty() =>
         {
