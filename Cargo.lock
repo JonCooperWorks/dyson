@@ -1122,11 +1122,10 @@ dependencies = [
 
 [[package]]
 name = "dyson-common"
-version = "0.1.11"
-source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.11#2bba49e6e24fe6ef25715d4882df509842beab5c"
+version = "0.1.15"
+source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.15#909f77acfcae4e59a7ad006dee58767280a1eca8"
 dependencies = [
  "base64 0.22.1",
- "dyson-telegram",
  "jsonwebtoken",
  "rand 0.10.2",
  "reqwest",
@@ -1134,6 +1133,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "subtle",
+ "url",
 ]
 
 [[package]]
@@ -1187,7 +1187,7 @@ dependencies = [
 [[package]]
 name = "dyson-telegram"
 version = "0.1.0"
-source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.11#2bba49e6e24fe6ef25715d4882df509842beab5c"
+source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.15#909f77acfcae4e59a7ad006dee58767280a1eca8"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -4059,7 +4059,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
