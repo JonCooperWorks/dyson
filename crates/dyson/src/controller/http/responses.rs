@@ -460,13 +460,33 @@ pub(crate) fn get_auth_config(state: &HttpState) -> Resp {
 
 /// Read a JSON body with a hard byte cap.  Every upload-bearing
 /// endpoint passes its per-route cap here so an attacker can't pin a
-/// request worker on a multi-GB chunked body.  The Content-Length
-/// pre-check covers honest clients; the size check inside catches
-/// chunked bodies that lie about length.
-pub(crate) async fn read_json_capped<T: for<'de> Deserialize<'de>>(
-    req: Request<hyper::body::Incoming>,
+/// request worker on a multi-GB chunked body.  A declared
+/// Content-Length over the cap is refused before any byte is read; a
+/// chunked (or lying) body is read through `Limited`, which stops
+/// pulling frames as soon as the running total passes the cap, so at
+/// most `max` bytes plus one frame are ever buffered.
+///
+/// Generic over the body so tests can feed a synthetic stream; routes
+/// always pass `hyper::body::Incoming`.
+pub(crate) async fn read_json_capped<T, B>(
+    req: Request<B>,
     max: usize,
-) -> std::result::Result<T, String> {
+) -> std::result::Result<T, String>
+where
+    T: for<'de> Deserialize<'de>,
+    B: hyper::body::Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let declared_len = req
+        .headers()
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    if let Some(n) = declared_len
+        && n > max as u64
+    {
+        return Err(format!("body too large ({n} bytes; max {max})"));
+    }
     // Reject anything that isn't `application/json` up front.  serde_json
     // would safely fail on text/html or form-urlencoded bodies anyway,
     // but the failure mode is a confusing parse error rather than a
@@ -475,13 +495,7 @@ pub(crate) async fn read_json_capped<T: for<'de> Deserialize<'de>>(
     // bytes look JSON-ish but came labelled as something else.  Empty
     // bodies and missing headers are still handled below by the empty-
     // body short-circuit so a content-less DELETE doesn't 400 here.
-    let has_body = req
-        .headers()
-        .get(hyper::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<usize>().ok())
-        .map(|n| n > 0)
-        .unwrap_or(true);
+    let has_body = declared_len.map(|n| n > 0).unwrap_or(true);
     if has_body {
         let ct_ok = req
             .headers()
@@ -499,11 +513,14 @@ pub(crate) async fn read_json_capped<T: for<'de> Deserialize<'de>>(
             return Err("expected Content-Type: application/json".to_string());
         }
     }
-    let collected = req.collect().await.map_err(|e| format!("body read: {e}"))?;
-    let bytes = collected.to_bytes();
-    if bytes.len() > max {
-        return Err(format!("body too large ({} bytes; max {max})", bytes.len()));
-    }
+    let limited = http_body_util::Limited::new(req.into_body(), max);
+    let bytes = match limited.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) if e.is::<http_body_util::LengthLimitError>() => {
+            return Err(format!("body too large (over {max} bytes)"));
+        }
+        Err(e) => return Err(format!("body read: {e}")),
+    };
     serde_json::from_slice(&bytes).map_err(|e| format!("json parse: {e}"))
 }
 
@@ -569,6 +586,73 @@ pub(crate) fn sanitize_header_value(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 16 MiB chunked body (no Content-Length) that counts how many
+    /// bytes the reader pulled, so a test can prove the cap stopped the
+    /// read rather than buffering everything and checking afterwards.
+    /// Finite so the pre-fix code fails the assertion instead of hanging.
+    fn big_chunked_body(
+        pulled: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> http_body_util::StreamBody<
+        impl futures_util::Stream<Item = std::result::Result<hyper::body::Frame<Bytes>, Infallible>>,
+    > {
+        let chunk = Bytes::from(vec![b' '; 1024]);
+        use futures_util::StreamExt as _;
+        let stream = futures_util::stream::repeat_with(move || {
+            pulled.fetch_add(chunk.len(), std::sync::atomic::Ordering::SeqCst);
+            Ok(hyper::body::Frame::data(chunk.clone()))
+        })
+        .take(16 * 1024);
+        http_body_util::StreamBody::new(stream)
+    }
+
+    #[tokio::test]
+    async fn read_json_capped_stops_reading_a_chunked_body_at_the_cap() {
+        let pulled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let req = Request::builder()
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .body(big_chunked_body(pulled.clone()))
+            .unwrap();
+        // Before the fix this buffered all 16 MiB, then checked the size.
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_json_capped::<serde_json::Value, _>(req, 8 * 1024),
+        )
+        .await
+        .expect("read must stop at the cap, not drain the body");
+        let err = out.unwrap_err();
+        assert!(err.contains("too large"), "got: {err}");
+        let pulled = pulled.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            pulled <= 8 * 1024 + 1024,
+            "buffered {pulled} bytes past the cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_json_capped_rejects_declared_oversize_without_reading() {
+        let pulled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let req = Request::builder()
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .header(hyper::header::CONTENT_LENGTH, "1000000")
+            .body(big_chunked_body(pulled.clone()))
+            .unwrap();
+        let err = read_json_capped::<serde_json::Value, _>(req, 1024)
+            .await
+            .unwrap_err();
+        assert!(err.contains("too large"), "got: {err}");
+        assert_eq!(pulled.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn read_json_capped_accepts_a_body_within_the_cap() {
+        let req = Request::builder()
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .body(Full::new(Bytes::from_static(br#"{"ok":true}"#)))
+            .unwrap();
+        let v: serde_json::Value = read_json_capped(req, 64).await.unwrap();
+        assert_eq!(v["ok"], true);
+    }
 
     #[test]
     fn safe_store_id_accepts_minted_alphabet_only() {

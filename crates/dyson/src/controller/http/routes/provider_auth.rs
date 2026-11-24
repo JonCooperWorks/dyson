@@ -148,7 +148,7 @@ pub(super) async fn complete(
         return not_found();
     }
     let body: CompleteRequest =
-        match read_json_capped::<CompleteRequest>(req, MAX_COMPLETE_BODY).await {
+        match read_json_capped::<CompleteRequest, _>(req, MAX_COMPLETE_BODY).await {
             Ok(body) if !body.code.trim().is_empty() => body,
             Ok(_) => return bad_request("authorization code is required"),
             Err(error) => return bad_request(&error),
