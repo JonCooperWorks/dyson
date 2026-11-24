@@ -149,9 +149,11 @@ impl Sandbox for PolicySandbox {
         // Truncate oversized output to protect the LLM context window.
         if output.content.len() > MAX_OUTPUT_CHARS {
             let original_len = output.content.len();
-            let truncate_at = output.content[..MAX_OUTPUT_CHARS]
-                .rfind('\n')
-                .unwrap_or(MAX_OUTPUT_CHARS);
+            // The cap is in bytes; slicing at it directly panics (and,
+            // with `panic = "abort"`, kills the process) whenever a
+            // multi-byte character straddles the boundary.
+            let cap = output.content.floor_char_boundary(MAX_OUTPUT_CHARS);
+            let truncate_at = output.content[..cap].rfind('\n').unwrap_or(cap);
 
             output.content.truncate(truncate_at);
             write!(
@@ -959,6 +961,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn after_truncates_on_a_char_boundary_without_newlines() {
+        // A 4-byte character occupying bytes 99_998..100_002 straddles the
+        // cap, and with no newline before it the cut lands on the cap
+        // itself.  Slicing there used to panic, which aborts the release
+        // build.
+        let s = sandbox_default();
+        let input = serde_json::json!({});
+        let content = "a".repeat(MAX_OUTPUT_CHARS - 2) + "\u{1F600}" + &"b".repeat(10);
+        assert!(!content.is_char_boundary(MAX_OUTPUT_CHARS));
+        let mut output = ToolOutput::success(content);
+
+        s.after("some_tool", &input, &mut output).await.unwrap();
+        assert!(
+            output
+                .content
+                .starts_with(&"a".repeat(MAX_OUTPUT_CHARS - 2))
+        );
+        assert!(!output.content.contains('\u{1F600}'));
+        assert!(output.content.contains("[output truncated by sandbox"));
+    }
+
+    #[tokio::test]
     async fn after_does_not_truncate_small_output() {
         let s = sandbox_default();
         let input = serde_json::json!({});
@@ -1062,6 +1086,27 @@ mod tests {
                 assert!(reason.contains("internal address"));
             }
             other => panic!("expected Deny, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn web_fetch_blocks_loopback_behind_a_fake_userinfo() {
+        // reqwest connects to 127.0.0.1 for each of these; the old
+        // host parser split on `/` only and judged `example.com`.
+        let s = sandbox_default();
+        let ctx = ctx();
+        for url in [
+            "http://127.0.0.1?@example.com",
+            "http://127.0.0.1#@example.com",
+            "http://127.0.0.1\\@example.com/",
+        ] {
+            let input = serde_json::json!({ "url": url });
+            match s.check("web_fetch", &input, &ctx).await.unwrap() {
+                SandboxDecision::Deny { reason } => {
+                    assert!(reason.contains("127.0.0.1"), "{url}: {reason}");
+                }
+                other => panic!("{url}: expected Deny, got: {other:?}"),
+            }
         }
     }
 

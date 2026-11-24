@@ -153,35 +153,48 @@ impl CedarSandbox {
             Entities::from_entities([self.principal_entity.clone(), tool], Some(&self.schema))
                 .map_err(|e| format!("cedar entities: {e}"))?;
 
-        let context = Context::from_pairs(context_pairs(input, ctx))
-            .map_err(|e| format!("cedar context: {e}"))?;
-        let request = Request::new(
-            self.principal.clone(),
-            self.action.clone(),
-            resource,
-            context,
-            Some(&self.schema),
-        )
-        .map_err(|e| format!("cedar request: {e}"))?;
+        // One request per distinct path the input names.  The built-in
+        // file tools read `file_path` and the listing tools read `path`;
+        // judging every candidate means a decoy in the key a tool ignores
+        // cannot stand in for the one it actually opens.
+        let mut any_deny = false;
+        let mut denied: Vec<String> = Vec::new();
+        for path in path_candidates(input) {
+            let context = Context::from_pairs(context_pairs(input, path, ctx))
+                .map_err(|e| format!("cedar context: {e}"))?;
+            let request = Request::new(
+                self.principal.clone(),
+                self.action.clone(),
+                resource.clone(),
+                context,
+                Some(&self.schema),
+            )
+            .map_err(|e| format!("cedar request: {e}"))?;
 
-        let response = Authorizer::new().is_authorized(&request, &self.policies, &entities);
-        for error in response.diagnostics().errors() {
-            tracing::warn!(target: "sandbox.cedar", tool = tool_name, %error, "cedar policy errored and was skipped");
+            let response = Authorizer::new().is_authorized(&request, &self.policies, &entities);
+            for error in response.diagnostics().errors() {
+                tracing::warn!(target: "sandbox.cedar", tool = tool_name, %error, "cedar policy errored and was skipped");
+            }
+            if response.decision() == Decision::Deny {
+                any_deny = true;
+                for id in response.diagnostics().reason() {
+                    let id = self
+                        .policies
+                        .policy(id)
+                        .and_then(|p| p.annotation("id"))
+                        .map_or_else(|| id.to_string(), str::to_string);
+                    if !denied.contains(&id) {
+                        denied.push(id);
+                    }
+                }
+            }
         }
-        Ok(match response.decision() {
-            Decision::Allow => Verdict::Allow,
-            Decision::Deny => Verdict::Deny(
-                response
-                    .diagnostics()
-                    .reason()
-                    .map(|id| {
-                        self.policies
-                            .policy(id)
-                            .and_then(|p| p.annotation("id"))
-                            .map_or_else(|| id.to_string(), str::to_string)
-                    })
-                    .collect(),
-            ),
+        // A deny with no reasons is Cedar's default deny (nothing
+        // permitted the call), so the flag, not the id list, decides.
+        Ok(if any_deny {
+            Verdict::Deny(denied)
+        } else {
+            Verdict::Allow
         })
     }
 }
@@ -199,13 +212,17 @@ impl Sandbox for CedarSandbox {
             Ok(Verdict::Deny(policies)) => {
                 let policies = policies.join(",");
                 let command = input["command"].as_str().map(redact_secrets);
+                // Every path Cedar judged (`file_path` and `path`), so the
+                // log names the one a deny was about even beside a decoy.
+                let paths: Vec<&str> = path_candidates(input).into_iter().flatten().collect();
+                let path = (!paths.is_empty()).then(|| paths.join(", "));
                 tracing::warn!(
                     target: "sandbox.cedar",
                     mode = mode_str(self.mode),
                     tool = tool_name,
                     policies = %policies,
                     command = command.as_deref(),
-                    path = input["path"].as_str(),
+                    path = path.as_deref(),
                     url = input["url"].as_str(),
                     "cedar denied tool call"
                 );
@@ -267,8 +284,26 @@ fn mcp_server(tool_name: &str) -> Option<&str> {
     rest.split_once("__").map(|(server, _)| server)
 }
 
+/// The path-valued fields of a tool input, deduplicated.  `None` alone
+/// when there are none, so a path-less call is still evaluated once.
+fn path_candidates(input: &serde_json::Value) -> Vec<Option<&str>> {
+    let mut out: Vec<Option<&str>> = Vec::new();
+    for key in ["file_path", "path"] {
+        if let Some(path) = input[key].as_str()
+            && !out.contains(&Some(path))
+        {
+            out.push(Some(path));
+        }
+    }
+    if out.is_empty() {
+        out.push(None);
+    }
+    out
+}
+
 fn context_pairs(
     input: &serde_json::Value,
+    path: Option<&str>,
     ctx: &ToolContext,
 ) -> Vec<(String, RestrictedExpression)> {
     let mut pairs = vec![(
@@ -281,7 +316,7 @@ fn context_pairs(
             RestrictedExpression::new_string(command.into()),
         ));
     }
-    if let Some(path) = input["path"].as_str() {
+    if let Some(path) = path {
         let path = absolute_path(path, &ctx.working_dir);
         pairs.push((
             "path".into(),
@@ -391,7 +426,7 @@ mod tests {
             Verdict::Allow
         );
         assert_eq!(
-            verdict("read_file", json!({"path": "src/main.rs"})),
+            verdict("read_file", json!({"file_path": "src/main.rs"})),
             Verdict::Allow
         );
         assert_eq!(
@@ -437,13 +472,26 @@ mod tests {
 
     #[test]
     fn credential_reads_are_denied_including_relative_paths() {
+        // `read_file` takes `file_path`; this test used to pass `path`,
+        // an input the tool never receives, which is how the rule
+        // stayed silent for every real read.
         assert_eq!(
-            denied_by("read_file", json!({"path": "/home/agent/.ssh/id_ed25519"})),
+            denied_by(
+                "read_file",
+                json!({"file_path": "/home/agent/.ssh/id_ed25519"})
+            ),
             ["no-credential-file-read"]
         );
         // Relative to /workspace, `../root/.aws/credentials` is /root/.aws/credentials.
         assert_eq!(
-            denied_by("read_file", json!({"path": "../root/.aws/credentials"})),
+            denied_by(
+                "read_file",
+                json!({"file_path": "../root/.aws/credentials"})
+            ),
+            ["no-credential-file-read"]
+        );
+        assert_eq!(
+            denied_by("list_files", json!({"path": "/home/agent/.kube/config"})),
             ["no-credential-file-read"]
         );
         // MCP tools are out of this rule's scope: their `path` is the
@@ -454,6 +502,83 @@ mod tests {
                 json!({"path": "/home/agent/.ssh/id_ed25519"})
             ),
             Verdict::Allow
+        );
+    }
+
+    /// Build an input for `tool` from its own declared schema: every
+    /// required field gets a placeholder, and the one required field
+    /// whose name ends in `path` gets `path`.  Panics if the schema has
+    /// no such field, so renaming a tool's path key fails here instead
+    /// of silently switching the credential rule off.
+    fn input_from_schema(tool: &dyn crate::tool::Tool, path: &str) -> serde_json::Value {
+        let schema = tool.input_schema();
+        let required = schema["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{} schema has no `required`", tool.name()));
+        let mut input = serde_json::Map::new();
+        let mut path_keys = 0;
+        for key in required {
+            let key = key.as_str().unwrap();
+            if key.ends_with("path") {
+                path_keys += 1;
+                input.insert(key.to_string(), json!(path));
+            } else {
+                input.insert(key.to_string(), json!("x"));
+            }
+        }
+        assert_eq!(
+            path_keys,
+            1,
+            "{} must require exactly one path key",
+            tool.name()
+        );
+        serde_json::Value::Object(input)
+    }
+
+    #[test]
+    fn credential_rule_covers_every_file_tool_by_its_schema_key() {
+        use crate::tool::Tool;
+        let tools: [&dyn Tool; 4] = [
+            &crate::tool::read_file::ReadFileTool,
+            &crate::tool::write_file::WriteFileTool,
+            &crate::tool::edit_file::EditFileTool,
+            &crate::tool::send_file::SendFileTool,
+        ];
+        for tool in tools {
+            let input = input_from_schema(tool, "/home/agent/.ssh/id_ed25519");
+            assert_eq!(
+                denied_by(tool.name(), input),
+                ["no-credential-file-read"],
+                "{}",
+                tool.name()
+            );
+            let input = input_from_schema(tool, "src/main.rs");
+            assert_eq!(
+                verdict(tool.name(), input),
+                Verdict::Allow,
+                "{}",
+                tool.name()
+            );
+        }
+    }
+
+    #[test]
+    fn decoy_path_key_cannot_mask_the_real_one() {
+        // read_file opens `file_path`; a harmless `path` beside it must
+        // not be the only thing Cedar sees.
+        assert_eq!(
+            denied_by(
+                "read_file",
+                json!({"path": "src/main.rs", "file_path": "/root/.aws/credentials"})
+            ),
+            ["no-credential-file-read"]
+        );
+        assert_eq!(
+            denied_by(
+                "list_files",
+                json!({"file_path": "src/main.rs", "path": "/root/.kube/config"})
+            ),
+            ["no-credential-file-read"]
         );
     }
 

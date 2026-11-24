@@ -310,7 +310,7 @@ fn run_query(
                     &parsed.source[node.start_byte()..node.end_byte().min(parsed.source.len())];
                 // Truncate very long node texts to avoid flooding output.
                 let display_text: std::borrow::Cow<'_, str> = if node_text.len() > 120 {
-                    format!("{}...", &node_text[..120]).into()
+                    format!("{}...", &node_text[..node_text.floor_char_boundary(120)]).into()
                 } else {
                     node_text.into()
                 };
@@ -376,6 +376,30 @@ mod tests {
             "output: {}",
             output.content
         );
+    }
+
+    #[tokio::test]
+    async fn long_node_text_truncates_on_a_char_boundary() {
+        // The string literal's node text is `"` + 118 ASCII bytes + a
+        // 4-byte character, so byte 120 lands inside that character.
+        let tmp = tempfile::tempdir().unwrap();
+        let literal = format!("\"{}\u{1F600}tail\"", "a".repeat(118));
+        std::fs::write(
+            tmp.path().join("lib.rs"),
+            format!("fn f() -> &'static str {{ {literal} }}\n"),
+        )
+        .unwrap();
+
+        let input = serde_json::json!({
+            "query": "(string_literal) @s",
+            "language": "rust"
+        });
+        let output = AstQueryTool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+        assert!(!output.is_error, "error: {}", output.content);
+        assert!(output.content.contains("..."), "output: {}", output.content);
     }
 
     #[tokio::test]

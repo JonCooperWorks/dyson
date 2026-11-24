@@ -631,3 +631,55 @@ fn skill_list_builds_prompt() {
     assert!(prompt.contains("</available_skills>"));
     assert!(prompt.contains("load_skill"));
 }
+
+#[tokio::test]
+async fn script_writing_more_than_a_pipe_buffer_is_not_a_timeout() {
+    use crate::tool::ToolContext;
+
+    // 1 MiB on stdout and 256 KiB on stderr, far past a 64 KiB pipe
+    // buffer.  Before the pipes were drained concurrently the script
+    // blocked on its write until the timeout and was reported as one.
+    let dir = std::env::temp_dir().join(format!("dyson-skill-big-out-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "Big output\n\nInstructions only.\n").unwrap();
+    std::fs::write(
+        dir.join("bin/run.sh"),
+        "head -c 262144 /dev/zero | tr '\\0' e >&2\nhead -c 1048576 /dev/zero | tr '\\0' o\n",
+    )
+    .unwrap();
+    let name = dir.file_name().unwrap().to_str().unwrap();
+    std::fs::write(
+        dir.join("dyson-skill.json"),
+        format!(
+            r#"{{
+              "schema_version":2,
+              "name":"{name}",
+              "description":"Big output",
+              "slash_command":"/skill-big",
+              "execution":{{"kind":"script","entrypoint":"bin/run.sh","argument_mode":"raw","timeout_ms":5000}}
+            }}"#
+        ),
+    )
+    .unwrap();
+
+    let skill = LocalSkill::from_dir(&dir).unwrap();
+    let started = std::time::Instant::now();
+    let out = skill.tools()[0]
+        .run(
+            &serde_json::json!({"raw": ""}),
+            &ToolContext::from_cwd().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !out.is_error,
+        "{}",
+        &out.content[..out.content.len().min(200)]
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    let (stdout, stderr) = out.content.split_once("\n\n[stderr]\n").unwrap();
+    assert_eq!(stdout.len(), 1_048_576);
+    assert_eq!(stderr.len(), 262_144);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

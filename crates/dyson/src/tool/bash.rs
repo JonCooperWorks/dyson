@@ -538,10 +538,9 @@ pub(crate) fn is_safe_env_var(name: &str) -> bool {
     if SAFE_EXACT.contains(&name) {
         return true;
     }
-    if SAFE_PREFIXES
-        .iter()
-        .any(|&s| name.len() >= s.len() && &name[..s.len()] == s)
-    {
+    // `starts_with`, not a byte slice: an inherited variable name with a
+    // multi-byte character at the prefix length would panic the slice.
+    if SAFE_PREFIXES.iter().any(|&s| name.starts_with(s)) {
         return true;
     }
 
@@ -809,6 +808,15 @@ mod tests {
         for v in ["PATH", "HOME", "LANG", "LC_ALL", "TERM", "USER"] {
             assert!(is_safe_env_var(v), "expected {v} to be safe");
         }
+    }
+
+    #[test]
+    fn env_allowlist_survives_non_ascii_names() {
+        // "ééé" is 6 bytes; byte 3 (the length of "LC_") falls inside the
+        // second character, which the old byte slice panicked on.
+        assert!(!is_safe_env_var("ééé"));
+        assert!(!is_safe_env_var("GIéé"));
+        assert!(is_safe_env_var("LC_é"));
     }
 
     #[test]

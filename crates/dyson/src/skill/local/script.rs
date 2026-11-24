@@ -138,44 +138,45 @@ impl Tool for LocalScriptSkillTool {
             let _ = stdin.shutdown().await;
         }
 
-        let mut stdout_handle = child.stdout.take();
-        let mut stderr_handle = child.stderr.take();
-        let wait_result = tokio::select! {
-            status = child.wait() => {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(ref mut h) = stdout_handle {
-                    let _ = AsyncReadExt::read_to_end(
-                        &mut AsyncReadExt::take(h, MAX_READ_BYTES),
-                        &mut stdout,
-                    ).await;
-                }
-                if let Some(ref mut h) = stderr_handle {
-                    let _ = AsyncReadExt::read_to_end(
-                        &mut AsyncReadExt::take(h, MAX_READ_BYTES),
-                        &mut stderr,
-                    ).await;
-                }
-                Some((status, stdout, stderr))
-            }
-            _ = tokio::time::sleep(self.timeout) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                None
-            }
-            _ = ctx.cancellation.cancelled() => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Ok(ToolOutput::error(format!("skill '{}' cancelled", self.skill_name)));
+        // Drain both pipes while waiting.  Reading only after `wait()`
+        // let a script that wrote more than a pipe buffer block on its
+        // write forever, so a fast script was reported as a timeout.
+        let stdout_handle = child.stdout.take();
+        let stderr_handle = child.stderr.take();
+        let outcome = {
+            let run = async {
+                tokio::join!(
+                    child.wait(),
+                    read_capped(stdout_handle),
+                    read_capped(stderr_handle),
+                )
+            };
+            tokio::select! {
+                done = run => RunOutcome::Exited(done),
+                _ = tokio::time::sleep(self.timeout) => RunOutcome::TimedOut,
+                _ = ctx.cancellation.cancelled() => RunOutcome::Cancelled,
             }
         };
 
-        let Some((status, stdout, stderr)) = wait_result else {
-            return Ok(ToolOutput::error(format!(
-                "skill '{}' timed out after {} ms",
-                self.skill_name,
-                self.timeout.as_millis()
-            )));
+        let (status, stdout, stderr) = match outcome {
+            RunOutcome::Exited(done) => done,
+            RunOutcome::TimedOut => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Ok(ToolOutput::error(format!(
+                    "skill '{}' timed out after {} ms",
+                    self.skill_name,
+                    self.timeout.as_millis()
+                )));
+            }
+            RunOutcome::Cancelled => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Ok(ToolOutput::error(format!(
+                    "skill '{}' cancelled",
+                    self.skill_name
+                )));
+            }
         };
 
         let status =
@@ -195,6 +196,25 @@ impl Tool for LocalScriptSkillTool {
             }))
         }
     }
+}
+
+enum RunOutcome {
+    Exited((std::io::Result<std::process::ExitStatus>, Vec<u8>, Vec<u8>)),
+    TimedOut,
+    Cancelled,
+}
+
+/// Keep the first `MAX_READ_BYTES` of a pipe and discard the rest.  The
+/// discard matters: stopping at the cap would leave the script blocked on
+/// a full pipe again, just later.
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(handle: Option<R>) -> Vec<u8> {
+    let mut out = Vec::new();
+    let Some(mut handle) = handle else {
+        return out;
+    };
+    let _ = AsyncReadExt::read_to_end(&mut (&mut handle).take(MAX_READ_BYTES), &mut out).await;
+    let _ = tokio::io::copy(&mut handle, &mut tokio::io::sink()).await;
+    out
 }
 
 fn ignore_sigpipe_for_parent() {
