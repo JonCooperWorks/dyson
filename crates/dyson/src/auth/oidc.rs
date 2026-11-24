@@ -54,6 +54,13 @@ use dyson_core::error::{DysonError, Result};
 /// on every request.
 const MIN_JWKS_REFRESH: Duration = Duration::from_secs(300);
 
+/// Minimum gap between refreshes forced by an unknown `kid`.  The `kid`
+/// comes from an unauthenticated token header, so without a floor every
+/// request carrying a made-up one costs an outbound JWKS fetch.  Shorter
+/// than `MIN_JWKS_REFRESH` so a token signed with a freshly rotated key
+/// is accepted within half a minute.
+const MIN_FORCED_JWKS_REFRESH: Duration = Duration::from_secs(30);
+
 /// OpenID Connect Provider Configuration — the subset we consume from
 /// `<issuer>/.well-known/openid-configuration`.  The spec ships many
 /// more fields; we deserialize defensively and ignore anything we
@@ -108,6 +115,10 @@ pub struct OidcAuth {
     /// classic "jwt alg: none / hs256 with public key as secret" trap.
     algorithms: Vec<Algorithm>,
     jwks: Arc<RwLock<Option<JwksCache>>>,
+    /// When the last forced (kid-miss) fetch was attempted, successful
+    /// or not.  Separate from `JwksCache::fetched_at` so a failing JWKS
+    /// endpoint is throttled too, not retried on every request.
+    last_forced_refresh: std::sync::Mutex<Option<Instant>>,
     http: reqwest::Client,
 }
 
@@ -166,6 +177,7 @@ impl OidcAuth {
             allowed_sub,
             algorithms: algorithms.unwrap_or_else(|| vec![Algorithm::RS256]),
             jwks: Arc::new(RwLock::new(None)),
+            last_forced_refresh: std::sync::Mutex::new(None),
             http,
         })
     }
@@ -209,11 +221,23 @@ impl OidcAuth {
         }
         // Drop the read guard before taking the write guard.
         let mut guard = self.jwks.write().await;
-        if let Some(cache) = guard.as_ref()
-            && !need_refresh
-            && cache.fetched_at.elapsed() < MIN_JWKS_REFRESH
-        {
-            return Ok(());
+        if let Some(cache) = guard.as_ref() {
+            if !need_refresh && cache.fetched_at.elapsed() < MIN_JWKS_REFRESH {
+                return Ok(());
+            }
+            if need_refresh {
+                // Checked under the write guard, so concurrent kid misses
+                // serialise here and only the first one fetches.
+                let mut last = match self.last_forced_refresh.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                let recent = |at: Instant| at.elapsed() < MIN_FORCED_JWKS_REFRESH;
+                if recent(cache.fetched_at) || last.is_some_and(recent) {
+                    return Ok(());
+                }
+                *last = Some(Instant::now());
+            }
         }
         let resp = self
             .http
@@ -266,8 +290,9 @@ impl Auth for OidcAuth {
             .ok_or_else(|| DysonError::Config("unauthorized".into()))?;
 
         // First try the cached JWKS; on `kid` miss, refresh once (IdP
-        // might have rotated).  Two lookups cap the provider traffic a
-        // forged `kid` can cause.
+        // might have rotated).  The refresh itself is rate-limited by
+        // `MIN_FORCED_JWKS_REFRESH`, so a stream of forged `kid`s costs at
+        // most one provider fetch per window.
         self.ensure_jwks(false).await?;
         let mut decoding = self.decoding_key_for(&kid).await?;
         if decoding.is_none() {
@@ -420,6 +445,7 @@ mod tests {
             allowed_sub: None,
             algorithms: vec![Algorithm::RS256],
             jwks: Arc::new(RwLock::new(None)),
+            last_forced_refresh: std::sync::Mutex::new(None),
             http: crate::http::client().clone(),
         };
         let headers = hyper::HeaderMap::new();
@@ -489,6 +515,7 @@ mod tests {
                 jwks,
                 fetched_at: Instant::now(),
             }))),
+            last_forced_refresh: std::sync::Mutex::new(None),
             http: crate::http::client().clone(),
         }
     }
@@ -897,6 +924,7 @@ mod tests {
                 // gate the kid-miss-driven refresh.
                 fetched_at: Instant::now() - std::time::Duration::from_secs(3600),
             }))),
+            last_forced_refresh: std::sync::Mutex::new(None),
             http: crate::http::client().clone(),
         };
 
@@ -912,6 +940,79 @@ mod tests {
         );
         let info = auth.validate_request(&header_with(&token)).await.unwrap();
         assert_eq!(info.identity, "oidc");
+    }
+
+    #[tokio::test]
+    async fn unknown_kid_flood_causes_at_most_one_jwks_fetch() {
+        // Every token below has a valid alg but a kid the IdP never
+        // issued.  Before the floor each one forced its own JWKS fetch.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"keys": []})))
+            .mount(&server)
+            .await;
+
+        let mut auth = hs256_auth(
+            "real",
+            b"s",
+            "aud",
+            "https://idp",
+            vec![],
+            vec![Algorithm::HS256],
+        );
+        auth.config.jwks_uri = format!("{}/jwks", server.uri());
+        // Old enough that the first kid miss is allowed to refresh.
+        auth.jwks.write().await.as_mut().unwrap().fetched_at =
+            Instant::now() - std::time::Duration::from_secs(3600);
+
+        for i in 0..10 {
+            let token = mint_hs256_token(
+                &format!("forged-{i}"),
+                b"attacker",
+                serde_json::json!({
+                    "iss": "https://idp",
+                    "aud": "aud",
+                    "sub": "x",
+                    "exp": now_secs() + 60,
+                }),
+            );
+            assert!(auth.validate_request(&header_with(&token)).await.is_err());
+        }
+        let fetches = server.received_requests().await.unwrap().len();
+        assert_eq!(fetches, 1, "forged kids caused {fetches} JWKS fetches");
+    }
+
+    #[tokio::test]
+    async fn failing_jwks_endpoint_is_throttled_too() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let mut auth = hs256_auth(
+            "real",
+            b"s",
+            "aud",
+            "https://idp",
+            vec![],
+            vec![Algorithm::HS256],
+        );
+        auth.config.jwks_uri = format!("{}/jwks", server.uri());
+        auth.jwks.write().await.as_mut().unwrap().fetched_at =
+            Instant::now() - std::time::Duration::from_secs(3600);
+
+        for i in 0..5 {
+            let token = mint_hs256_token(
+                &format!("forged-{i}"),
+                b"attacker",
+                serde_json::json!({"iss": "https://idp", "aud": "aud", "sub": "x", "exp": now_secs() + 60}),
+            );
+            assert!(auth.validate_request(&header_with(&token)).await.is_err());
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

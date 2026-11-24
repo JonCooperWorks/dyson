@@ -7,18 +7,38 @@
 // controller's config is the opposite shape: a long-lived secret an
 // operator pastes into a Tailscale browser, which we MUST NOT keep on
 // disk in clear text.  This auth stores the Argon2id PHC hash and runs
-// `verify_password` on each `/api/*` request.  Server-side only —
+// `verify_password` on a blocking thread, at most a few at a time, then
+// trusts that exact token for a short window.  Server-side only —
 // `apply_to_request` falls through to the trait default (no-op pass-
 // through).  We never have the plaintext, so we couldn't apply it to an
 // outbound request even if we wanted to.
 // ===========================================================================
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use argon2::password_hash::PasswordHash;
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
+use tokio::sync::Semaphore;
 
 use crate::auth::{Auth, AuthInfo};
 use dyson_core::error::{DysonError, Result};
+
+/// How long a verified token is trusted without re-running Argon2.  The
+/// SPA and Swarm's proxy send the same token on every request, so even a
+/// short window turns a verify per request into a verify per half
+/// minute.  Kept short so a rotated hash (restart) or a revoked browser
+/// session stops working promptly.
+const VERIFIED_TOKEN_TTL: Duration = Duration::from_secs(30);
+
+/// Argon2 verifies allowed in flight at once.  Each one is ~19 MiB and a
+/// blocking-pool thread for tens of milliseconds; without a bound, a
+/// flood of wrong tokens (which can never hit the cache) would fill the
+/// blocking pool that file I/O and other `spawn_blocking` work share.
+const MAX_CONCURRENT_VERIFIES: usize = 4;
 
 /// Bearer-token auth that compares against a stored Argon2id hash.
 ///
@@ -27,10 +47,19 @@ use dyson_core::error::{DysonError, Result};
 /// `Auth::validate_request` impl.
 pub struct HashedBearerAuth {
     /// Full Argon2 PHC string, e.g. `$argon2id$v=19$m=19456,t=2,p=1$...$...`.
-    /// Kept as an owned `String` because `PasswordHash<'a>` borrows from
-    /// the source slice; constructing one per request is cheap relative
-    /// to the verify itself.
-    phc: String,
+    /// `Arc<str>` so each verify can move it onto a blocking thread
+    /// without copying; `PasswordHash<'a>` borrows from it there.
+    phc: Arc<str>,
+    /// Per-process key for `token_digest`, so the cached digest is not a
+    /// plain SHA-256 of the token that a memory dump could brute-force
+    /// offline faster than the Argon2 hash.
+    digest_key: [u8; 32],
+    /// Digest of the last token Argon2 accepted, and when that stops
+    /// counting.  Only ever written after a successful verify.
+    verified: std::sync::Mutex<Option<([u8; 32], Instant)>>,
+    verify_slots: Arc<Semaphore>,
+    #[cfg(test)]
+    probe: Arc<test_probe::Probe>,
 }
 
 impl HashedBearerAuth {
@@ -38,9 +67,20 @@ impl HashedBearerAuth {
     /// isn't a valid PHC encoding so a typo'd config fails at startup
     /// rather than silently rejecting every request later.
     pub fn from_phc(phc: String) -> Result<Self> {
+        use rand::RngExt;
+
         PasswordHash::new(&phc)
             .map_err(|e| DysonError::Config(format!("invalid argon2 hash: {e}")))?;
-        Ok(Self { phc })
+        let mut digest_key = [0u8; 32];
+        rand::rng().fill(&mut digest_key);
+        Ok(Self {
+            phc: Arc::from(phc),
+            digest_key,
+            verified: std::sync::Mutex::new(None),
+            verify_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_VERIFIES)),
+            #[cfg(test)]
+            probe: Arc::default(),
+        })
     }
 
     /// Hash a plaintext token with Argon2id default params and return
@@ -67,6 +107,34 @@ impl HashedBearerAuth {
             .map(|h| h.to_string())
             .map_err(|e| DysonError::Config(format!("argon2 hash failed: {e}")))
     }
+
+    fn token_digest(&self, token: &str) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(self.digest_key);
+        hasher.update(token.as_bytes());
+        hasher.finalize().into()
+    }
+
+    fn cache_hit(&self, digest: &[u8; 32]) -> bool {
+        let guard = match self.verified.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        match guard.as_ref() {
+            Some((cached, expires_at)) => {
+                *expires_at > Instant::now() && bool::from(cached.ct_eq(digest))
+            }
+            None => false,
+        }
+    }
+
+    fn remember(&self, digest: [u8; 32]) {
+        let mut guard = match self.verified.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *guard = Some((digest, Instant::now() + VERIFIED_TOKEN_TTL));
+    }
 }
 
 #[async_trait]
@@ -75,17 +143,71 @@ impl Auth for HashedBearerAuth {
         let token = super::extract_bearer(headers)
             .ok_or_else(|| DysonError::Config("unauthorized".into()))?;
 
-        // Re-parse the PHC every time.  Argon2id's verify dwarfs the
-        // parse cost, and `PasswordHash` borrows from `self.phc` so we
-        // can't cache a parsed value across awaits without self-
-        // referential gymnastics.
-        let parsed =
-            PasswordHash::new(&self.phc).map_err(|_| DysonError::Config("unauthorized".into()))?;
+        let digest = self.token_digest(token);
+        if self.cache_hit(&digest) {
+            return Ok(AuthInfo::new("bearer"));
+        }
 
-        Argon2::default()
-            .verify_password(token.as_bytes(), &parsed)
-            .map(|_| AuthInfo::new("bearer"))
-            .map_err(|_| DysonError::Config("unauthorized".into()))
+        // The permit moves into the blocking closure, so it is held for
+        // as long as Argon2 actually runs even if this request is dropped
+        // (client gone) while waiting on the join handle.
+        let permit = Arc::clone(&self.verify_slots)
+            .acquire_owned()
+            .await
+            .map_err(|_| DysonError::Config("unauthorized".into()))?;
+        let phc = Arc::clone(&self.phc);
+        let token = token.to_owned();
+        #[cfg(test)]
+        let probe = Arc::clone(&self.probe);
+        let verified = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            #[cfg(test)]
+            let _running = probe.enter();
+            PasswordHash::new(&phc).is_ok_and(|parsed| {
+                Argon2::default()
+                    .verify_password(token.as_bytes(), &parsed)
+                    .is_ok()
+            })
+        })
+        .await
+        .unwrap_or(false);
+
+        if verified {
+            self.remember(digest);
+            Ok(AuthInfo::new("bearer"))
+        } else {
+            Err(DysonError::Config("unauthorized".into()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_probe {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts Argon2 runs and the most that were ever in flight at once.
+    #[derive(Default)]
+    pub(super) struct Probe {
+        pub(super) runs: AtomicUsize,
+        running: AtomicUsize,
+        pub(super) peak: AtomicUsize,
+    }
+
+    pub(super) struct Running<'a>(&'a Probe);
+
+    impl Probe {
+        pub(super) fn enter(&self) -> Running<'_> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            Running(self)
+        }
+    }
+
+    impl Drop for Running<'_> {
+        fn drop(&mut self) {
+            self.0.running.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -124,6 +246,73 @@ mod tests {
             auth.validate_request(&hyper::HeaderMap::new())
                 .await
                 .is_err()
+        );
+    }
+
+    fn headers_for(token: &str) -> hyper::HeaderMap {
+        let mut h = hyper::HeaderMap::new();
+        h.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        h
+    }
+
+    #[tokio::test]
+    async fn verified_token_is_cached_and_failures_are_not() {
+        use std::sync::atomic::Ordering;
+        let auth = HashedBearerAuth::from_phc(HashedBearerAuth::hash("right").unwrap()).unwrap();
+
+        // A wrong token is verified (and refused) every time: a failure
+        // must never become a cache entry.
+        assert!(auth.validate_request(&headers_for("wrong")).await.is_err());
+        assert!(auth.validate_request(&headers_for("wrong")).await.is_err());
+        assert_eq!(auth.probe.runs.load(Ordering::SeqCst), 2);
+
+        // The right token pays Argon2 once, then rides the cache.
+        for _ in 0..5 {
+            auth.validate_request(&headers_for("right")).await.unwrap();
+        }
+        assert_eq!(auth.probe.runs.load(Ordering::SeqCst), 3);
+
+        // A cached good token does not make a different one pass.
+        assert!(auth.validate_request(&headers_for("righ")).await.is_err());
+        assert!(auth.validate_request(&headers_for("right ")).await.is_ok());
+        assert_eq!(auth.probe.runs.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn cached_token_expires() {
+        use std::sync::atomic::Ordering;
+        let auth = HashedBearerAuth::from_phc(HashedBearerAuth::hash("t").unwrap()).unwrap();
+        auth.validate_request(&headers_for("t")).await.unwrap();
+        // Age the entry past its TTL instead of sleeping for it.
+        if let Some((_, expires_at)) = auth.verified.lock().unwrap().as_mut() {
+            *expires_at = Instant::now() - Duration::from_millis(1);
+        }
+        auth.validate_request(&headers_for("t")).await.unwrap();
+        assert_eq!(auth.probe.runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bad_token_flood_runs_a_bounded_number_of_verifies() {
+        use std::sync::atomic::Ordering;
+        let auth =
+            Arc::new(HashedBearerAuth::from_phc(HashedBearerAuth::hash("right").unwrap()).unwrap());
+        let mut tasks = Vec::new();
+        for i in 0..24 {
+            let auth = Arc::clone(&auth);
+            tasks.push(tokio::spawn(async move {
+                auth.validate_request(&headers_for(&format!("wrong-{i}")))
+                    .await
+                    .is_err()
+            }));
+        }
+        for t in tasks {
+            assert!(t.await.unwrap());
+        }
+        assert_eq!(auth.probe.runs.load(Ordering::SeqCst), 24);
+        let peak = auth.probe.peak.load(Ordering::SeqCst);
+        assert!(
+            (1..=MAX_CONCURRENT_VERIFIES).contains(&peak),
+            "{peak} verifies ran at once"
         );
     }
 
