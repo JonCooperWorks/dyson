@@ -199,14 +199,14 @@ impl CedarSandbox {
     }
 }
 
-#[async_trait]
-impl Sandbox for CedarSandbox {
-    async fn check(
+impl CedarSandbox {
+    /// Evaluate and log one call; `Some(reason)` when enforce mode denies it.
+    fn judge(
         &self,
         tool_name: &str,
         input: &serde_json::Value,
         ctx: &ToolContext,
-    ) -> Result<SandboxDecision> {
+    ) -> Option<String> {
         match self.evaluate(tool_name, input, ctx) {
             Ok(Verdict::Allow) => {}
             Ok(Verdict::Deny(policies)) => {
@@ -227,9 +227,9 @@ impl Sandbox for CedarSandbox {
                     "cedar denied tool call"
                 );
                 if self.mode == CedarMode::Enforce {
-                    return Ok(SandboxDecision::Deny {
-                        reason: format!("tool '{tool_name}' denied by sandbox policy ({policies})"),
-                    });
+                    return Some(format!(
+                        "tool '{tool_name}' denied by sandbox policy ({policies})"
+                    ));
                 }
             }
             Err(error) => {
@@ -237,19 +237,47 @@ impl Sandbox for CedarSandbox {
                 // Enforce fails closed: a call Cedar could not judge is not
                 // one it allowed.
                 if self.mode == CedarMode::Enforce {
-                    return Ok(SandboxDecision::Deny {
-                        reason: format!(
-                            "tool '{tool_name}' denied: sandbox policy evaluation failed"
-                        ),
-                    });
+                    return Some(format!(
+                        "tool '{tool_name}' denied: sandbox policy evaluation failed"
+                    ));
                 }
             }
+        }
+        None
+    }
+}
+
+#[async_trait]
+impl Sandbox for CedarSandbox {
+    async fn check(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<SandboxDecision> {
+        if let Some(reason) = self.judge(tool_name, input, ctx) {
+            return Ok(SandboxDecision::Deny { reason });
         }
         self.inner.check(tool_name, input, ctx).await
     }
 
     fn sandbox_bypass(&self) -> Option<&SandboxBypassGuard> {
         self.inner.sandbox_bypass()
+    }
+
+    /// Cedar judges the script's command as a `bash` call, then the inner
+    /// sandbox confines it.
+    async fn check_skill_script(
+        &self,
+        command: &str,
+        skill_dir: &std::path::Path,
+        ctx: &ToolContext,
+    ) -> Result<SandboxDecision> {
+        let input = serde_json::json!({ "command": command });
+        if let Some(reason) = self.judge("bash", &input, ctx) {
+            return Ok(SandboxDecision::Deny { reason });
+        }
+        self.inner.check_skill_script(command, skill_dir, ctx).await
     }
 
     async fn after(
@@ -728,6 +756,37 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(decision, SandboxDecision::Deny { reason } if reason == "inner"));
+    }
+
+    #[tokio::test]
+    async fn skill_script_judged_as_bash_then_inner() {
+        // Default policies must let an ordinary script skill through (managed
+        // dysons run Cedar enforce over DangerousNoSandbox), and a policy
+        // that forbids bash must forbid script skills too.
+        let script = "cd '/skills/x' && exec bash '/skills/x/bin/run.sh'";
+        let decision = sandbox(CedarMode::Enforce)
+            .check_skill_script(script, Path::new("/skills/x"), &ctx())
+            .await
+            .unwrap();
+        match decision {
+            SandboxDecision::Allow { input } => assert_eq!(input["command"], script),
+            other => panic!("expected Allow, got {other:?}"),
+        }
+
+        let policies = format!(
+            "{DEFAULT_POLICIES}\n@id(\"no-bash\")\n\
+             forbid (principal, action, resource == Dyson::Tool::\"bash\");"
+        );
+        let sb =
+            CedarSandbox::from_policy_text(inner(), CedarMode::Enforce, &policies, None).unwrap();
+        let decision = sb
+            .check_skill_script(script, Path::new("/skills/x"), &ctx())
+            .await
+            .unwrap();
+        match decision {
+            SandboxDecision::Deny { reason } => assert!(reason.contains("no-bash"), "{reason}"),
+            other => panic!("expected Deny, got {other:?}"),
+        }
     }
 
     #[test]

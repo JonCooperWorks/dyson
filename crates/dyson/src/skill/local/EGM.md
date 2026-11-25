@@ -21,7 +21,7 @@ Loads workspace skills from `skills/<name>/SKILL.md` (freeform instructions with
 
 ## Side Effects
 - Reads `SKILL.md` and `dyson-skill.json` from disk [mod.rs:LocalSkill]
-- Spawns `bash <entrypoint>` in the skill directory with a cleared environment re-populated only with `is_safe_env_var` variables; kills the child on timeout [script.rs:LocalScriptSkillTool]
+- Runs `cd <skill_dir> && exec bash <entrypoint>` through the agent's sandbox (`Sandbox::check_skill_script`, via `ToolContext.sandbox`): under `PolicySandbox` that is the `bash` policy and OS wrapper plus a read-only mount of the skill dir; under `--dangerous-no-sandbox` it runs unwrapped; with no sandbox it refuses. Cleared environment re-populated only with `is_safe_env_var` variables; stdout and stderr drained while waiting; kills the child on timeout [script.rs:LocalScriptSkillTool]
 
 ## Verification
 - Run: `cargo test -p dyson` (from `dyson/`)

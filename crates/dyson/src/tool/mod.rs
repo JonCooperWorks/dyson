@@ -429,6 +429,11 @@ pub struct ToolContext {
     /// carrying this typed value.
     pub sandbox_bypass: Option<crate::sandbox::SandboxBypassGuard>,
 
+    /// The agent's sandbox, for tools that spawn processes of their own
+    /// (script skills) and must confine them the way `bash` is confined.
+    /// `None` outside an agent; such tools then refuse to run.
+    pub sandbox: Option<Arc<dyn crate::sandbox::Sandbox>>,
+
     /// Per-language symbol index cache for `taint_trace`.  Keyed by
     /// `LanguageConfig.display_name`.  Lazily populated on first call;
     /// invalidated via mtime check inside the tool.
@@ -498,6 +503,7 @@ impl ToolContext {
             workspace: None,
             depth: 0,
             sandbox_bypass: None,
+            sandbox: None,
             taint_indexes: Arc::new(RwLock::new(HashMap::new())),
             activity: None,
             tool_use_id: None,

@@ -7,8 +7,10 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::sandbox::SandboxDecision;
 use crate::skill::local::manifest::{ScriptExecution, resolved_entrypoint};
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use crate::util::escape_single_quotes;
 use dyson_core::error::{DysonError, Result};
 
 const MAX_READ_BYTES: u64 = 5 * 1024 * 1024;
@@ -31,6 +33,9 @@ impl LocalScriptSkillTool {
         skill_dir: PathBuf,
         execution: &ScriptExecution,
     ) -> Result<Self> {
+        // Canonical so the directory the sandbox mounts is the one the
+        // command names, even when the skills dir sits behind a symlink.
+        let skill_dir = std::fs::canonicalize(&skill_dir).unwrap_or(skill_dir);
         let entrypoint = resolved_entrypoint(&skill_dir, &execution.entrypoint)?;
         Ok(Self {
             name: tool_name,
@@ -44,6 +49,61 @@ impl LocalScriptSkillTool {
                 .clone()
                 .unwrap_or_else(default_input_schema),
         })
+    }
+}
+
+impl LocalScriptSkillTool {
+    /// The shell command that starts the script, before any sandbox wrap.
+    pub(crate) fn script_command(&self) -> String {
+        format!(
+            "cd '{}' && exec bash '{}'",
+            escape_single_quotes(&self.skill_dir.to_string_lossy()),
+            escape_single_quotes(&self.entrypoint.to_string_lossy()),
+        )
+    }
+
+    /// Ask the agent's sandbox how to run the script, the same question a
+    /// `bash` call answers.  The agent-loop check on this tool's name is a
+    /// network gate only, so without this the script ran unconfined.
+    pub(crate) async fn sandboxed_command(
+        &self,
+        ctx: &ToolContext,
+    ) -> std::result::Result<String, String> {
+        let Some(sandbox) = ctx.sandbox.as_ref() else {
+            return Err(format!(
+                "skill '{}' refused: no sandbox is available to run its script",
+                self.skill_name
+            ));
+        };
+        let decision = sandbox
+            .check_skill_script(&self.script_command(), &self.skill_dir, ctx)
+            .await
+            .map_err(|e| {
+                format!(
+                    "skill '{}' refused: sandbox check failed: {e}",
+                    self.skill_name
+                )
+            })?;
+        match decision {
+            SandboxDecision::Allow { input } => input["command"]
+                .as_str()
+                .filter(|c| !c.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    format!(
+                        "skill '{}' refused: sandbox returned no command",
+                        self.skill_name
+                    )
+                }),
+            SandboxDecision::Deny { reason } => Err(format!(
+                "skill '{}' denied by sandbox: {reason}",
+                self.skill_name
+            )),
+            SandboxDecision::Redirect { .. } => Err(format!(
+                "skill '{}' refused: sandbox redirected the script",
+                self.skill_name
+            )),
+        }
     }
 }
 
@@ -81,8 +141,14 @@ impl Tool for LocalScriptSkillTool {
             },
         });
 
+        let command = match self.sandboxed_command(ctx).await {
+            Ok(command) => command,
+            Err(reason) => return Ok(ToolOutput::error(reason)),
+        };
+
         let mut cmd = tokio::process::Command::new("bash");
-        cmd.arg(&self.entrypoint)
+        cmd.arg("-c")
+            .arg(&command)
             .current_dir(&self.skill_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

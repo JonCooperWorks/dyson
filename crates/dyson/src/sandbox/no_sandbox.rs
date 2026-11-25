@@ -80,6 +80,19 @@ impl Sandbox for DangerousNoSandbox {
     fn sandbox_bypass(&self) -> Option<&SandboxBypassGuard> {
         Some(&self.bypass)
     }
+
+    /// Runs the script unwrapped, exactly as a `bash` call would run here.
+    async fn check_skill_script(
+        &self,
+        command: &str,
+        _skill_dir: &std::path::Path,
+        _ctx: &ToolContext,
+    ) -> Result<SandboxDecision> {
+        tracing::info!(command, "script skill allowed (no sandbox)");
+        Ok(SandboxDecision::Allow {
+            input: serde_json::json!({ "command": command }),
+        })
+    }
 }
 
 // ===========================================================================
@@ -104,6 +117,50 @@ mod tests {
             }
             other => panic!("expected Allow, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn skill_script_runs_unwrapped() {
+        // Same posture as bash under --dangerous-no-sandbox.
+        let sandbox = DangerousNoSandbox::new(SandboxBypassGuard::for_test());
+        let ctx = ToolContext::from_cwd().unwrap();
+        let decision = sandbox
+            .check_skill_script("exec bash run.sh", std::path::Path::new("/skills/x"), &ctx)
+            .await
+            .unwrap();
+        match decision {
+            SandboxDecision::Allow { input } => {
+                assert_eq!(input, serde_json::json!({"command": "exec bash run.sh"}));
+            }
+            other => panic!("expected Allow, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sandboxes_without_script_support_deny_scripts() {
+        struct Bare;
+        #[async_trait]
+        impl Sandbox for Bare {
+            async fn check(
+                &self,
+                _: &str,
+                input: &serde_json::Value,
+                _: &ToolContext,
+            ) -> Result<SandboxDecision> {
+                Ok(SandboxDecision::Allow {
+                    input: input.clone(),
+                })
+            }
+        }
+        let decision = Bare
+            .check_skill_script(
+                "exec bash run.sh",
+                std::path::Path::new("/skills/x"),
+                &ToolContext::from_cwd().unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(decision, SandboxDecision::Deny { .. }));
     }
 
     #[test]

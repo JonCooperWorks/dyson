@@ -2,6 +2,81 @@ use super::*;
 use crate::skill::Skill;
 use std::path::PathBuf;
 
+/// A context whose sandbox is `--dangerous-no-sandbox`: scripts run
+/// unwrapped, as they do on managed dysons.
+fn unsandboxed_ctx() -> crate::tool::ToolContext {
+    crate::tool::ToolContext {
+        sandbox: Some(std::sync::Arc::new(
+            crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+                crate::sandbox::SandboxBypassGuard::for_test(),
+            ),
+        )),
+        ..crate::tool::ToolContext::from_cwd().unwrap()
+    }
+}
+
+/// Write a script skill into `dir` and load it.
+fn script_skill(dir: &std::path::Path, script: &str) -> LocalSkill {
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "Script\n\nInstructions only.\n").unwrap();
+    std::fs::write(dir.join("bin/run.sh"), script).unwrap();
+    let name = dir.file_name().unwrap().to_str().unwrap();
+    std::fs::write(
+        dir.join("dyson-skill.json"),
+        format!(
+            r#"{{
+              "schema_version":2,
+              "name":"{name}",
+              "description":"Script",
+              "slash_command":"/skill-script",
+              "execution":{{"kind":"script","entrypoint":"bin/run.sh","argument_mode":"raw","timeout_ms":5000}}
+            }}"#
+        ),
+    )
+    .unwrap();
+    LocalSkill::from_dir(dir).unwrap()
+}
+
+/// Records what a script skill asks for and answers with a fixed decision.
+struct ScriptRecordingSandbox {
+    seen: std::sync::Mutex<Vec<(String, PathBuf)>>,
+    allow_with: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl crate::sandbox::Sandbox for ScriptRecordingSandbox {
+    async fn check(
+        &self,
+        _tool_name: &str,
+        input: &serde_json::Value,
+        _ctx: &crate::tool::ToolContext,
+    ) -> dyson_core::error::Result<crate::sandbox::SandboxDecision> {
+        Ok(crate::sandbox::SandboxDecision::Allow {
+            input: input.clone(),
+        })
+    }
+
+    async fn check_skill_script(
+        &self,
+        command: &str,
+        skill_dir: &std::path::Path,
+        _ctx: &crate::tool::ToolContext,
+    ) -> dyson_core::error::Result<crate::sandbox::SandboxDecision> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((command.to_string(), skill_dir.to_path_buf()));
+        Ok(match &self.allow_with {
+            Some(command) => crate::sandbox::SandboxDecision::Allow {
+                input: serde_json::json!({ "command": command }),
+            },
+            None => crate::sandbox::SandboxDecision::Deny {
+                reason: "recording sandbox denies".into(),
+            },
+        })
+    }
+}
+
 fn test_path() -> PathBuf {
     PathBuf::from("/fake/skills/test-skill/SKILL.md")
 }
@@ -373,8 +448,6 @@ fn manifest_v1_instruction_only_has_no_tools() {
 
 #[tokio::test]
 async fn manifest_v2_script_registers_and_executes_tool() {
-    use crate::tool::ToolContext;
-
     let dir = std::env::temp_dir().join(format!("dyson-skill-echo-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("bin")).unwrap();
     std::fs::write(dir.join("SKILL.md"), "Echoes input\n\nInstructions only.\n").unwrap();
@@ -400,10 +473,7 @@ async fn manifest_v2_script_registers_and_executes_tool() {
     assert_eq!(skill.tools()[0].name(), manifest::tool_name_for_skill(name));
 
     let out = skill.tools()[0]
-        .run(
-            &serde_json::json!({"raw": "hello"}),
-            &ToolContext::from_cwd().unwrap(),
-        )
+        .run(&serde_json::json!({"raw": "hello"}), &unsandboxed_ctx())
         .await
         .unwrap();
     assert!(!out.is_error, "{}", out.content);
@@ -414,8 +484,6 @@ async fn manifest_v2_script_registers_and_executes_tool() {
 
 #[tokio::test]
 async fn script_that_ignores_stdin_still_returns_stdout() {
-    use crate::tool::ToolContext;
-
     let dir = std::env::temp_dir().join(format!("dyson-skill-no-stdin-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("bin")).unwrap();
     std::fs::write(dir.join("SKILL.md"), "Echoes input\n\nInstructions only.\n").unwrap();
@@ -441,10 +509,7 @@ async fn script_that_ignores_stdin_still_returns_stdout() {
 
     let skill = LocalSkill::from_dir(&dir).unwrap();
     let out = skill.tools()[0]
-        .run(
-            &serde_json::json!({"raw": "hello"}),
-            &ToolContext::from_cwd().unwrap(),
-        )
+        .run(&serde_json::json!({"raw": "hello"}), &unsandboxed_ctx())
         .await
         .unwrap();
     assert!(!out.is_error, "{}", out.content);
@@ -634,8 +699,6 @@ fn skill_list_builds_prompt() {
 
 #[tokio::test]
 async fn script_writing_more_than_a_pipe_buffer_is_not_a_timeout() {
-    use crate::tool::ToolContext;
-
     // 1 MiB on stdout and 256 KiB on stderr, far past a 64 KiB pipe
     // buffer.  Before the pipes were drained concurrently the script
     // blocked on its write until the timeout and was reported as one.
@@ -665,10 +728,7 @@ async fn script_writing_more_than_a_pipe_buffer_is_not_a_timeout() {
     let skill = LocalSkill::from_dir(&dir).unwrap();
     let started = std::time::Instant::now();
     let out = skill.tools()[0]
-        .run(
-            &serde_json::json!({"raw": ""}),
-            &ToolContext::from_cwd().unwrap(),
-        )
+        .run(&serde_json::json!({"raw": ""}), &unsandboxed_ctx())
         .await
         .unwrap();
     assert!(
@@ -682,4 +742,85 @@ async fn script_writing_more_than_a_pipe_buffer_is_not_a_timeout() {
     assert_eq!(stderr.len(), 262_144);
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn script_skill_runs_the_command_its_sandbox_returns() {
+    // The script must be started by whatever the sandbox hands back (the
+    // bwrap / container wrapper under PolicySandbox), not by a bare
+    // `bash <entrypoint>`.  The recording sandbox substitutes a command, so
+    // the output proves which one ran.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("skill-wrapped");
+    let skill = script_skill(&dir, "echo unwrapped\n");
+    let sandbox = std::sync::Arc::new(ScriptRecordingSandbox {
+        seen: std::sync::Mutex::new(Vec::new()),
+        allow_with: Some("echo wrapped".into()),
+    });
+    let ctx = crate::tool::ToolContext {
+        sandbox: Some(sandbox.clone()),
+        ..crate::tool::ToolContext::from_cwd().unwrap()
+    };
+
+    let out = skill.tools()[0]
+        .run(&serde_json::json!({"raw": ""}), &ctx)
+        .await
+        .unwrap();
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(out.content, "wrapped");
+
+    let seen = sandbox.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let canonical = std::fs::canonicalize(&dir).unwrap();
+    assert_eq!(seen[0].1, canonical);
+    assert_eq!(
+        seen[0].0,
+        format!(
+            "cd '{}' && exec bash '{}'",
+            canonical.display(),
+            canonical.join("bin/run.sh").display()
+        )
+    );
+}
+
+#[tokio::test]
+async fn script_skill_denied_by_sandbox_never_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("skill-denied");
+    let marker = tmp.path().join("ran");
+    let skill = script_skill(&dir, &format!("touch '{}'\n", marker.display()));
+    let ctx = crate::tool::ToolContext {
+        sandbox: Some(std::sync::Arc::new(ScriptRecordingSandbox {
+            seen: std::sync::Mutex::new(Vec::new()),
+            allow_with: None,
+        })),
+        ..crate::tool::ToolContext::from_cwd().unwrap()
+    };
+
+    let out = skill.tools()[0]
+        .run(&serde_json::json!({"raw": ""}), &ctx)
+        .await
+        .unwrap();
+    assert!(out.is_error);
+    assert!(out.content.contains("denied by sandbox"), "{}", out.content);
+    assert!(!marker.exists(), "a denied script must not run");
+}
+
+#[tokio::test]
+async fn script_skill_without_a_sandbox_refuses_to_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("skill-no-sandbox");
+    let marker = tmp.path().join("ran");
+    let skill = script_skill(&dir, &format!("touch '{}'\n", marker.display()));
+
+    let out = skill.tools()[0]
+        .run(
+            &serde_json::json!({"raw": ""}),
+            &crate::tool::ToolContext::from_cwd().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(out.is_error);
+    assert!(out.content.contains("no sandbox"), "{}", out.content);
+    assert!(!marker.exists());
 }

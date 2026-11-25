@@ -533,6 +533,7 @@ impl Agent {
             sandbox_bypass: sandbox
                 .sandbox_bypass()
                 .map(|_| crate::sandbox::SandboxBypassGuard::inherited_from_parent()),
+            sandbox: Some(Arc::clone(sandbox)),
             ..ToolContext::new(working_dir)
         }
     }

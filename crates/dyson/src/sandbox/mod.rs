@@ -156,6 +156,29 @@ pub trait Sandbox: Send + Sync {
         None
     }
 
+    /// Decide how a local script skill's process runs.
+    ///
+    /// Script skills spawn their own `bash`, so the agent-loop `check()` on
+    /// the skill's tool name (network gate only) is not enough: the script
+    /// must run under whatever confines a `bash` tool call.  `command` is
+    /// the shell command that starts the script; `skill_dir` is the
+    /// directory it lives in and must be able to read.  `Allow` carries
+    /// `{"command": <final command>}` for the caller to run with `bash -c`.
+    ///
+    /// The default denies: a sandbox that does not know how to confine a
+    /// script must not let one run unconfined.
+    async fn check_skill_script(
+        &self,
+        command: &str,
+        skill_dir: &std::path::Path,
+        ctx: &ToolContext,
+    ) -> Result<SandboxDecision> {
+        let _ = (command, skill_dir, ctx);
+        Ok(SandboxDecision::Deny {
+            reason: "this sandbox cannot run script skills".into(),
+        })
+    }
+
     /// Post-process a tool's output after execution.
     ///
     /// Called only when the tool returned `Ok(ToolOutput)` (not on

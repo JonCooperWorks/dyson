@@ -140,6 +140,23 @@ impl Sandbox for PolicySandbox {
         }
     }
 
+    /// A script skill runs under the `bash` policy and the same OS
+    /// wrapper as a `bash` call.  The only widening is read-only access to
+    /// the skill's own directory, without which the script could not load.
+    async fn check_skill_script(
+        &self,
+        command: &str,
+        skill_dir: &Path,
+        _ctx: &ToolContext,
+    ) -> Result<SandboxDecision> {
+        let policy = skill_script_policy(self.policies.get("bash"), skill_dir);
+        check_bash(
+            &serde_json::json!({ "command": command }),
+            &policy,
+            &self.working_dir,
+        )
+    }
+
     async fn after(
         &self,
         tool_name: &str,
@@ -199,6 +216,17 @@ pub(crate) fn redact_secrets(command: &str) -> String {
     let s = AUTH_HEADER_RE.replace_all(&s, "${1}[REDACTED]");
     let s = ENV_SECRET_RE.replace_all(&s, "${1}[REDACTED]");
     s.into_owned()
+}
+
+/// The `bash` policy plus read-only access to a script skill's directory.
+fn skill_script_policy(mut policy: SandboxPolicy, skill_dir: &Path) -> SandboxPolicy {
+    let skill_dir = resolve_canonical(skill_dir);
+    match &mut policy.file_read {
+        PathAccess::Allow => {}
+        PathAccess::RestrictTo(paths) => paths.push(skill_dir),
+        PathAccess::Deny => policy.file_read = PathAccess::RestrictTo(vec![skill_dir]),
+    }
+    policy
 }
 
 /// Check bash: generate OS-level sandbox wrapper from policy.
@@ -682,6 +710,111 @@ mod tests {
             }
             other => panic!("expected Allow, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn skill_script_wrapped_like_bash() {
+        // A script skill must get the OS wrapper a bash call gets, under the
+        // bash policy (no network), plus a read-only mount of its own dir.
+        let s = sandbox_default();
+        let skill_dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(skill_dir.path()).unwrap();
+        let command = "cd '/skills/x' && exec bash '/skills/x/bin/run.sh'";
+        let decision = s
+            .check_skill_script(command, skill_dir.path(), &ctx())
+            .await
+            .unwrap();
+        let SandboxDecision::Allow { input } = decision else {
+            panic!("expected Allow, got: {decision:?}");
+        };
+        let cmd = input["command"].as_str().unwrap();
+        let bash = match s
+            .check("bash", &serde_json::json!({ "command": command }), &ctx())
+            .await
+            .unwrap()
+        {
+            SandboxDecision::Allow { input } => input["command"].as_str().unwrap().to_string(),
+            other => panic!("expected Allow, got: {other:?}"),
+        };
+        assert_ne!(cmd, command, "script command must be wrapped");
+        assert!(
+            cmd.contains("exec bash '\\''/skills/x/bin/run.sh'\\''"),
+            "{cmd}"
+        );
+        let dir = canonical.display();
+        #[cfg(target_os = "linux")]
+        {
+            assert!(cmd.starts_with("bwrap "), "{cmd}");
+            assert!(cmd.contains("--unshare-net"), "{cmd}");
+            assert!(cmd.contains(&format!("--ro-bind '{dir}' '{dir}'")), "{cmd}");
+            assert!(!bash.contains(&format!("'{dir}'")), "{bash}");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert!(cmd.starts_with("container run"), "{cmd}");
+            assert!(cmd.contains("--network none"), "{cmd}");
+            assert!(cmd.contains(&format!("-v '{dir}':'{dir}':ro")), "{cmd}");
+            assert!(!bash.contains(&format!("'{dir}'")), "{bash}");
+        }
+    }
+
+    #[test]
+    fn skill_script_policy_only_adds_skill_dir_read() {
+        let dir = Path::new("/skills/x");
+        let base = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::RestrictTo(vec![wd()]),
+            file_write: PathAccess::RestrictTo(vec![wd()]),
+            process_exec: Access::Allow,
+        };
+        let p = skill_script_policy(base.clone(), dir);
+        assert_eq!(p.network, base.network);
+        assert_eq!(p.file_write, base.file_write);
+        assert_eq!(p.process_exec, base.process_exec);
+        assert_eq!(
+            p.file_read,
+            PathAccess::RestrictTo(vec![wd(), resolve_canonical(dir)])
+        );
+
+        let denied = SandboxPolicy {
+            file_read: PathAccess::Deny,
+            ..base.clone()
+        };
+        assert_eq!(
+            skill_script_policy(denied, dir).file_read,
+            PathAccess::RestrictTo(vec![resolve_canonical(dir)])
+        );
+
+        let open = SandboxPolicy {
+            file_read: PathAccess::Allow,
+            ..base
+        };
+        assert_eq!(skill_script_policy(open, dir).file_read, PathAccess::Allow);
+    }
+
+    #[tokio::test]
+    async fn skill_script_follows_bash_policy_override() {
+        // A config that lets bash reach the network lets script skills too;
+        // the script is never stricter or looser than bash.
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "bash".to_string(),
+            ToolPolicyConfig {
+                network: Some("allow".into()),
+                ..Default::default()
+            },
+        );
+        let s = sandbox(overrides);
+        let decision = s
+            .check_skill_script("exec bash run.sh", Path::new("/skills/x"), &ctx())
+            .await
+            .unwrap();
+        let SandboxDecision::Allow { input } = decision else {
+            panic!("expected Allow, got: {decision:?}");
+        };
+        let cmd = input["command"].as_str().unwrap();
+        assert!(!cmd.contains("--unshare-net"), "{cmd}");
+        assert!(!cmd.contains("--network none"), "{cmd}");
     }
 
     // -----------------------------------------------------------------------
