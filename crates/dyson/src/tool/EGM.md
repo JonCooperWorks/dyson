@@ -7,7 +7,7 @@ The `Tool` trait and Dyson's built-in tool implementations. A tool is a stateles
 - `Tool` trait: `name`, `description`, `input_schema`, `idempotency_key`, `lookup_result`, `agent_only`, `execution_plan`, `run(input, ctx) -> Result<ToolOutput>` [mod.rs:Tool]
 - `ToolContext`, `ToolOutput`, `CheckpointEvent` [mod.rs:ToolContext, mod.rs:ToolOutput, mod.rs:CheckpointEvent]
 - Re-exports `Idempotency`, `ResourceAccess`, `ResourceClaim`, `ToolExecutionPlan` from `dyson_harness` [mod.rs]
-- Path helpers: `resolve_and_validate_path`, `SandboxedPath`, `validate_workspace_path`, `file_resource_key` [mod.rs:resolve_and_validate_path, mod.rs:validate_workspace_path]
+- Path helpers: `resolve_and_validate_path`, `SandboxedPath`, `validate_workspace_path`, `validate_workspace_path_in`, `file_resource_key` [mod.rs:resolve_and_validate_path, mod.rs:validate_workspace_path]
 - `MAX_SUBAGENT_DEPTH = 3` [mod.rs:MAX_SUBAGENT_DEPTH]
 - Tools (registered names): `bash` [bash.rs:BashTool], `read_file` [read_file.rs:ReadFileTool], `write_file` [write_file.rs], `edit_file` [edit_file.rs:EditFileTool], `list_files` [list_files.rs:ListFilesTool], `search_files` [search_files.rs:SearchFilesTool], `send_file` [send_file.rs:SendFileTool], `workspace` [workspace.rs], `memory_search` [memory_search.rs:MemorySearchTool], `kb_search` [kb_search.rs:KbSearchTool], `kb_status` [kb_status.rs:KbStatusTool], `load_skill` [load_skill.rs:LoadSkillTool], `artifacts` [artefacts.rs:ArtefactsTool], `skill_marketplace` [skill_marketplace.rs:SkillMarketplaceTool], `web_fetch` [web_fetch.rs], `web_search` [web_search.rs], `image_generate` [image_generate.rs:ImageGenerateTool], `speak` (registered when a voice provider resolves; not for public channels) [speak.rs:SpeakTool], `dependency_scan` [dependency_scan.rs:DependencyScanTool], `export_conversation` [export_conversation.rs:ExportConversationTool], `request_human_input` [human_input.rs:HumanInputTool]
 - `ArtefactReader` trait, `ArtefactSummary`, `ArtefactRecord`, `ArtefactLookup` [artefacts.rs:ArtefactReader]
@@ -20,8 +20,9 @@ The `Tool` trait and Dyson's built-in tool implementations. A tool is a stateles
 - [skill_create](./skill_create/EGM.md) - create/improve workspace skills
 
 ## Invariants
-- Paths are canonicalised (nearest existing ancestor for new files) and must stay inside the workspace unless a sandbox bypass is in effect [mod.rs:resolve_and_validate_path]
-- Workspace paths reject absolute paths and traversal [mod.rs:validate_workspace_path]
+- Paths are canonicalised (nearest existing ancestor for new files) and must stay inside the workspace unless a sandbox bypass is in effect; `..` inside the nonexistent part of a path is refused, and `write_file` re-checks the created parent [mod.rs:resolve_and_validate_path, write_file.rs:WriteFileTool]
+- Workspace paths reject absolute paths and traversal; `validate_workspace_path_in` also refuses symlinked prefixes under the workspace root [mod.rs:validate_workspace_path, mod.rs:validate_workspace_path_in]
+- User regexes (`search_files`, `bulk_edit`, workspace search) compile under a 1 MiB program / DFA budget [util.rs:bounded_regex]
 - `ToolContext` refuses deeper nesting when `depth >= MAX_SUBAGENT_DEPTH` [mod.rs:ToolContext]
 - `bash`: default timeout 120 s with process-group kill; output truncated to `MAX_OUTPUT_BYTES`; per-stream reads capped at 5 MiB; child env cleared and restricted to `is_safe_env_var` names [bash.rs:BashTool, bash.rs:MAX_READ_BYTES, bash.rs:is_safe_env_var]
 - Size limits: `read_file` 50 MB and extraction <= 16 MiB with a 50x expansion-ratio check [read_file.rs:MAX_EXTRACTED_BYTES, read_file.rs:MAX_EXTRACT_RATIO]; `edit_file` 10 MiB [edit_file.rs:MAX_FILE_SIZE]; `list_files` 1000 results [list_files.rs:MAX_RESULTS]; `search_files` 500 matches [search_files.rs:MAX_MATCHES]; `image_generate` prompt <= 10,000 chars [image_generate.rs:MAX_PROMPT_LEN]

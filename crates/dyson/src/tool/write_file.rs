@@ -74,6 +74,23 @@ impl Tool for WriteFileTool {
             )));
         }
 
+        // Defense in depth: re-canonicalize the (now existing) parent and
+        // re-check it against the working directory, so a directory
+        // created above cannot have resolved outside the sandbox.
+        if ctx.sandbox_bypass.is_none()
+            && let Some(parent) = path.parent()
+        {
+            let inside = match (parent.canonicalize(), ctx.working_dir.canonicalize()) {
+                (Ok(parent), Ok(wd)) => parent.starts_with(wd),
+                _ => false,
+            };
+            if !inside {
+                return Ok(ToolOutput::error(format!(
+                    "path escapes working directory: '{file_path}'"
+                )));
+            }
+        }
+
         let bytes = content.len();
         if let Err(e) = tokio::fs::write(&path, content).await {
             return Ok(ToolOutput::error(path_err("write", &path, e)));
@@ -107,6 +124,23 @@ mod tests {
 
         let content = std::fs::read_to_string(tmp.path().join("hello.txt")).unwrap();
         assert_eq!(content, "hello world");
+    }
+
+    #[tokio::test]
+    async fn write_cannot_escape_through_nonexistent_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir(&wd).unwrap();
+        let input = serde_json::json!({
+            "file_path": "newdir/../../escaped.txt",
+            "content": "pwned"
+        });
+        let output = WriteFileTool
+            .run(&input, &ToolContext::for_test(&wd))
+            .await
+            .unwrap();
+        assert!(output.is_error, "escape accepted: {}", output.content);
+        assert!(!tmp.path().join("escaped.txt").exists());
     }
 
     #[tokio::test]

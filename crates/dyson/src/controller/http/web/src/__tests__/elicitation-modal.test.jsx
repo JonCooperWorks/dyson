@@ -273,3 +273,29 @@ describe('ElicitationModal', () => {
     expect(screen.getByText(/only use this to confirm/i)).toBeTruthy();
   });
 });
+
+describe('ElicitationModal polling (PERF-01)', () => {
+  function setHidden(hidden) {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    delete document.hidden;
+  });
+
+  it('does not poll while the tab is hidden and catches up when it becomes visible', async () => {
+    vi.useFakeTimers();
+    setHidden(true);
+    const client = mockClient({ pending: [] });
+    renderWith(client);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(client.listElicitations.mock.calls.length).toBeLessThanOrEqual(1);
+
+    const before = client.listElicitations.mock.calls.length;
+    setHidden(false);
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.listElicitations.mock.calls.length).toBe(before + 1);
+  });
+});

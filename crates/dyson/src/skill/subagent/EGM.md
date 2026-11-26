@@ -27,6 +27,7 @@ Spawns child agents as tools. A `SubagentTool` builds a fresh child `Agent` with
 - `pentester` direct tools: `bash`, `read_file`, `search_files`, `list_files`, `web_fetch`, `ast_describe`, `ast_query`, `attack_surface_analyzer`, `exploit_builder`, `taint_trace`, `dependency_scan` [pentester.rs:DIRECT_TOOLS]
 - Penetration tests require a preflight elicitation confirming target, authority, and scope, which needs the elicitation UI [orchestrator.rs:complete_pentest_preflight]
 - `PENTEST_EXECUTION_TIMEOUT_MS = 1_800_000` [orchestrator.rs:PENTEST_EXECUTION_TIMEOUT_MS]
+- An orchestrator's `path` scope goes through `ToolContext::resolve_path`, so it must lie inside the caller's working directory unless the sandbox is bypassed [orchestrator.rs:resolve_scope_dir]
 
 ## Side Effects
 - Builds and runs child agents with their own LLM calls [mod.rs:spawn_child]

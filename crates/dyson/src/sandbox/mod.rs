@@ -196,6 +196,80 @@ pub trait Sandbox: Send + Sync {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Sandbox-gated tool handles for CLI providers
+// ---------------------------------------------------------------------------
+
+/// A tool handle that runs `sandbox.check()` / `sandbox.after()` around
+/// the inner tool.
+///
+/// The agent loop gates every call it executes itself, but CLI providers
+/// (Claude Code, Codex) receive the tool *instances* and call them through
+/// the in-process MCP server, outside that loop.  Handing them gated
+/// handles keeps those calls under the same policy (PolicySandbox, Cedar).
+struct SandboxGatedTool {
+    inner: std::sync::Arc<dyn crate::tool::Tool>,
+    sandbox: std::sync::Arc<dyn Sandbox>,
+}
+
+#[async_trait]
+impl crate::tool::Tool for SandboxGatedTool {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        self.inner.input_schema()
+    }
+    fn agent_only(&self) -> bool {
+        self.inner.agent_only()
+    }
+    fn execution_plan(
+        &self,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> crate::tool::ToolExecutionPlan {
+        self.inner.execution_plan(input, ctx)
+    }
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let name = self.inner.name();
+        match self.sandbox.check(name, input, ctx).await? {
+            SandboxDecision::Allow { input } => {
+                let mut output = self.inner.run(&input, ctx).await?;
+                self.sandbox.after(name, &input, &mut output).await?;
+                Ok(output)
+            }
+            SandboxDecision::Deny { reason } => Ok(ToolOutput::error(reason)),
+            // A redirect names a tool in the agent's registry, which the
+            // MCP server does not hold; refuse rather than run the original.
+            SandboxDecision::Redirect { tool_name, .. } => Ok(ToolOutput::error(format!(
+                "sandbox redirected '{name}' to '{tool_name}', which is not available to this provider"
+            ))),
+        }
+    }
+}
+
+/// Wrap every tool in `tools` so calls made outside the agent loop (CLI
+/// providers via the in-process MCP server) still pass through `sandbox`.
+pub(crate) fn gate_tools(
+    tools: &std::collections::HashMap<String, std::sync::Arc<dyn crate::tool::Tool>>,
+    sandbox: &std::sync::Arc<dyn Sandbox>,
+) -> std::collections::HashMap<String, std::sync::Arc<dyn crate::tool::Tool>> {
+    tools
+        .iter()
+        .map(|(name, tool)| {
+            let gated: std::sync::Arc<dyn crate::tool::Tool> =
+                std::sync::Arc::new(SandboxGatedTool {
+                    inner: std::sync::Arc::clone(tool),
+                    sandbox: std::sync::Arc::clone(sandbox),
+                });
+            (name.clone(), gated)
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxBackendStatus {
     Ready,

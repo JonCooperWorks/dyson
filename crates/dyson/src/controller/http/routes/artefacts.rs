@@ -63,17 +63,37 @@ pub(super) async fn get_for_chat(state: &HttpState, chat_id: &str, id: &str) -> 
 }
 
 fn artefact_body_response(bytes: Vec<u8>, mime: String, title: String, chat_id: String) -> Resp {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", format!("{mime}; charset=utf-8"))
-        .header(
-            "Content-Disposition",
-            format!("inline; filename=\"{}.md\"", sanitize_filename(&title)),
-        )
-        .header("X-Dyson-Chat-Id", sanitize_header_value(&chat_id))
-        .header("Cache-Control", "no-cache")
-        .body(boxed(hyper::body::Bytes::from(bytes)))
-        .unwrap()
+    // The MIME comes from the producing tool: fall back to plain text
+    // rather than panic on a value that is not a valid header, and never
+    // let an SVG (script-capable) artefact render inline on this origin.
+    let content_type = hyper::header::HeaderValue::try_from(format!("{mime}; charset=utf-8"))
+        .unwrap_or(hyper::header::HeaderValue::from_static(
+            "text/plain; charset=utf-8",
+        ));
+    let disposition = if mime.starts_with("image/svg") {
+        "attachment"
+    } else {
+        "inline"
+    };
+    let cd = format!(
+        "{disposition}; filename=\"{}.md\"",
+        sanitize_filename(&title)
+    );
+    let mut resp = Response::new(boxed(hyper::body::Bytes::from(bytes)));
+    *resp.status_mut() = StatusCode::OK;
+    let headers = resp.headers_mut();
+    headers.insert(hyper::header::CONTENT_TYPE, content_type);
+    if let Ok(cd) = hyper::header::HeaderValue::try_from(cd) {
+        headers.insert(hyper::header::CONTENT_DISPOSITION, cd);
+    }
+    if let Ok(id) = hyper::header::HeaderValue::try_from(sanitize_header_value(&chat_id)) {
+        headers.insert("x-dyson-chat-id", id);
+    }
+    headers.insert(
+        hyper::header::CACHE_CONTROL,
+        hyper::header::HeaderValue::from_static("no-cache"),
+    );
+    resp
 }
 
 /// Stream a ShareGPT-format dump of a conversation for the web UI's

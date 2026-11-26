@@ -3082,10 +3082,13 @@ async fn orchestrator_rejects_nonexistent_path() {
         &[],
         vec![],
     );
-    let ctx = ToolContext::from_cwd().unwrap();
+    // The scope path is confined to the caller's working dir (SEC-02),
+    // so use a missing directory *inside* it.
+    let wd = tempfile::tempdir().unwrap();
+    let ctx = ToolContext::for_test(wd.path());
     let input = serde_json::json!({
         "task": "any",
-        "path": "/this/path/definitely/does/not/exist/dyson-test"
+        "path": "definitely/does/not/exist/dyson-test"
     });
     let result = tool.run(&input, &ctx).await.unwrap();
     assert!(result.is_error, "expected error for nonexistent path");
@@ -3098,8 +3101,10 @@ async fn orchestrator_rejects_nonexistent_path() {
 
 #[tokio::test]
 async fn orchestrator_rejects_path_pointing_to_file() {
-    // Write a temp file, then try to scope the orchestrator at it.
-    let file = std::env::temp_dir().join(format!("dyson-orch-test-{}.tmp", std::process::id()));
+    // Write a file inside the working dir, then try to scope the
+    // orchestrator at it.
+    let wd = tempfile::tempdir().unwrap();
+    let file = wd.path().join("dyson-orch-test.tmp");
     std::fs::write(&file, b"not a directory").unwrap();
 
     let tool = OrchestratorTool::new(
@@ -3116,7 +3121,7 @@ async fn orchestrator_rejects_path_pointing_to_file() {
         &[],
         vec![],
     );
-    let ctx = ToolContext::from_cwd().unwrap();
+    let ctx = ToolContext::for_test(wd.path());
     let input = serde_json::json!({
         "task": "any",
         "path": file.display().to_string(),
@@ -3164,9 +3169,11 @@ impl Tool for WorkingDirSpy {
 
 #[tokio::test]
 async fn orchestrator_propagates_path_to_child_working_dir() {
-    // Use $TMPDIR directly as the scoped path — guaranteed to exist
-    // and distinct from the process cwd.
-    let target = std::env::temp_dir().canonicalize().unwrap();
+    // Scope to a subdirectory of the caller's working dir — the scope
+    // path is confined to it (SEC-02) but distinct from it.
+    let wd = tempfile::tempdir().unwrap();
+    std::fs::create_dir(wd.path().join("scoped")).unwrap();
+    let target = wd.path().join("scoped").canonicalize().unwrap();
 
     // MockLlm: one tool call to `working_dir_spy`, then end.
     let llm = MockLlm::new(vec![
@@ -3212,7 +3219,7 @@ async fn orchestrator_propagates_path_to_child_working_dir() {
         vec![],
     );
 
-    let ctx = ToolContext::from_cwd().unwrap();
+    let ctx = ToolContext::for_test(wd.path());
     let input = serde_json::json!({
         "task": "call the spy",
         "path": target.display().to_string(),

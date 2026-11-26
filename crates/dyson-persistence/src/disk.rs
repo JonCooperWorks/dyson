@@ -130,9 +130,12 @@ impl DiskChatHistory {
         Self::new(path)
     }
 
-    /// Per-chat root: `{dir}/{chat_id}`.
-    pub(crate) fn chat_root(&self, chat_id: &str) -> PathBuf {
-        self.dir.join(chat_id)
+    /// Per-chat root: `{dir}/{chat_id}`.  Fails for ids that are not a
+    /// single ordinary path component (see [`crate::validate_chat_id`]),
+    /// so no derived path can leave `dir`.
+    pub(crate) fn chat_root(&self, chat_id: &str) -> Result<PathBuf> {
+        crate::validate_chat_id(chat_id)?;
+        Ok(self.dir.join(chat_id))
     }
 
     fn journal_lock(&self, chat_id: &str) -> &std::sync::Mutex<()> {
@@ -142,25 +145,25 @@ impl DiskChatHistory {
         &self.journal_locks[(hasher.finish() % self.journal_locks.len() as u64) as usize]
     }
 
-    fn transcript_path(&self, chat_id: &str) -> PathBuf {
-        self.chat_root(chat_id).join("transcript.json")
+    fn transcript_path(&self, chat_id: &str) -> Result<PathBuf> {
+        Ok(self.chat_root(chat_id)?.join("transcript.json"))
     }
 
-    fn title_path(&self, chat_id: &str) -> PathBuf {
-        self.chat_root(chat_id).join("title.txt")
+    fn title_path(&self, chat_id: &str) -> Result<PathBuf> {
+        Ok(self.chat_root(chat_id)?.join("title.txt"))
     }
 
-    fn archives_dir(&self, chat_id: &str) -> PathBuf {
-        self.chat_root(chat_id).join("archives")
+    fn archives_dir(&self, chat_id: &str) -> Result<PathBuf> {
+        Ok(self.chat_root(chat_id)?.join("archives"))
     }
 
-    fn run_events_path(&self, chat_id: &str) -> PathBuf {
-        self.chat_root(chat_id).join("run-events.jsonl")
+    fn run_events_path(&self, chat_id: &str) -> Result<PathBuf> {
+        Ok(self.chat_root(chat_id)?.join("run-events.jsonl"))
     }
 
     /// Directory for externalised media files for a given chat.
-    fn media_dir(&self, chat_id: &str) -> PathBuf {
-        self.chat_root(chat_id).join("media")
+    fn media_dir(&self, chat_id: &str) -> Result<PathBuf> {
+        Ok(self.chat_root(chat_id)?.join("media"))
     }
 
     /// Generate a timestamp string for rotation filenames.
@@ -216,7 +219,7 @@ impl ChatHistory for DiskChatHistory {
             .journal_lock(chat_id)
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let dir = self.chat_root(chat_id).join("harness");
+        let dir = self.chat_root(chat_id)?.join("harness");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{key}.json"));
         let temp = dir.join(format!(".{key}.tmp"));
@@ -246,7 +249,7 @@ impl ChatHistory for DiskChatHistory {
             ));
         }
         match std::fs::read(
-            self.chat_root(chat_id)
+            self.chat_root(chat_id)?
                 .join("harness")
                 .join(format!("{key}.json")),
         ) {
@@ -257,19 +260,19 @@ impl ChatHistory for DiskChatHistory {
     }
 
     fn save(&self, chat_id: &str, messages: &[Message]) -> Result<()> {
-        let root = self.chat_root(chat_id);
+        let root = self.chat_root(chat_id)?;
         std::fs::create_dir_all(&root)?;
 
         // `None` means no message carried inline media — serialize the
         // borrowed slice directly instead of cloning the whole history.
-        let media_dir = self.media_dir(chat_id);
+        let media_dir = self.media_dir(chat_id)?;
         let externalized = externalize_images(messages, &media_dir)?;
         let to_write: &[Message] = externalized.as_deref().unwrap_or(messages);
 
         // Temp-file + rename so a crash mid-write can't destroy the
         // previous good transcript (which the state-sync worker would
         // otherwise happily push half-written to swarm).
-        let path = self.transcript_path(chat_id);
+        let path = self.transcript_path(chat_id)?;
         write_atomically(&path, |writer| {
             serde_json::to_writer_pretty(writer, to_write)?;
             Ok(())
@@ -279,13 +282,13 @@ impl ChatHistory for DiskChatHistory {
     }
 
     fn load(&self, chat_id: &str) -> Result<Vec<Message>> {
-        let path = self.transcript_path(chat_id);
+        let path = self.transcript_path(chat_id)?;
         if !path.exists() {
             return Ok(Vec::new());
         }
         let content = std::fs::read_to_string(&path)?;
         let mut messages: Vec<Message> = serde_json::from_str(&content)?;
-        let media_dir = self.media_dir(chat_id);
+        let media_dir = self.media_dir(chat_id)?;
         restore_images(&mut messages, &media_dir);
 
         tracing::debug!(
@@ -297,14 +300,14 @@ impl ChatHistory for DiskChatHistory {
     }
 
     fn save_title(&self, chat_id: &str, title: &str) -> Result<()> {
-        let root = self.chat_root(chat_id);
+        let root = self.chat_root(chat_id)?;
         std::fs::create_dir_all(&root)?;
-        std::fs::write(self.title_path(chat_id), title)?;
+        std::fs::write(self.title_path(chat_id)?, title)?;
         Ok(())
     }
 
     fn load_title(&self, chat_id: &str) -> Result<Option<String>> {
-        let path = self.title_path(chat_id);
+        let path = self.title_path(chat_id)?;
         if !path.exists() {
             return Ok(None);
         }
@@ -313,7 +316,7 @@ impl ChatHistory for DiskChatHistory {
     }
 
     fn remove_title(&self, chat_id: &str) -> Result<()> {
-        let path = self.title_path(chat_id);
+        let path = self.title_path(chat_id)?;
         if path.exists() {
             std::fs::remove_file(path)?;
         }
@@ -321,12 +324,12 @@ impl ChatHistory for DiskChatHistory {
     }
 
     fn rotate(&self, chat_id: &str) -> Result<()> {
-        let path = self.transcript_path(chat_id);
+        let path = self.transcript_path(chat_id)?;
         if !path.exists() {
             return Ok(());
         }
 
-        let archives = self.archives_dir(chat_id);
+        let archives = self.archives_dir(chat_id)?;
         std::fs::create_dir_all(&archives)?;
 
         let timestamp = Self::rotation_timestamp();
@@ -343,7 +346,7 @@ impl ChatHistory for DiskChatHistory {
     /// Cascade delete: remove the entire chat subdir — transcript,
     /// archives, media, artefacts, files, feedback all go together.
     fn remove(&self, chat_id: &str) -> Result<()> {
-        let root = self.chat_root(chat_id);
+        let root = self.chat_root(chat_id)?;
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
             tracing::info!(chat_id = chat_id, path = %root.display(), "chat removed");
@@ -394,10 +397,10 @@ impl ChatHistory for DiskChatHistory {
         // and resets mtimes to the roll time). Chats that never journalled
         // a run fall back to the transcript mtime, which the replay now
         // restores from the mirror's recorded time.
-        if let Some(at) = newest_run_event_secs(&self.run_events_path(chat_id)) {
+        if let Some(at) = newest_run_event_secs(&self.run_events_path(chat_id).ok()?) {
             return Some(at);
         }
-        let modified = std::fs::metadata(self.transcript_path(chat_id))
+        let modified = std::fs::metadata(self.transcript_path(chat_id).ok()?)
             .and_then(|m| m.modified())
             .ok()?;
         let secs = modified
@@ -421,9 +424,9 @@ impl ChatHistory for DiskChatHistory {
             .journal_lock(chat_id)
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let root = self.chat_root(chat_id);
+        let root = self.chat_root(chat_id)?;
         std::fs::create_dir_all(&root)?;
-        let path = self.run_events_path(chat_id);
+        let path = self.run_events_path(chat_id)?;
         let creates_journal = !path.exists();
         let mut bytes = Vec::new();
         for event in events {
@@ -504,7 +507,7 @@ impl ChatHistory for DiskChatHistory {
             .journal_lock(chat_id)
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let path = self.run_events_path(chat_id);
+        let path = self.run_events_path(chat_id)?;
         let metadata = match std::fs::metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -542,7 +545,7 @@ impl ChatHistory for DiskChatHistory {
     }
 
     fn load_run_events(&self, chat_id: &str) -> Result<Vec<dyson_harness::RunEvent>> {
-        let path = self.run_events_path(chat_id);
+        let path = self.run_events_path(chat_id)?;
         if !path.exists() {
             return Ok(Vec::new());
         }
@@ -1291,7 +1294,7 @@ mod tests {
                 .is_empty()
         );
         // A snapshot restore can replace a journal while the store is alive.
-        let path = store.run_events_path("chat_j");
+        let path = store.run_events_path("chat_j").unwrap();
         let replacement = path.with_extension("replacement");
         std::fs::write(
             &replacement,
@@ -1336,7 +1339,7 @@ mod tests {
         store.load_unresolved_tool_outcomes("chat_j").unwrap();
         std::fs::OpenOptions::new()
             .append(true)
-            .open(store.run_events_path("chat_j"))
+            .open(store.run_events_path("chat_j").unwrap())
             .unwrap()
             .write_all(b"{\"torn\":")
             .unwrap();
@@ -1442,11 +1445,39 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_chat_ids_cannot_escape_the_history_dir() {
+        // SEC-10: chat ids are joined onto the history dir; `..` or a
+        // separator must be refused rather than resolved.
+        let (dir, store) = temp_store("unsafe_ids");
+        let outside = dir
+            .parent()
+            .unwrap()
+            .join(format!("dyson-escape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        let escape = format!("../{}", outside.file_name().unwrap().to_str().unwrap());
+        for id in [escape.as_str(), "..", ".", "", "a/b", "a\\b", "a\0b"] {
+            assert!(store.save(id, &[]).is_err(), "save accepted {id:?}");
+            assert!(
+                store.save_title(id, "t").is_err(),
+                "save_title accepted {id:?}"
+            );
+            assert!(store.load(id).is_err(), "load accepted {id:?}");
+            assert!(store.remove(id).is_err(), "remove accepted {id:?}");
+        }
+        assert!(!outside.exists(), "write escaped the history dir");
+        // Real ids keep working.
+        for id in ["c-0001", "-1001234567", "bg-7", "chat_j"] {
+            store.save(id, &[]).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     #[ignore = "manual long-conversation recovery-query benchmark"]
     fn benchmark_long_journal_outcome_queries() {
         use dyson_harness::{RunEvent, RunEventKind, RunId};
         let (dir, store) = temp_store("outcome_benchmark");
-        std::fs::create_dir_all(store.chat_root("chat_j")).unwrap();
+        std::fs::create_dir_all(store.chat_root("chat_j").unwrap()).unwrap();
         let run = RunId::new();
         let mut bytes = Vec::new();
         for sequence in 0..10_000 {
@@ -1457,7 +1488,7 @@ mod tests {
             .unwrap();
             bytes.push(b'\n');
         }
-        std::fs::write(store.run_events_path("chat_j"), bytes).unwrap();
+        std::fs::write(store.run_events_path("chat_j").unwrap(), bytes).unwrap();
         store.load_unresolved_tool_outcomes("chat_j").unwrap();
         let start = std::time::Instant::now();
         for _ in 0..100 {

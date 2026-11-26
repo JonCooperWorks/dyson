@@ -18,8 +18,8 @@ use hyper::{Method, Request};
 
 use super::responses::{
     Resp, apply_security_headers, client_accepts_gzip, get_auth_config, maybe_gzip,
-    method_not_allowed, misdirected_request, not_found, read_json_capped, service_unavailable,
-    unauthorized, url_decode_strict,
+    method_not_allowed, misdirected_request, not_found, read_json_capped, safe_store_id,
+    service_unavailable, unauthorized, url_decode_strict,
 };
 use super::state::HttpState;
 
@@ -330,6 +330,15 @@ async fn dispatch_conversations(
     method: &Method,
     rest: &[&str],
 ) -> Resp {
+    // Every per-conversation route takes the chat id as its first
+    // segment, and the stores join it onto a directory.  Refuse anything
+    // outside the minted alphabet (`..`, `%2e%2e`, `a%2fb`, …) here, once,
+    // instead of trusting each handler and store to re-check it.
+    if let Some(id) = rest.first()
+        && !safe_store_id(id)
+    {
+        return not_found();
+    }
     match (method, rest) {
         (&Method::GET, []) => conversations::list(&state).await,
         (&Method::POST, []) => conversations::create(req, &state).await,

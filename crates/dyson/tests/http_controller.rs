@@ -1652,6 +1652,39 @@ async fn mind_lists_workspace_files_and_round_trips_an_edit() {
 }
 
 #[tokio::test]
+async fn conversation_routes_reject_unsafe_ids() {
+    // SEC-10: `/api/conversations/../feedback` splits into id `..`;
+    // every per-conversation route must refuse ids outside the minted
+    // alphabet before they reach a store that joins them onto a path.
+    let r = rig().await;
+    let escaped = r.chat_dir.path().parent().unwrap().join("feedback.json");
+    let existed = escaped.exists();
+    let resp = r
+        .post_json(
+            "/api/conversations/../feedback",
+            &serde_json::json!({ "turn_index": 1, "emoji": "👍" }),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(
+        existed || !escaped.exists(),
+        "feedback written outside chat dir"
+    );
+    for path in [
+        "/api/conversations/../feedback",
+        "/api/conversations/../artefacts",
+        "/api/conversations/%2e%2e/files/f1",
+        "/api/conversations/a%2fb/artefacts/a1",
+    ] {
+        let resp = r.get(path).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+    if !existed {
+        let _ = std::fs::remove_file(&escaped);
+    }
+}
+
+#[tokio::test]
 async fn feedback_round_trip_telegram_compatible() {
     let r = rig().await;
     let id = r.create_chat_id("rate me").await;

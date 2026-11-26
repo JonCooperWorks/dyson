@@ -18,7 +18,7 @@ Browser-side transport for the Dyson web UI. `auth.js` bootstraps authentication
 - Every authenticated request carries `x-dyson-csrf: 1` and, when a token exists, `authorization: Bearer <token>`; the controller's CSRF gate rejects requests without it [client.js:_authedFetch]
 - Authenticated fetches refuse protocol-relative (`//`) and cross-origin absolute URLs [client.js:assertSameOriginAuthenticatedUrl]
 - When a token is present, `POST /api/auth/sse-ticket` must succeed before the `/events` EventSource is opened [client.js:_openEvents]
-- The EventSource is closed when a `done` event arrives [client.js:_openEvents]
+- The EventSource is closed when a `done` event arrives; a permanent stream failure (`readyState` CLOSED) is reported once through `onError` [client.js:_openEvents]
 - Tokens are refreshed `REFRESH_LEEWAY_S = 60` seconds before expiry [auth.js:REFRESH_LEEWAY_S]
 - `stream.js` is pure: no network or EventSource access [stream.js:parseStreamEvent]
 

@@ -12,7 +12,8 @@ Reactive client-side state built on `createStore` from `dyson-common-ui`. `app.j
 
 ## Invariants
 - Sessions are immutable values replaced through `updateSession(chatId, reducer)`; never mutate in place [sessions.js:updateSession]
-- EventSources and per-chat ref counters live in the non-reactive `resources` map, not in snapshots [sessions.js:getResources]
+- EventSources, per-chat ref counters and local object URLs live in the non-reactive `resources` map, not in snapshots [sessions.js:getResources]
+- `replaceStream` closes a chat's previous EventSource before storing the new one; `deleteSession` revokes the chat's object URLs and drops its `app.tools` entries [sessions.js:replaceStream, sessions.js:deleteSession]
 - Skill payloads are normalised so `builtin`, `mcp`, `denials` are always arrays [app.js:normalizeSkills]
 - `FALLBACK_SLASH_COMMANDS` is frozen; the live list comes from `/api/commands` [constants.js:FALLBACK_SLASH_COMMANDS]
 

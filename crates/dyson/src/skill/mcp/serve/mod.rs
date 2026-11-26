@@ -451,22 +451,22 @@ impl McpHttpServer {
             );
         }
 
-        let body = match req.collect().await {
-            Ok(collected) => {
-                let bytes = collected.to_bytes();
-                if bytes.len() > MAX_REQUEST_BODY {
-                    tracing::warn!(
-                        body_len = bytes.len(),
-                        "MCP server: rejecting oversized request body"
-                    );
-                    return json_response(
-                        StatusCode::BAD_REQUEST,
-                        &serde_json::json!({
-                            "error": "request body too large"
-                        }),
-                    );
-                }
-                bytes
+        // `Limited` stops reading once the cap is crossed, so a chunked
+        // body with no (or a lying) Content-Length cannot be buffered
+        // past MAX_REQUEST_BODY before the check fires.
+        let body = match http_body_util::Limited::new(req.into_body(), MAX_REQUEST_BODY)
+            .collect()
+            .await
+        {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) if e.is::<http_body_util::LengthLimitError>() => {
+                tracing::warn!("MCP server: rejecting oversized request body");
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    &serde_json::json!({
+                        "error": "request body too large"
+                    }),
+                );
             }
             Err(e) => {
                 tracing::warn!(error = %e, "MCP server: failed to read request body");

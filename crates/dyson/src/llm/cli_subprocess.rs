@@ -55,26 +55,43 @@ pub trait CliLineParser: Send + 'static {
 pub fn cli_event_stream<P: CliLineParser>(
     stdout: ChildStdout,
     parser: P,
-    _keep_alive: Vec<Box<dyn std::any::Any + Send>>,
+    keep_alive: Vec<Box<dyn std::any::Any + Send>>,
 ) -> std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<StreamEvent>> + Send>> {
+    lines_event_stream(stdout, parser, keep_alive, MAX_CLI_LINE_BYTES)
+}
+
+/// Longest single JSONL line accepted from a CLI subprocess.  Lines
+/// carry whole tool results, so this is generous; it exists so a
+/// runaway child cannot make Dyson buffer an unbounded line.
+pub(crate) const MAX_CLI_LINE_BYTES: usize = 64 * 1024 * 1024;
+
+fn lines_event_stream<R, P>(
+    reader: R,
+    parser: P,
+    keep_alive: Vec<Box<dyn std::any::Any + Send>>,
+    max_line_bytes: usize,
+) -> std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<StreamEvent>> + Send>>
+where
+    R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    P: CliLineParser,
+{
     Box::pin(async_stream::stream! {
-        let _owned = _keep_alive;
-        let reader = BufReader::new(stdout);
-        let mut reader = reader;
+        let _owned = keep_alive;
+        let mut reader = BufReader::new(reader);
         let mut parser = parser;
+        let mut buf = Vec::new();
 
         loop {
-            let mut line = String::new();
-            let bytes_read = match reader.read_line(&mut line).await {
-                Ok(n) => n,
+            buf.clear();
+            match read_line_capped(&mut reader, &mut buf, max_line_bytes).await {
+                Ok(0) => break, // EOF
+                Ok(_) => {}
                 Err(e) => {
                     yield Err(DysonError::Io(e));
                     break;
                 }
-            };
-            if bytes_read == 0 {
-                break; // EOF
             }
+            let line = String::from_utf8_lossy(&buf);
             let line = line.trim_end();
             if line.is_empty() {
                 continue;
@@ -89,6 +106,41 @@ pub fn cli_event_stream<P: CliLineParser>(
             yield event;
         }
     })
+}
+
+/// `read_until(b'\n')` that fails instead of growing `buf` past `max`.
+/// Returns the bytes consumed (0 at EOF).
+async fn read_line_capped<R>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max: usize,
+) -> std::io::Result<usize>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut consumed_total = 0;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(consumed_total);
+        }
+        let (take, done) = match available.iter().position(|b| *b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (available.len(), false),
+        };
+        if buf.len().saturating_add(take) > max.saturating_add(1) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("CLI output line exceeds {max} bytes"),
+            ));
+        }
+        buf.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        consumed_total += take;
+        if done {
+            return Ok(consumed_total);
+        }
+    }
 }
 
 /// Build a `StreamResponse` for CLI clients that observe tool execution
@@ -190,6 +242,46 @@ fn is_secret_env_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    struct CountingParser(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl CliLineParser for CountingParser {
+        fn parse_line(&mut self, line: &str) -> Vec<Result<StreamEvent>> {
+            self.0
+                .fetch_add(line.len(), std::sync::atomic::Ordering::SeqCst);
+            Vec::new()
+        }
+        fn finalize(&mut self) -> Vec<Result<StreamEvent>> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_cli_line_is_refused_not_buffered() {
+        // MEM-09: one newline-free line used to be buffered whole.
+        use futures_util::StreamExt as _;
+        use tokio::io::AsyncReadExt as _;
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader = tokio::io::repeat(b'a').take(64 * 1024);
+        let mut stream =
+            lines_event_stream(reader, CountingParser(Arc::clone(&seen)), Vec::new(), 1024);
+        let mut errors = 0;
+        while let Some(item) = stream.next().await {
+            errors += usize::from(item.is_err());
+        }
+        assert_eq!(errors, 1, "oversized line must surface as an error");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // Lines within the cap still parse.
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader = std::io::Cursor::new(b"abc\ndefg\n".to_vec());
+        let mut stream =
+            lines_event_stream(reader, CountingParser(Arc::clone(&seen)), Vec::new(), 4);
+        while let Some(item) = stream.next().await {
+            assert!(item.is_ok());
+        }
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 7);
+    }
     use super::*;
     use std::collections::HashMap;
 

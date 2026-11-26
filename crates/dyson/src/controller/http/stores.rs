@@ -86,6 +86,30 @@ pub(crate) struct FileEntry {
 
 impl FileStore {
     const MAX_FILES: usize = 64;
+    /// Aggregate byte budget for cached file bodies.
+    pub(crate) const MAX_BYTES: usize = 128 * 1024 * 1024;
+
+    /// Cache an entry under both the count cap and [`Self::MAX_BYTES`],
+    /// evicting oldest first.  Shadows `EvictingStore::put` (reached
+    /// through `DerefMut`) so every caller gets the byte bound.  Bodies
+    /// are persisted to disk before they are cached, so an entry larger
+    /// than the whole budget is simply not cached.
+    pub(crate) fn put(&mut self, id: String, entry: FileEntry) {
+        let incoming = entry.bytes.len();
+        if incoming > Self::MAX_BYTES {
+            return;
+        }
+        let mut total: usize = self.inner.items.values().map(|e| e.bytes.len()).sum();
+        while total + incoming > Self::MAX_BYTES {
+            let Some(old) = self.inner.order.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = self.inner.items.remove(&old) {
+                total -= evicted.bytes.len();
+            }
+        }
+        self.inner.put(id, entry);
+    }
 
     /// Read a persisted file from disk.  Returns `None` if the entry
     /// is missing or unreadable.  Called by `get_file` when the
@@ -293,20 +317,15 @@ impl ArtefactStore {
         load_artefact_from_subdir(&sub, id)
     }
 
-    /// Walk every `{chat_id}/artefacts/` subdir on startup and populate
-    /// the in-memory index so the list endpoint returns everything
-    /// immediately.  Returns the largest numeric id seen.
+    /// Walk every `{chat_id}/artefacts/` subdir on startup, return the
+    /// largest numeric id seen (so the counter never reuses one), and
+    /// warm the cache with the newest `MAX_ARTEFACTS` entries.
     ///
-    /// Bypasses `put` so the in-memory cap doesn't silently drop the
-    /// oldest entries when disk holds more than `MAX_ARTEFACTS` —
-    /// `list_artefacts` reads only the in-memory index, so eviction
-    /// during cold start would render older artefacts invisible to
-    /// the sidebar even though their bytes are still on disk.
-    /// Subsequent `put` calls (live emissions during the session)
-    /// still evict per-FIFO, so memory grows only by what disk
-    /// already holds.
+    /// Older entries stay on disk only: the list, get and conversation
+    /// endpoints all read disk (the in-memory map is just a cache), so
+    /// loading every body ever written would only grow RSS with history.
     pub(crate) fn hydrate_from_disk(&mut self, data_dir: &std::path::Path) -> u64 {
-        let mut ids: Vec<(String, std::path::PathBuf)> = Vec::new();
+        let mut ids: Vec<(u64, String, std::path::PathBuf)> = Vec::new();
         let dir_iter = match std::fs::read_dir(data_dir) {
             Ok(it) => it,
             Err(_) => return 0,
@@ -322,37 +341,40 @@ impl ArtefactStore {
                 Err(_) => continue,
             };
             for e in art_iter.flatten() {
-                let name = match e.file_name().into_string() {
-                    Ok(n) => n,
-                    Err(_) => continue,
-                };
-                if !name.ends_with(".meta.json") {
+                let Ok(name) = e.file_name().into_string() else {
                     continue;
-                }
-                let id = name.trim_end_matches(".meta.json").to_string();
-                ids.push((id, sub.clone()));
+                };
+                // `strip_suffix`, not `trim_end_matches`: the latter
+                // strips repeatedly, turning `a1.meta.json.meta.json`
+                // into a second `a1`.
+                let Some(id) = name.strip_suffix(".meta.json") else {
+                    continue;
+                };
+                let n = id
+                    .strip_prefix('a')
+                    .and_then(|r| r.parse::<u64>().ok())
+                    .unwrap_or(0);
+                ids.push((n, id.to_string(), sub.clone()));
             }
         }
-        // Sort by numeric id so `order` mirrors creation order.
-        ids.sort_by_key(|(s, _)| {
-            s.strip_prefix('a')
-                .and_then(|r| r.parse::<u64>().ok())
-                .unwrap_or(0)
-        });
-        let mut max_n: u64 = 0;
-        for (id, sub) in ids {
-            if let Some(rest) = id.strip_prefix('a')
-                && let Ok(n) = rest.parse::<u64>()
-            {
-                max_n = max_n.max(n);
+        let max_n = ids.iter().map(|(n, _, _)| *n).max().unwrap_or(0);
+        // Sort by numeric id so `order` mirrors creation order, then keep
+        // only the newest entries that actually load.
+        ids.sort_by_key(|(n, _, _)| *n);
+        let mut newest: Vec<(String, ArtefactEntry)> = Vec::new();
+        for (_, id, sub) in ids.into_iter().rev() {
+            if newest.len() >= Self::MAX_ARTEFACTS {
+                break;
+            }
+            if self.inner.items.contains_key(&id) || newest.iter().any(|(seen, _)| *seen == id) {
+                continue;
             }
             if let Some(entry) = load_artefact_from_subdir(&sub, &id) {
-                // Skip the eviction path — see fn-level doc.  Inserts
-                // straight into the underlying map / order deque so
-                // every on-disk entry survives hydration.
-                self.inner.order.push_back(id.clone());
-                self.inner.items.insert(id, entry);
+                newest.push((id, entry));
             }
+        }
+        for (id, entry) in newest.into_iter().rev() {
+            self.inner.put(id, entry);
         }
         max_n
     }
@@ -564,19 +586,12 @@ mod tests {
     }
 
     #[test]
-    fn artefact_hydrate_keeps_all_disk_entries_even_past_cap() {
-        // Regression: `hydrate_from_disk` used to call `put` for each
-        // entry, which silently evicted the oldest once `order` hit
-        // `MAX_ARTEFACTS`.  Since `list_artefacts` reads only from the
-        // in-memory index, that meant a long-running deployment lost
-        // visibility of older artefacts on cold start — even though
-        // their bytes were still on disk and `get_artefact` could
-        // still serve them on direct hit.
-        //
-        // After the fix, hydrate inserts directly into the inner map
-        // / order deque, bypassing the eviction.  Future `put` calls
-        // (live emissions during a session) still evict per-FIFO, so
-        // the memory bound only grows by what's already on disk.
+    fn artefact_hydrate_caches_only_the_newest_entries() {
+        // MEM-01: every reader (list, get, conversation list) falls back
+        // to disk, so cold start only needs the newest `MAX_ARTEFACTS`
+        // bodies in memory — loading every report ever written made RSS
+        // grow with history.  The returned max id still covers all of
+        // disk so the id counter never reuses one.
         let dir = tempfile::tempdir().unwrap();
         let n_entries: u64 = (ArtefactStore::MAX_ARTEFACTS as u64) + 18; // 50
         for n in 1..=n_entries {
@@ -585,28 +600,36 @@ mod tests {
         let mut store = ArtefactStore::default();
         let max_n = store.hydrate_from_disk(dir.path());
         assert_eq!(max_n, n_entries);
-        assert_eq!(
-            store.items.len() as u64,
-            n_entries,
-            "hydrate must keep every on-disk entry; got {} of {}",
-            store.items.len(),
-            n_entries,
-        );
-        // Oldest must still be present — that's the whole point.
-        assert!(
-            store.items.contains_key("a1"),
-            "oldest entry must survive hydration"
-        );
+        assert_eq!(store.items.len(), ArtefactStore::MAX_ARTEFACTS);
+        assert_eq!(store.order.len(), ArtefactStore::MAX_ARTEFACTS);
+        assert!(!store.items.contains_key("a1"), "oldest stays on disk only");
         assert!(store.items.contains_key(&format!("a{n_entries}")));
+        // Evicted-from-cache entries are still served from disk.
+        assert!(ArtefactStore::load_from_disk(dir.path(), "a1").is_some());
     }
 
     #[test]
-    fn artefact_put_after_hydrate_walks_cache_back_down_to_cap() {
-        // Counterpart to the hydrate-keeps-all test: hydrate widens
-        // the cache transiently above MAX_ARTEFACTS; the next live
-        // emission's `put` evicts oldest entries until the cap holds
-        // again, so memory growth is bounded by what disk already
-        // had — never by future puts.
+    fn artefact_hydrate_ignores_doubled_meta_suffix() {
+        // `trim_end_matches` stripped `.meta.json` repeatedly, so a stray
+        // `a1.meta.json.meta.json` re-queued `a1` and duplicated it in
+        // `order`.
+        let dir = tempfile::tempdir().unwrap();
+        ArtefactStore::persist_static(dir.path(), "a1", &art_entry("c-0001", 1));
+        let sub = ArtefactStore::dir_for_chat(dir.path(), "c-0001");
+        std::fs::write(sub.join("a1.meta.json.meta.json"), "{}").unwrap();
+        let mut store = ArtefactStore::default();
+        store.hydrate_from_disk(dir.path());
+        assert_eq!(store.items.len(), 1);
+        assert_eq!(
+            store.order.len(),
+            1,
+            "duplicate id in order: {:?}",
+            store.order
+        );
+    }
+
+    #[test]
+    fn artefact_put_after_hydrate_stays_at_cap() {
         let dir = tempfile::tempdir().unwrap();
         let extra: u64 = 5;
         let n_entries: u64 = (ArtefactStore::MAX_ARTEFACTS as u64) + extra; // 37
@@ -615,25 +638,38 @@ mod tests {
         }
         let mut store = ArtefactStore::default();
         let _ = store.hydrate_from_disk(dir.path());
-        assert_eq!(
-            store.items.len() as u64,
-            n_entries,
-            "transient widening on hydrate"
-        );
-        // One live emission — evicts (extra + 1) oldest hydrated
-        // entries to walk the cache back to the cap.
+        assert_eq!(store.items.len(), ArtefactStore::MAX_ARTEFACTS);
         store.put("a999".into(), art_entry("c-0001", 999));
-        assert_eq!(
-            store.items.len(),
-            ArtefactStore::MAX_ARTEFACTS,
-            "one put must walk the cache back to the bound",
-        );
-        for n in 1..=(extra + 1) {
-            assert!(
-                !store.items.contains_key(&format!("a{n}")),
-                "oldest {extra}+1 entries should have been evicted; a{n} still present",
-            );
-        }
+        assert_eq!(store.items.len(), ArtefactStore::MAX_ARTEFACTS);
+        assert!(!store.items.contains_key(&format!("a{}", extra + 1)));
         assert!(store.items.contains_key("a999"));
+    }
+
+    fn file_entry(len: usize) -> FileEntry {
+        FileEntry {
+            bytes: vec![0u8; len],
+            mime: "application/octet-stream".into(),
+            name: "x.bin".into(),
+            chat_id: "c-0001".into(),
+        }
+    }
+
+    #[test]
+    fn file_store_bounds_total_cached_bytes() {
+        // MEM-06: 64 entries of arbitrary size is not a memory bound.
+        let mut store = FileStore::default();
+        let chunk = FileStore::MAX_BYTES / 4 + 1;
+        for n in 0..8 {
+            store.put(format!("f{n}"), file_entry(chunk));
+        }
+        let total: usize = store.items.values().map(|e| e.bytes.len()).sum();
+        assert!(total <= FileStore::MAX_BYTES, "cached {total} bytes");
+        assert!(store.items.contains_key("f7"), "newest must stay cached");
+        assert_eq!(store.order.len(), store.items.len());
+        // An entry larger than the whole budget is not cached at all
+        // (it is already on disk) and does not flush the cache.
+        store.put("huge".into(), file_entry(FileStore::MAX_BYTES + 1));
+        assert!(!store.items.contains_key("huge"));
+        assert!(store.items.contains_key("f7"));
     }
 }

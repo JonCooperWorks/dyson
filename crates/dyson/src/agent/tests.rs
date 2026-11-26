@@ -3059,3 +3059,125 @@ mod audit_regressions;
 
 #[path = "continuation_tests.rs"]
 mod continuation_regressions;
+
+// -----------------------------------------------------------------------
+// SEC-12: tools forwarded to CLI providers stay behind the sandbox
+// -----------------------------------------------------------------------
+
+struct DenyProbeSandbox;
+
+#[async_trait::async_trait]
+impl Sandbox for DenyProbeSandbox {
+    async fn check(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        _ctx: &crate::tool::ToolContext,
+    ) -> Result<crate::sandbox::SandboxDecision> {
+        Ok(if tool_name == "probe_tool" {
+            crate::sandbox::SandboxDecision::Deny {
+                reason: "probe denied by policy".into(),
+            }
+        } else {
+            crate::sandbox::SandboxDecision::Allow {
+                input: input.clone(),
+            }
+        })
+    }
+}
+
+struct ProbeTool {
+    ran: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl Tool for ProbeTool {
+    fn name(&self) -> &str {
+        "probe_tool"
+    }
+    fn description(&self) -> &str {
+        "probe"
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    async fn run(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &crate::tool::ToolContext,
+    ) -> Result<ToolOutput> {
+        self.ran.store(true, Ordering::SeqCst);
+        Ok(ToolOutput::success("probe ran"))
+    }
+}
+
+/// Stands in for a CLI provider: it calls a forwarded tool straight
+/// from `tool_instances`, the way the in-process MCP server does.
+struct ForwardingLlm {
+    seen: Arc<std::sync::Mutex<Option<(bool, String)>>>,
+}
+
+#[async_trait::async_trait]
+impl LlmClient for ForwardingLlm {
+    async fn stream(
+        &self,
+        _messages: &[Message],
+        _system: &str,
+        _system_suffix: &str,
+        _tools: &[ToolDefinition],
+        tool_instances: &std::collections::HashMap<String, Arc<dyn Tool>>,
+        _config: &CompletionConfig,
+    ) -> Result<crate::llm::StreamResponse> {
+        if let Some(tool) = tool_instances.get("probe_tool") {
+            let ctx = crate::tool::ToolContext::new(std::env::temp_dir());
+            let out = tool.run(&serde_json::json!({}), &ctx).await?;
+            *self.seen.lock().unwrap() = Some((out.is_error, out.content));
+        }
+        Ok(crate::llm::StreamResponse {
+            stream: Box::pin(tokio_stream::iter(
+                text_response("done").into_iter().map(Ok),
+            )),
+            tool_mode: crate::llm::ToolMode::Observe,
+            input_tokens: None,
+            swarm_llm_audit_id: None,
+            provider: None,
+            model: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn tools_forwarded_to_cli_providers_are_sandbox_gated() {
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let settings = AgentSettings {
+        api_key: "test".into(),
+        ..Default::default()
+    };
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(ForwardingLlm {
+            seen: Arc::clone(&seen),
+        })),
+        Arc::new(DenyProbeSandbox),
+        vec![Box::new(BuiltinSkill::new(None, None, None))],
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    agent.tool_registry.register_extra_tool(Arc::new(ProbeTool {
+        ran: Arc::clone(&ran),
+    }));
+    let mut output = RecordingOutput::new();
+    agent.run("hi", &mut output).await.unwrap();
+
+    let (is_error, content) = seen.lock().unwrap().clone().expect("probe forwarded");
+    assert!(
+        !ran.load(Ordering::SeqCst),
+        "forwarded tool bypassed the sandbox"
+    );
+    assert!(is_error, "denied call must surface as a tool error");
+    assert!(content.contains("probe denied by policy"), "{content}");
+}

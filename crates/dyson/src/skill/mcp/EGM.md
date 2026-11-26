@@ -17,7 +17,9 @@ Model Context Protocol client support. `McpSkill` connects to a configured MCP s
 ## Invariants
 - Request frames are capped at `MAX_MCP_REQUEST_BYTES = 16 MiB` and results at `MAX_MCP_RESULT_BYTES = 64 MiB` (by `content-length`, streamed chunks, and stdio line reads) [transport.rs:MAX_MCP_REQUEST_BYTES, transport.rs:MAX_MCP_RESULT_BYTES]
 - With `sandbox = true` on Linux with `bwrap` on PATH, stdio servers run under bwrap with a read-only root, and `deny_network` unshares the network namespace; otherwise it falls back unsandboxed with a warning [transport.rs:StdioTransport::spawn, transport.rs:resolve_exec_with]
-- HTTP transport echoes a server-returned `Mcp-Session-Id` on later requests [transport.rs:HttpTransport]
+- HTTP transport echoes a server-returned `Mcp-Session-Id` on later requests, and never follows redirects (auth headers would be replayed cross-origin) [transport.rs:HttpTransport]
+- Stdio servers start from a cleared environment: allowlisted parent vars (`is_safe_env_var`) plus the configured `env` only [transport.rs:StdioTransport::spawn]
+- Stdio: at most 64 requests in flight per server; a request's pending entry is removed on every exit path, and pending callers fail as soon as the server closes stdout [transport.rs:MAX_STDIO_INFLIGHT, transport.rs:PendingGuard]
 - Server-originated sampling is not advertised or serviced by default: MCP servers are untrusted [mod.rs:McpSkill]
 - Server descriptions are stripped of control characters and capped at 500 chars; instructions at 2000 chars [text.rs:sanitize_mcp_description, text.rs:sanitize_mcp_instructions]
 - The `elicitation` capability is advertised only after `enable_ui()`; otherwise `elicitation/create` gets `-32601`. Parked elicitations time out after 300 s [elicitation.rs:enable_ui, elicitation.rs:ELICITATION_TIMEOUT]

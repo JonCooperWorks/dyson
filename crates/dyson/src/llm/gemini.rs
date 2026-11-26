@@ -50,7 +50,9 @@ pub struct GeminiClient {
 impl GeminiClient {
     pub fn new(api_key: &str, base_url: Option<&str>) -> Self {
         Self {
-            client: crate::http::client().clone(),
+            // No redirects: the key travels in `x-goog-api-key`, which
+            // reqwest would replay across origins on a redirect.
+            client: crate::http::no_redirect_client().clone(),
             api_key: api_key.to_string(),
             base_url: base_url
                 .unwrap_or("https://generativelanguage.googleapis.com")

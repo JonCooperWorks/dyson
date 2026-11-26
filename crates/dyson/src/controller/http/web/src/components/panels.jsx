@@ -821,7 +821,7 @@ function ImagePanel({ url, name, prompt }) {
     <div style={{overflow:'auto', flex:1, padding:14, display:'flex',
                  flexDirection:'column', alignItems:'center', gap:10,
                  background:'var(--bg)'}}>
-      <a href={url} target="_blank" rel="noopener" title={name}
+      <a href={url} target="_blank" rel="noopener noreferrer" title={name}
          style={{display:'block', maxWidth:'100%'}}>
         <img src={url} alt={name || 'generated image'}
              style={{maxWidth:'100%', maxHeight:'100%', objectFit:'contain',

@@ -333,6 +333,15 @@ export class DysonClient {
         if (msg.type === 'done') es.close();
         dispatchStreamEvent(msg, cb);
       };
+      // EventSource retries transient drops by itself (readyState goes
+      // back to CONNECTING).  Only a permanent failure — CLOSED, e.g. a
+      // 401/404 on reconnect — needs surfacing, or the UI would sit in
+      // "running" forever with a dead stream.
+      es.onerror = () => {
+        if (closed || !es || es.readyState !== 2) return;
+        closed = true;
+        cb.onError && cb.onError('event stream closed');
+      };
     };
 
     const eventsBase = `/api/conversations/${encodeURIComponent(id)}/events`;

@@ -1122,8 +1122,8 @@ dependencies = [
 
 [[package]]
 name = "dyson-common"
-version = "0.1.15"
-source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.15#909f77acfcae4e59a7ad006dee58767280a1eca8"
+version = "0.1.16"
+source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.16#07701361c2e8760ed835ff12c6b24eac91d3176f"
 dependencies = [
  "base64 0.22.1",
  "jsonwebtoken",
@@ -1187,7 +1187,7 @@ dependencies = [
 [[package]]
 name = "dyson-telegram"
 version = "0.1.0"
-source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.15#909f77acfcae4e59a7ad006dee58767280a1eca8"
+source = "git+ssh://git@github.com/JonCooperWorks/dyson-common.git?tag=v0.1.16#07701361c2e8760ed835ff12c6b24eac91d3176f"
 dependencies = [
  "futures-util",
  "reqwest",

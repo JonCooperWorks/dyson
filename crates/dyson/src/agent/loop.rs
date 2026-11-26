@@ -1045,13 +1045,16 @@ impl Agent {
             self.pending_task_budget.take();
             return StreamResult::Error(error);
         }
+        // CLI providers call these instances outside this loop (through
+        // the in-process MCP server), so hand them sandbox-gated handles.
+        let forwarded_tools = crate::sandbox::gate_tools(&self.tool_registry.tools, &self.sandbox);
         let err = match client
             .stream(
                 &self.conversation.messages,
                 &self.system_prompt,
                 skill_fragments,
                 tools_for_llm,
-                &self.tool_registry.tools,
+                &forwarded_tools,
                 &config,
             )
             .await

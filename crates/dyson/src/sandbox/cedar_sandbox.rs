@@ -316,8 +316,9 @@ fn mcp_server(tool_name: &str) -> Option<&str> {
 /// when there are none, so a path-less call is still evaluated once.
 fn path_candidates(input: &serde_json::Value) -> Vec<Option<&str>> {
     let mut out: Vec<Option<&str>> = Vec::new();
-    for key in ["file_path", "path"] {
-        if let Some(path) = input[key].as_str()
+    // `taint_trace` names its two files under `source.file`/`sink.file`.
+    for pointer in ["/file_path", "/path", "/source/file", "/sink/file"] {
+        if let Some(path) = input.pointer(pointer).and_then(serde_json::Value::as_str)
             && !out.contains(&Some(path))
         {
             out.push(Some(path));
@@ -385,6 +386,21 @@ fn absolute_path(path: &str, working_dir: &Path) -> PathBuf {
 }
 
 fn url_host(url: &str) -> Option<String> {
+    // Prefer the host the HTTP client will actually dial: the shared
+    // WHATWG-consistent extractor, else the `url` parser's own view (for
+    // inputs where written and parsed hosts disagree).  The lexical
+    // fallback below only serves scheme-less strings, which no HTTP
+    // client fetches anyway.
+    let normalize = |h: &str| h.trim_end_matches('.').to_ascii_lowercase();
+    if let Some(host) = dyson_common::net::host_from_url(url) {
+        return Some(normalize(host));
+    }
+    if let Ok(parsed) = reqwest::Url::parse(url) {
+        return parsed
+            .host_str()
+            .map(|h| normalize(h.trim_start_matches('[').trim_end_matches(']')))
+            .filter(|h| !h.is_empty());
+    }
     let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority = after_scheme.split(['/', '?', '#']).next()?;
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
@@ -533,6 +549,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn taint_trace_source_and_sink_files_are_judged() {
+        // SEC-07: taint_trace names its files under `source.file` and
+        // `sink.file`, not `file_path`/`path`.
+        assert_eq!(
+            denied_by(
+                "taint_trace",
+                json!({
+                    "source": {"file": "src/main.rs", "line": 1},
+                    "sink": {"file": "/home/agent/.ssh/id_ed25519", "line": 1}
+                })
+            ),
+            ["no-credential-file-read"]
+        );
+        assert_eq!(
+            denied_by(
+                "taint_trace",
+                json!({
+                    "source": {"file": "/root/.aws/credentials", "line": 1},
+                    "sink": {"file": "src/main.rs", "line": 1}
+                })
+            ),
+            ["no-credential-file-read"]
+        );
+    }
+
     /// Build an input for `tool` from its own declared schema: every
     /// required field gets a placeholder, and the one required field
     /// whose name ends in `path` gets `path`.  Panics if the schema has
@@ -607,6 +649,24 @@ mod tests {
                 json!({"file_path": "src/main.rs", "path": "/root/.kube/config"})
             ),
             ["no-credential-file-read"]
+        );
+    }
+
+    #[test]
+    fn metadata_host_is_the_one_the_http_client_dials() {
+        // SEC-22: WHATWG treats `\\` as `/` in http(s) URLs, so the
+        // client dials 169.254.169.254 here; a lexical parser that only
+        // splits on `/` read the host as example.com.
+        assert_eq!(
+            denied_by(
+                "web_fetch",
+                json!({"url": "http://169.254.169.254\\@example.com/latest"})
+            ),
+            ["no-metadata-endpoint"]
+        );
+        assert_eq!(
+            url_host("http://169.254.169.254\\@example.com/").as_deref(),
+            Some("169.254.169.254")
         );
     }
 
@@ -800,7 +860,9 @@ mod tests {
             Some("fd00:ec2::254")
         );
         assert_eq!(url_host("example.com/path").as_deref(), Some("example.com"));
-        assert_eq!(url_host("https:///nohost"), None);
+        // WHATWG skips the extra slashes: the client dials `nohost`.
+        assert_eq!(url_host("https:///nohost").as_deref(), Some("nohost"));
+        assert_eq!(url_host("file:///etc/passwd"), None);
     }
 
     #[test]

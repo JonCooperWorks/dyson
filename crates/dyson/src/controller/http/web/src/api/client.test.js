@@ -572,3 +572,26 @@ describe('DysonClient — send (SSE + POST turn)', () => {
     expect(onError).toHaveBeenCalledWith(expect.stringContaining('turn rejected: 400'));
   });
 });
+
+describe('DysonClient — stream errors (MEM-05)', () => {
+  it('reports a permanently closed EventSource through onError', async () => {
+    const fetch = vi.fn(async () => ({ ok: true, status: 200 }));
+    class FakeES {
+      constructor() { FakeES.last = this; this.readyState = 0; }
+      close() { this.readyState = 2; }
+    }
+    const onError = vi.fn();
+    const client = new DysonClient({ fetch, EventSource: FakeES, getToken: () => null });
+    client.attach('c1', { onError });
+    await new Promise(r => setTimeout(r, 0));
+    expect(typeof FakeES.last.onerror).toBe('function');
+    // A transient error (browser will reconnect) is not reported…
+    FakeES.last.readyState = 0;
+    FakeES.last.onerror(new Event('error'));
+    expect(onError).not.toHaveBeenCalled();
+    // …a fatal one (readyState CLOSED) is, so the UI stops "running".
+    FakeES.last.readyState = 2;
+    FakeES.last.onerror(new Event('error'));
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+});

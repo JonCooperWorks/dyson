@@ -32,8 +32,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use regex::RegexBuilder;
-
 use crate::config::MemoryConfig;
 use crate::workspace::Workspace;
 use crate::workspace::memory_store::MemoryStore;
@@ -484,10 +482,7 @@ impl Workspace for FilesystemWorkspace {
     }
 
     fn search(&self, pattern: &str) -> Vec<(String, Vec<String>)> {
-        let re = RegexBuilder::new(pattern)
-            .case_insensitive(true)
-            .size_limit(10 * 1024 * 1024) // 10 MB compiled size limit (prevents ReDoS)
-            .build();
+        let re = crate::util::bounded_regex(pattern, true);
 
         // Pre-compute lowercase pattern for the fallback path (invalid regex).
         let pattern_lower = if re.is_err() {
@@ -639,6 +634,23 @@ fn workspace_child_path(root: &Path, name: &str) -> Result<PathBuf> {
             }
         }
     }
+    // Refuse any existing prefix that is a symlink: `save()` writes
+    // through this path, and a symlinked directory (or file) inside the
+    // workspace would otherwise redirect the write outside the root.
+    let mut accumulated = root.to_path_buf();
+    for component in rel.components() {
+        accumulated.push(component);
+        match std::fs::symlink_metadata(&accumulated) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(DysonError::Config(
+                    "workspace file path must not traverse a symlink".into(),
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(DysonError::Io(e)),
+        }
+    }
     Ok(root.join(rel))
 }
 
@@ -759,6 +771,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let ws = FilesystemWorkspace::load(&dir, MemoryConfig::default()).unwrap();
         (dir, ws)
+    }
+
+    #[test]
+    fn save_refuses_to_follow_symlinked_subdir_out_of_workspace() {
+        // SEC-09: a symlinked directory inside the workspace must not
+        // let save() write outside the workspace root.
+        let (dir, mut ws) = temp_workspace();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.join("notes")).unwrap();
+        ws.set("notes/x.md", "pwned");
+        let _ = ws.save();
+        assert!(
+            !outside.path().join("x.md").exists(),
+            "workspace save followed a symlink out of the root"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

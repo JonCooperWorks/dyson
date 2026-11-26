@@ -359,7 +359,7 @@ async fn handle_callback(
             "Missing code or state parameter.",
         ));
     };
-    if state != expected_state {
+    if !dyson_common::util::ct_eq_str(state, expected_state) {
         return Ok(html_response(
             StatusCode::BAD_REQUEST,
             "State mismatch — possible CSRF.",
@@ -381,14 +381,50 @@ async fn handle_callback(
     ))
 }
 
+/// Minimal status page.  `msg` can carry attacker-controlled query
+/// parameters (`error`, `error_description`), so it is HTML-escaped and
+/// the page ships a CSP that forbids every script, style and subresource.
 fn html_response(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
-    Response::builder()
-        .status(status)
-        .header("Content-Type", "text/html; charset=utf-8")
-        .body(Full::new(Bytes::from(format!(
-            "<html><body><h1>{msg}</h1></body></html>"
-        ))))
-        .unwrap()
+    let msg = escape_html(msg);
+    let mut resp = Response::new(Full::new(Bytes::from(format!(
+        "<!doctype html><html><body><h1>{msg}</h1></body></html>"
+    ))));
+    *resp.status_mut() = status;
+    let headers = resp.headers_mut();
+    headers.insert(
+        hyper::header::CONTENT_TYPE,
+        hyper::header::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        hyper::header::CONTENT_SECURITY_POLICY,
+        hyper::header::HeaderValue::from_static(
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+        ),
+    );
+    headers.insert(
+        hyper::header::X_CONTENT_TYPE_OPTIONS,
+        hyper::header::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        hyper::header::REFERRER_POLICY,
+        hyper::header::HeaderValue::from_static("no-referrer"),
+    );
+    resp
+}
+
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 // --- Token persistence ---
@@ -596,6 +632,35 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(rx.await.unwrap(), "abc");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn callback_error_page_escapes_reflected_params() {
+        // SEC-11: `error` / `error_description` are attacker-controlled
+        // query params reflected into the page.
+        let (port, handle, _) = start_callback_server("s", Duration::from_secs(5))
+            .await
+            .unwrap();
+        let resp = crate::http::client()
+            .get(format!(
+                "http://127.0.0.1:{port}/callback?error=%3Cscript%3Ealert(1)%3C%2Fscript%3E&error_description=%3Cimg%20src%3Dx%3E"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+        let csp = resp
+            .headers()
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(csp.contains("default-src 'none'"), "missing CSP: {csp:?}");
+        let body = resp.text().await.unwrap();
+        assert!(!body.contains("<script>"), "unescaped: {body}");
+        assert!(!body.contains("<img"), "unescaped: {body}");
+        assert!(body.contains("&lt;script&gt;"), "{body}");
         handle.abort();
     }
 

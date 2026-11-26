@@ -36,6 +36,27 @@ pub mod disk;
 pub use coalesce::CoalescingPersister;
 pub use disk::DiskChatHistory;
 
+/// Refuse chat ids that are not one ordinary path component.
+///
+/// Disk-backed stores lay chats out as `{dir}/{chat_id}/…`, and
+/// `Path::join` does not sanitise `..`, separators or NULs, so an id
+/// like `..` or `../x` would read or write outside `dir`.  Every real
+/// id (`c-0001`, Telegram's `-100…`, `bg-7`, UUIDs) passes.
+pub fn validate_chat_id(chat_id: &str) -> dyson_core::Result<()> {
+    let ok = !chat_id.is_empty()
+        && chat_id.len() <= 255
+        && chat_id != "."
+        && chat_id != ".."
+        && !chat_id.bytes().any(|b| b == b'/' || b == b'\\' || b == 0);
+    if ok {
+        Ok(())
+    } else {
+        Err(dyson_core::DysonError::Config(format!(
+            "invalid chat id {chat_id:?}"
+        )))
+    }
+}
+
 fn resolve_tilde(path: &str) -> std::path::PathBuf {
     if let Some(rest) = path.strip_prefix("~/")
         && let Ok(home) = std::env::var("HOME")

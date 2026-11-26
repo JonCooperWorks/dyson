@@ -90,7 +90,7 @@ impl Tool for SearchFilesTool {
             }
             None
         } else {
-            match regex::Regex::new(pattern_str) {
+            match crate::util::bounded_regex(pattern_str, false) {
                 Ok(r) => Some(r),
                 Err(e) => return Ok(ToolOutput::error(format!("invalid regex: {e}"))),
             }
@@ -319,6 +319,23 @@ fn line_at_byte(source: &str, byte: usize) -> (usize, &str) {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn oversized_regex_is_rejected() {
+        // SEC-22: user regexes compile under a tight size budget.
+        // `\w` is Unicode-aware, so 100 repetitions compile to well over
+        // 1 MiB (but under the regex crate's 10 MiB default).
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "hello").unwrap();
+        let out = SearchFilesTool
+            .run(
+                &serde_json::json!({"pattern": "\\w{100}"}),
+                &crate::tool::ToolContext::for_test(tmp.path()),
+            )
+            .await
+            .unwrap();
+        assert!(out.is_error, "oversized regex accepted: {}", out.content);
+    }
     use super::*;
     use crate::tool::ToolContext;
 

@@ -1,10 +1,12 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { app, setTool } from './app.js';
 import {
   sessions,
   getSession,
   ensureSession,
   updateSession,
   deleteSession,
+  trackObjectUrl,
   makeSession,
   mintToolRef,
   getResources,
@@ -64,6 +66,26 @@ describe('sessions store — ensure + update isolation', () => {
     expect(getSession('c1').tname).toBe('bash');
     expect(getSession('c2').running).toBe(false);
     expect(getSession('c2').tname).toBe('diff');
+  });
+
+  it('deleteSession revokes object URLs and prunes the chat\'s tools (MEM-05)', () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    ensureSession('c1');
+    ensureSession('c2');
+    trackObjectUrl('c1', 'blob:one');
+    trackObjectUrl('c2', 'blob:two');
+    updateSession('c1', s => ({ ...s, liveTurns: [{ role: 'agent', ts: '', blocks: [{ type: 'tool', ref: 'srv-tool-9' }] }] }));
+    setTool('c1-live-1', { name: 'bash' });
+    setTool('srv-tool-9', { name: 'read_file' });
+    setTool('c2-live-1', { name: 'bash' });
+    deleteSession('c1');
+    expect(revoke).toHaveBeenCalledWith('blob:one');
+    expect(revoke).not.toHaveBeenCalledWith('blob:two');
+    const tools = app.getSnapshot().tools;
+    expect(tools['c1-live-1']).toBeUndefined();
+    expect(tools['srv-tool-9']).toBeUndefined();
+    expect(tools['c2-live-1']).toBeDefined();
+    revoke.mockRestore();
   });
 
   it('deleteSession removes the session from the snapshot', () => {

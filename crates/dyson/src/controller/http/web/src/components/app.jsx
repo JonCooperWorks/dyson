@@ -18,7 +18,7 @@ import { CommandPalette } from './command-palette.jsx';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession, useSessionMutator } from '../hooks/useSession.js';
-import { useEscapeKey, downloadBlob } from 'dyson-common-ui';
+import { useEscapeKey, downloadBlob, useConfirm } from 'dyson-common-ui';
 import {
   setTool, updateTool, mergeTools, upsertConversation,
   switchProviderModel,
@@ -31,6 +31,7 @@ import {
   mapLastTurn, appendBlock, mapAgentTail, appendAgentBlock, settleRun,
   pushUserMessage, admitUserMessage, openPanel, closePanel,
   closeAllPanels, setComposerDraft, setQueueMode, setNextRunModel,
+  replaceStream, trackObjectUrl,
 } from '../store/sessions.js';
 
 const MindView = lazy(() =>
@@ -405,6 +406,8 @@ function ConversationView({ conv, setConv, toolRef, setToolRef }) {
   const [runControlError, setRunControlError] = useState('');
   const [pendingControl, setPendingControl] = useState('');
   const [showLatest, setShowLatest] = useState(false);
+  // In-app dialog for errors the user must see (no native alert()).
+  const [showNotice, noticeModal] = useConfirm();
 
   useEffect(() => {
     if (!conv || !client.getRun) return;
@@ -424,7 +427,7 @@ function ConversationView({ conv, setConv, toolRef, setToolRef }) {
         if (!active) return;
         if (data.live && !getSession(conv)?.running) {
           hydrateTranscript(conv, data);
-          getResources(conv).es = attachLiveStream(conv, client);
+          replaceStream(conv, attachLiveStream(conv, client));
         } else if (!data.live) {
           getResources(conv).es?.close();
           getResources(conv).es = null;
@@ -438,8 +441,15 @@ function ConversationView({ conv, setConv, toolRef, setToolRef }) {
     setPendingControl('');
     setShowLatest(false);
     refresh();
-    const timer = setInterval(refresh, 2000);
-    return () => { active = false; clearInterval(timer); };
+    // Background tabs don't poll; returning to the tab refreshes at once.
+    const tick = () => { if (!document.hidden) refresh(); };
+    const timer = setInterval(tick, 2000);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      active = false;
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', tick);
+    };
   }, [conv, client]);
 
   const controlRun = async (action) => {
@@ -513,7 +523,7 @@ function ConversationView({ conv, setConv, toolRef, setToolRef }) {
       // mute while the agent runs to completion in the background —
       // the original "mid-stream reload blanks the chat" symptom.
       if (data && data.live) {
-        getResources(conv).es = attachLiveStream(conv, client);
+        replaceStream(conv, attachLiveStream(conv, client));
       }
     }).catch(() => {});
   }, [conv, client]);
@@ -536,7 +546,9 @@ function ConversationView({ conv, setConv, toolRef, setToolRef }) {
     if (shouldForceScroll) {
       updateSession(conv, s => s.justScrollOnNextRender ? { ...s, justScrollOnNextRender: false } : s);
     }
-  });
+    // Content height only changes with the session (turns) or the tool
+    // map (streamed tool output) — not on unrelated local state.
+  }, [conv, session, tools]);
 
   const handleOpenTool = (ref) => {
     if (!session) return;
@@ -606,7 +618,7 @@ function ConversationView({ conv, setConv, toolRef, setToolRef }) {
       type: 'file', name: f.name,
       mime: f.type || 'application/octet-stream',
       size: f.size,
-      url: f.type?.startsWith('image/') ? URL.createObjectURL(f) : null,
+      url: f.type?.startsWith('image/') ? trackObjectUrl(activeConv, URL.createObjectURL(f)) : null,
       local: true,
     }))];
     // The merge-or-push decision lives in `pushUserMessage` so it can
@@ -625,13 +637,13 @@ function ConversationView({ conv, setConv, toolRef, setToolRef }) {
       ...(queued ? { queueMode } : {}),
       ...(nextRunModel ? { model: nextRunModel } : {}),
     };
-    getResources(activeConv).es = client.send(
+    replaceStream(activeConv, client.send(
       activeConv,
       val,
       streamCallbacks(activeConv),
       files,
       sendOptions,
-    );
+    ));
   };
 
   const onCancel = async () => {
@@ -673,10 +685,19 @@ function ConversationView({ conv, setConv, toolRef, setToolRef }) {
   const empty = session.liveTurns.length === 0 && !session.running;
 
   const onExport = () => client.exportConversation(conv).then(blob => downloadBlob(blob, `${conv}.sharegpt.json`))
-    .catch(e => { console.warn('[dyson] export failed', e); alert(`Export failed: ${e.message || e}`); });
+    .catch(e => {
+      console.warn('[dyson] export failed', e);
+      showNotice({
+        title: 'Export failed',
+        message: `Export failed: ${e.message || e}`,
+        confirmLabel: 'OK',
+        cancelLabel: 'Close',
+      });
+    });
 
   return (
     <div className={`centre${empty ? ' empty' : ''}`}>
+      {noticeModal}
       <div className="aurora-sweep" aria-hidden="true"/>
       <div className="context">
         <div className="crumbs"><span className="context-label">Conversation</span><span className="c-leaf" title={headTitle}>{convTitle || 'New conversation'}</span></div>

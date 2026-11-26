@@ -486,16 +486,62 @@ const mdParser = new MarkdownIt({
   langPrefix: 'lang-',
 });
 
+// A path on this origin.  `//host` and `/\\host` are protocol-relative
+// (browsers treat the backslash as a slash), i.e. another origin.
+function isSameOriginPath(url) {
+  const t = String(url || '').trim();
+  return t.startsWith('/') && !t.startsWith('//') && !t.startsWith('/\\');
+}
+
+// URL for an href on an agent-produced block: same-origin paths, local
+// upload previews (blob:) and https.  Anything else (javascript:, data:,
+// protocol-relative) yields null and the link is not rendered.
+function safeLinkUrl(url) {
+  if (typeof url !== 'string') return null;
+  const t = url.trim();
+  const l = t.toLowerCase();
+  if (isSameOriginPath(t) || l.startsWith('blob:') || l.startsWith('https://')) return t;
+  return null;
+}
+
+// URL for an <img>/<audio> src: same-origin or blob: only, so agent
+// output cannot make the browser fetch a remote (tracking) URL.
+function safeMediaUrl(url) {
+  if (typeof url !== 'string') return null;
+  const t = url.trim();
+  if (isSameOriginPath(t) || t.toLowerCase().startsWith('blob:')) return t;
+  return null;
+}
+
 // https-only link allowlist — the prior parser enforced this so
 // the chat UI can't surface javascript:/data: URLs from agent output.
-// Fragment and root-relative links stay.
+// Fragment and same-origin links stay; protocol-relative ones do not.
 const defaultValidateLink = mdParser.validateLink.bind(mdParser);
 mdParser.validateLink = (url) => {
   const t = String(url).trim().toLowerCase();
-  if (t.startsWith('https://') || t.startsWith('#') || t.startsWith('/')) {
+  if (t.startsWith('https://') || t.startsWith('#') || isSameOriginPath(t)) {
     return defaultValidateLink(url);
   }
   return false;
+};
+
+// Links from agent output never hand this page to the target
+// (window.opener) or leak it in Referer.
+const defaultLinkOpen = mdParser.renderer.rules.link_open
+  || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+mdParser.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  tokens[idx].attrSet('rel', 'noopener noreferrer');
+  return defaultLinkOpen(tokens, idx, options, env, self);
+};
+
+// Inline images load only from this origin; a remote image would be a
+// tracking pixel the model can point at any URL.  Render its alt text.
+const defaultImage = mdParser.renderer.rules.image;
+mdParser.renderer.rules.image = (tokens, idx, options, env, self) => {
+  if (!isSameOriginPath(tokens[idx].attrGet('src'))) {
+    return mdParser.utils.escapeHtml(tokens[idx].content || '');
+  }
+  return defaultImage(tokens, idx, options, env, self);
 };
 
 function markdown(s) {
@@ -516,20 +562,22 @@ function markdown(s) {
 //   { type:'file', name, mime, size?, url, inline?, local? }
 function FileBlock({ block }) {
   const isImage = (block.mime || '').startsWith('image/') || block.inline;
-  if (isImage && block.url) {
+  const mediaUrl = safeMediaUrl(block.url);
+  const linkUrl = safeLinkUrl(block.url);
+  if (isImage && mediaUrl) {
     return (
-      <a href={block.url} target="_blank" rel="noopener" className="fileblock image">
-        <img src={block.url} alt={block.name || 'image'}/>
+      <a href={mediaUrl} target="_blank" rel="noopener noreferrer" className="fileblock image">
+        <img src={mediaUrl} alt={block.name || 'image'}/>
         <span className="cap">{block.name}{block.local ? ' · uploaded' : ''}</span>
       </a>
     );
   }
   // Audio (the `speak` tool's speech): an inline player.
-  if ((block.mime || '').startsWith('audio/') && block.url) {
+  if ((block.mime || '').startsWith('audio/') && mediaUrl) {
     return (
       <div className="fileblock audio">
-        <audio controls preload="metadata" src={block.url}/>
-        <a href={block.url} target="_blank" rel="noopener" className="dl mono">download</a>
+        <audio controls preload="metadata" src={mediaUrl}/>
+        <a href={mediaUrl} target="_blank" rel="noopener noreferrer" className="dl mono">download</a>
       </div>
     );
   }
@@ -541,7 +589,7 @@ function FileBlock({ block }) {
       <Icon name="file" size={14}/>
       <span className="name">{block.name || 'file'}</span>
       {typeof block.size === 'number' && <span className="sz mono">{prettySize(block.size)}</span>}
-      {block.url && <a href={block.url} target="_blank" rel="noopener" className="dl mono">download</a>}
+      {linkUrl && <a href={linkUrl} target="_blank" rel="noopener noreferrer" className="dl mono">download</a>}
     </div>
   );
 }
@@ -565,7 +613,8 @@ function ArtefactBlock({ block, chatId }) {
   // Deep-link to the reader, used as the href fallback so cmd-click
   // always has somewhere sensible to go — never `#` (which would jump
   // the page to the top).
-  const reader = block.url || (block.id ? `/#/artefacts/${encodeURIComponent(block.id)}` : '#');
+  const deepLink = isSameOriginPath(block.url) ? block.url.trim() : null;
+  const reader = deepLink || (block.id ? `/#/artefacts/${encodeURIComponent(block.id)}` : '#');
   const [src, setSrc] = useState('');
 
   useEffect(() => {
@@ -576,7 +625,7 @@ function ArtefactBlock({ block, chatId }) {
     let cancelled = false;
     fetch(`/api/conversations/${encodeURIComponent(chatId)}/artefacts/${encodeURIComponent(block.id)}`)
       .then(r => r.ok ? r.text() : Promise.reject(r.status))
-      .then(text => { if (!cancelled) setSrc(text.trim()); })
+      .then(text => { if (!cancelled) setSrc(safeMediaUrl(text) || ''); })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [block.kind, block.id, chatId]);
@@ -588,7 +637,7 @@ function ArtefactBlock({ block, chatId }) {
     // itself in a new tab — which is what users reach for on an image.
     return (
       <div className="artefact-chat-block image">
-        <a href={src || reader} target="_blank" rel="noopener" onClick={open}
+        <a href={src || reader} target="_blank" rel="noopener noreferrer" onClick={open}
            className="fileblock image" title={block.title || 'image'}>
           {src
             ? <img src={src} alt={block.title || 'image'}/>
@@ -673,7 +722,7 @@ function ArtefactShareControl({ block, chatId }) {
       )}
       {shareUrl && (
         <>
-          <a className="artefact-share-link mono" href={shareUrl} target="_blank" rel="noopener">
+          <a className="artefact-share-link mono" href={shareUrl} target="_blank" rel="noopener noreferrer">
             share link
           </a>
           <button className="btn xs ghost" onClick={copyShareUrl}>

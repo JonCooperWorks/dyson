@@ -279,33 +279,9 @@ impl Tool for OrchestratorTool {
             }
         }
 
-        // Validate + canonicalize the optional scope path before handing it
-        // to the child.  `canonicalize` also implicitly checks existence.
-        let scoped_dir = if parsed.path.is_empty() {
-            None
-        } else {
-            let requested = std::path::PathBuf::from(&parsed.path);
-            let resolved = if requested.is_absolute() {
-                requested
-            } else {
-                ctx.working_dir.join(&requested)
-            };
-            let canonical = match resolved.canonicalize() {
-                Ok(p) => p,
-                Err(e) => {
-                    return Ok(ToolOutput::error(format!(
-                        "path '{}' cannot be resolved: {e}",
-                        parsed.path
-                    )));
-                }
-            };
-            if !canonical.is_dir() {
-                return Ok(ToolOutput::error(format!(
-                    "path '{}' is not a directory",
-                    parsed.path
-                )));
-            }
-            Some(canonical)
+        let scoped_dir = match resolve_scope_dir(ctx, &parsed.path) {
+            Ok(dir) => dir,
+            Err(out) => return Ok(out),
         };
 
         let user_message = if self.config.harness == Some(OrchestratorHarness::PenetrationTest) {
@@ -654,6 +630,31 @@ impl Tool for OrchestratorTool {
 
 /// Format an integer with `k` / `M` suffix for human-readable token
 /// counts.  Used in checkpoint messages where real estate is tight.
+/// Validate + canonicalize the optional scope path before handing it
+/// to the child.  Goes through [`ToolContext::resolve_path`] so the scope
+/// is confined to the working directory exactly like every file tool
+/// (honouring `--dangerous-no-sandbox`); `canonicalize` then checks
+/// existence.
+#[allow(clippy::result_large_err)]
+fn resolve_scope_dir(
+    ctx: &ToolContext,
+    path: &str,
+) -> std::result::Result<Option<std::path::PathBuf>, ToolOutput> {
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let resolved = ctx.resolve_path(path)?;
+    let canonical = resolved
+        .canonicalize()
+        .map_err(|e| ToolOutput::error(format!("path '{path}' cannot be resolved: {e}")))?;
+    if !canonical.is_dir() {
+        return Err(ToolOutput::error(format!(
+            "path '{path}' is not a directory"
+        )));
+    }
+    Ok(Some(canonical))
+}
+
 fn kfmt(n: usize) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", (n as f64) / 1_000_000.0)
@@ -935,7 +936,31 @@ pub(crate) fn apply_pentest_preflight_result(
 
 #[cfg(test)]
 mod pentest_report_tests {
-    use super::{extract_pentest_findings, pentest_severity_rollup, pentest_target_label};
+    use super::{
+        ToolContext, extract_pentest_findings, pentest_severity_rollup, pentest_target_label,
+        resolve_scope_dir,
+    };
+
+    #[test]
+    fn scope_dir_is_confined_to_working_dir() {
+        // SEC-02: the subagent scope path must go through the same
+        // confinement as every other file tool.
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(wd.join("src")).unwrap();
+        let ctx = ToolContext::for_test(&wd);
+        assert!(
+            resolve_scope_dir(&ctx, "/").is_err(),
+            "absolute escape accepted"
+        );
+        assert!(
+            resolve_scope_dir(&ctx, "..").is_err(),
+            "parent escape accepted"
+        );
+        let ok = resolve_scope_dir(&ctx, "src").ok().flatten().unwrap();
+        assert_eq!(ok, wd.join("src").canonicalize().unwrap());
+        assert!(matches!(resolve_scope_dir(&ctx, ""), Ok(None)));
+    }
 
     #[test]
     fn pentest_target_label_strips_scheme_userinfo_and_path() {

@@ -190,8 +190,29 @@ pub fn default_policy(tool_name: &str, working_dir: &Path) -> SandboxPolicy {
             file_write: PathAccess::Deny,
             process_exec: Access::Deny,
         },
+        // Code edit tool: read + write inside the working directory.
+        "bulk_edit" => SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::RestrictTo(vec![cwd.clone()]),
+            file_write: PathAccess::RestrictTo(vec![cwd]),
+            process_exec: Access::Deny,
+        },
+        // Static-analysis tools: read-only inside the working directory.
+        "ast_describe" | "ast_query" | "attack_surface_analyzer" | "taint_trace" => SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::RestrictTo(vec![cwd]),
+            file_write: PathAccess::Deny,
+            process_exec: Access::Deny,
+        },
+        // Reads a manifest in the working directory and queries OSV.
+        "dependency_scan" => SandboxPolicy {
+            network: Access::Allow,
+            file_read: PathAccess::RestrictTo(vec![cwd]),
+            file_write: PathAccess::Deny,
+            process_exec: Access::Deny,
+        },
         // Workspace and memory tools are internal — always allowed.
-        "workspace" | "memory_search" => SandboxPolicy {
+        "workspace" | "memory_search" | "skill_create" => SandboxPolicy {
             network: Access::Deny,
             file_read: PathAccess::Allow,
             file_write: PathAccess::Allow,

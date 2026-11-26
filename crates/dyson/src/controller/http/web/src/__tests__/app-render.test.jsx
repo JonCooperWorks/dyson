@@ -70,3 +70,39 @@ describe('App render', () => {
     expect(preview.textContent).toContain('skill_echo');
   });
 });
+
+describe('run-state polling (PERF-01)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    delete document.hidden;
+  });
+
+  it('skips the 2 s run poll while the tab is hidden', async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    const client = {
+      ...stubClient(),
+      getRun: vi.fn(async () => ({ run_id: 'r1', state: { state: 'completed' }, answer_received: false })),
+    };
+    renderApp(client);
+    await vi.advanceTimersByTimeAsync(10_000);
+    // The mount-time refresh may run once; the interval must not.
+    expect(client.getRun.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('export failure (Phase 4: no native dialogs)', () => {
+  it('reports a failed export in an in-app dialog, not window.alert', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const client = {
+      ...stubClient(),
+      exportConversation: vi.fn(async () => { throw new Error('disk on fire'); }),
+    };
+    renderApp(client);
+    fireEvent.click(screen.getByLabelText('Download ShareGPT export'));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.textContent).toContain('disk on fire');
+    expect(alertSpy).not.toHaveBeenCalled();
+    alertSpy.mockRestore();
+  });
+});

@@ -34,7 +34,7 @@ pub fn find_replace(
     dry_run: bool,
 ) -> Result<ToolOutput> {
     let compiled = if use_regex {
-        match Regex::new(pattern) {
+        match crate::util::bounded_regex(pattern, false) {
             Ok(r) => Some(r),
             Err(e) => {
                 return Ok(ToolOutput::error(format!("invalid regex pattern: {e}")));
@@ -191,7 +191,7 @@ pub fn validate(
     if !use_regex && pattern == replacement {
         return Err("pattern and replacement are identical — nothing to do".into());
     }
-    if use_regex && let Err(e) = Regex::new(pattern) {
+    if use_regex && let Err(e) = crate::util::bounded_regex(pattern, false) {
         return Err(format!("invalid regex pattern: {e}"));
     }
     Ok(())

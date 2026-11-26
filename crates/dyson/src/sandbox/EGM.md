@@ -21,6 +21,10 @@ The security gate between the LLM and tool execution. Every tool call goes throu
 - If the OS backend (`bwrap` on Linux, `container` on macOS) is missing or the platform is unsupported, the process exits with status 1 rather than running unsandboxed [mod.rs:create_sandbox]
 - Cedar only narrows what the inner sandbox allows; `audit` mode logs would-deny decisions, `enforce` mode turns a Cedar deny into `SandboxDecision::Deny`. Cedar stays active even when the OS sandbox is disabled [cedar_sandbox.rs:CedarSandbox, mod.rs:create_sandbox]
 - Sandboxed output is truncated to `MAX_OUTPUT_CHARS = 100_000` [mod.rs:MAX_OUTPUT_CHARS, policy_sandbox.rs:PolicySandbox]
+- `PolicySandbox` checks the paths of `bulk_edit` (read+write), `ast_describe` / `ast_query` / `attack_surface_analyzer` / `dependency_scan` (`path`, read) and `taint_trace` (`source.file` / `sink.file`, read) against the file policies; `dependency_scan` and `image_generate` also need network; `skill_create` is internal like `workspace` [policy_sandbox.rs:check_named_paths, policy.rs:default_policy]
+- `resolve_canonical` canonicalises each existing prefix before applying a following `..` (as the kernel does); only the nonexistent tail is normalised lexically [policy_sandbox.rs:resolve_canonical]
+- Cedar judges every path in `file_path`, `path`, `source.file` and `sink.file`, and derives `host` the way the HTTP client parses the URL [cedar_sandbox.rs:path_candidates, cedar_sandbox.rs:url_host]
+- Tool instances handed to CLI providers (called through the in-process MCP server, outside the agent loop) are wrapped by `gate_tools` so they still pass `check` / `after` [mod.rs:gate_tools]
 - bwrap mounts include essential system dirs `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64` [os.rs:ESSENTIAL_SYSTEM_DIRS]
 
 ## Side Effects

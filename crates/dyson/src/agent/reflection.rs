@@ -141,6 +141,9 @@ pub(super) async fn run_mini_loop(
         .map(|t| (t.name().to_string(), t))
         .collect();
 
+    // CLI providers call these outside the executor; keep them gated.
+    let forwarded_tools = crate::sandbox::gate_tools(&tool_map, &ctx.sandbox);
+
     let settings = crate::config::AgentSettings {
         api_key: "background".into(),
         ..Default::default()
@@ -198,7 +201,14 @@ pub(super) async fn run_mini_loop(
             let response = super::task::budget::ACTIVE
                 .scope(
                     ctx.tool_context.harness.clone(),
-                    client.stream(&messages, system_prompt, "", &tool_defs, &tool_map, &config),
+                    client.stream(
+                        &messages,
+                        system_prompt,
+                        "",
+                        &tool_defs,
+                        &forwarded_tools,
+                        &config,
+                    ),
                 )
                 .await?;
             let observed_input = response.input_tokens;

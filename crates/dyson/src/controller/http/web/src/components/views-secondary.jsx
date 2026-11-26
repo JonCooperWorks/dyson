@@ -921,7 +921,7 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, client: cli
             </span>
           ) : (
             <>
-              <a className="artefact-share-link mono" href={shareUrl} target="_blank" rel="noopener">
+              <a className="artefact-share-link mono" href={shareUrl} target="_blank" rel="noopener noreferrer">
                 share link
               </a>
               <button className="btn xs ghost" onClick={copyShareUrl}>

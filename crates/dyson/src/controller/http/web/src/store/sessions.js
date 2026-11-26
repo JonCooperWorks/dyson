@@ -13,6 +13,7 @@
  * don't belong in a snapshot and can't meaningfully be frozen anyway. */
 
 import { createStore } from 'dyson-common-ui';
+import { app } from './app.js';
 
 export function makeSession() {
   return {
@@ -74,6 +75,7 @@ export function updateSession(chatId, reducer) {
 }
 
 export function deleteSession(chatId) {
+  pruneToolsForChat(chatId, getSession(chatId));
   sessions.dispatch(state => {
     if (!(chatId in state)) return state;
     const next = { ...state };
@@ -89,8 +91,44 @@ const resources = new Map();
 
 export function getResources(chatId) {
   let r = resources.get(chatId);
-  if (!r) { r = { es: null, counter: 0 }; resources.set(chatId, r); }
+  if (!r) { r = { es: null, counter: 0, objectUrls: new Set() }; resources.set(chatId, r); }
   return r;
+}
+
+// Swap a chat's stream handle, closing the previous one so a re-send or
+// re-attach never leaves an orphaned EventSource dispatching into the
+// same session.
+export function replaceStream(chatId, next) {
+  const r = getResources(chatId);
+  if (r.es && r.es !== next) {
+    try { r.es.close(); } catch { /* closed already */ }
+  }
+  r.es = next;
+  return next;
+}
+
+// Remember a `URL.createObjectURL` handle (local attachment previews) so
+// deleting the chat releases the underlying Blob.
+export function trackObjectUrl(chatId, url) {
+  if (chatId && url) getResources(chatId).objectUrls.add(url);
+  return url;
+}
+
+// Drop the chat's entries from `app.tools`: refs minted for it (prefixed
+// `<chatId>-`) and server-issued refs its turns point at.
+function pruneToolsForChat(chatId, session) {
+  const refs = new Set();
+  for (const turn of session?.liveTurns || []) {
+    for (const b of turn.blocks || []) if (b && b.type === 'tool' && b.ref) refs.add(b.ref);
+  }
+  const prefix = `${chatId}-`;
+  app.dispatch(s => {
+    const keys = Object.keys(s.tools).filter(k => k.startsWith(prefix) || refs.has(k));
+    if (!keys.length) return s;
+    const tools = { ...s.tools };
+    for (const k of keys) delete tools[k];
+    return { ...s, tools };
+  });
 }
 
 // Generates the next chat-id-prefixed tool ref.  Prefix prevents two
@@ -105,6 +143,9 @@ function disposeResources(chatId) {
   const r = resources.get(chatId);
   if (!r) return;
   if (r.es) { try { r.es.close(); } catch { /* closed already */ } }
+  for (const url of r.objectUrls || []) {
+    try { URL.revokeObjectURL(url); } catch { /* not a blob URL */ }
+  }
   resources.delete(chatId);
 }
 

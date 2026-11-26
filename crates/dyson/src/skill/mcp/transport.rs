@@ -323,8 +323,37 @@ pub struct StdioTransport {
     /// across an `.await`.
     inbound: Arc<std::sync::Mutex<Arc<dyn InboundHandler>>>,
     _child: Arc<Mutex<Child>>,
+    /// Bounds requests in flight to one server (each holds a pending
+    /// entry and possibly a large serialized frame).
+    inflight: Arc<tokio::sync::Semaphore>,
     /// Background task handles — aborted on drop to prevent orphaned tasks.
     _reader_handle: tokio::task::JoinHandle<()>,
+}
+
+/// Concurrent requests allowed per stdio MCP server.
+const MAX_STDIO_INFLIGHT: usize = 64;
+
+/// Removes a request's pending entry however `send_request` exits —
+/// error return, timeout, or the caller dropping the future.
+struct PendingGuard {
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<PendingResponse>>>>,
+    id: u64,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        let id = self.id;
+        if let Ok(mut pending) = self.pending.try_lock() {
+            pending.remove(&id);
+            return;
+        }
+        let pending = Arc::clone(&self.pending);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                pending.lock().await.remove(&id);
+            });
+        }
+    }
 }
 
 impl StdioTransport {
@@ -347,7 +376,14 @@ impl StdioTransport {
     ) -> Result<Self> {
         let (exec, exec_args) = Self::resolve_exec(command, args, sandbox, deny_network)?;
         let mut cmd = Command::new(&exec);
+        // Start from an empty environment: the server gets the same
+        // allowlisted parent vars as `bash` (PATH, HOME, locale, proxy…)
+        // plus whatever its config names explicitly — never Dyson's
+        // provider keys or swarm tokens.  bwrap passes its own env
+        // through, so this also covers the sandboxed path.
         cmd.args(&exec_args)
+            .env_clear()
+            .envs(std::env::vars().filter(|(k, _)| crate::tool::bash::is_safe_env_var(k)))
             .envs(env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -385,7 +421,16 @@ impl StdioTransport {
             loop {
                 let line = match read_line_capped(&mut reader, MAX_MCP_RESULT_BYTES).await {
                     Ok(Some(line)) => line,
-                    Ok(None) => break,
+                    Ok(None) => {
+                        // The server closed stdout: nothing will answer the
+                        // callers still waiting, so fail them now instead of
+                        // leaving them on the response timeout.
+                        let mut pending = pending_clone.lock().await;
+                        for (_, tx) in pending.drain() {
+                            let _ = tx.send(Err("MCP server closed its output".into()));
+                        }
+                        break;
+                    }
                     Err(e) => {
                         let message = e.to_string();
                         tracing::warn!(
@@ -474,6 +519,7 @@ impl StdioTransport {
             pending,
             inbound,
             _child: Arc::new(Mutex::new(child)),
+            inflight: Arc::new(tokio::sync::Semaphore::new(MAX_STDIO_INFLIGHT)),
             _reader_handle: reader_handle,
         })
     }
@@ -573,17 +619,23 @@ impl McpTransport for StdioTransport {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<serde_json::Value> {
+        let _permit = self.inflight.acquire().await.map_err(|_| DysonError::Mcp {
+            server: method.to_string(),
+            message: "transport closed".into(),
+        })?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = JsonRpcRequest::new(id, method, params);
-
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().await;
-            pending.insert(id, tx);
-        }
-
         let json = serde_json::to_string(&request)?;
         enforce_mcp_request_cap(method, &json)?;
+
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id, tx);
+        // From here on every exit path (including the caller dropping
+        // this future) removes the entry.
+        let _guard = PendingGuard {
+            pending: Arc::clone(&self.pending),
+            id,
+        };
         write_line(&self.stdin, method, &json).await?;
 
         /// Maximum time to wait for an MCP server to respond to a request.
@@ -702,7 +754,10 @@ impl HttpTransport {
     /// `auth` applies authentication headers to every request.
     pub fn new(url: &str, auth: Box<dyn crate::auth::Auth>) -> Self {
         Self {
-            client: crate::http::client().clone(),
+            // No redirects: reqwest only strips `Authorization` on a
+            // cross-origin hop, so an `ApiKeyAuth` / `StaticHeadersAuth`
+            // header would be replayed to wherever the server points us.
+            client: crate::http::no_redirect_client().clone(),
             url: url.to_string(),
             auth,
             next_id: AtomicU64::new(1),
@@ -1285,6 +1340,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stdio_server_gets_allowlisted_env_only() {
+        // SEC-12: an MCP server must not inherit Dyson's whole
+        // environment (provider keys, swarm tokens).  Cargo sets
+        // CARGO_MANIFEST_DIR for the test process — not on the
+        // allowlist, so it stands in for a secret here.
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let mut env = HashMap::new();
+        env.insert("MY_CFG".to_string(), "configured".to_string());
+        let transport = StdioTransport::spawn(
+            "sh",
+            &[
+                "-c".to_string(),
+                r#"while IFS= read -r line; do
+                    id=$(echo "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+                    echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"leak\":\"${CARGO_MANIFEST_DIR:+leaked}\",\"cfg\":\"${MY_CFG:-}\",\"path\":\"${PATH:+set}\"}}"
+                done"#
+                    .to_string(),
+            ],
+            &env,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let result = transport.send_request("env", None).await.unwrap();
+        assert_eq!(result["leak"], "", "parent env leaked: {result}");
+        assert_eq!(result["cfg"], "configured");
+        assert_eq!(result["path"], "set");
+    }
+
+    #[tokio::test]
+    async fn stdio_failed_send_leaves_no_pending_entry() {
+        // MEM-09: an oversized request bailed out via `?` after the
+        // pending entry was registered, leaking it forever.
+        let transport = spawn_echo_server().await;
+        let huge = "x".repeat(MAX_MCP_REQUEST_BYTES + 1);
+        let err = transport
+            .send_request("tools/call", Some(serde_json::json!({ "blob": huge })))
+            .await
+            .expect_err("oversized request must fail");
+        assert!(err.to_string().contains("too large"), "{err}");
+        assert!(
+            transport.pending.lock().await.is_empty(),
+            "pending entry leaked"
+        );
+    }
+
+    #[tokio::test]
+    async fn stdio_server_exit_fails_pending_requests_promptly() {
+        // MEM-09: when the server exits without answering, waiting
+        // callers used to sit on their pending entry for the full 120 s
+        // response timeout.
+        let transport = StdioTransport::spawn(
+            "sh",
+            &["-c".to_string(), "read line; exit 0".to_string()],
+            &HashMap::new(),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            transport.send_request("tools/list", None),
+        )
+        .await
+        .expect("send_request should fail promptly once the server exits");
+        assert!(result.is_err());
+        assert!(transport.pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn stdio_stdout_frame_above_result_cap_fails_explicitly() {
         let mut reader = BufReader::new(tokio::io::repeat(b'a'));
         let err = read_line_capped(&mut reader, MAX_MCP_RESULT_BYTES)
@@ -1343,6 +1470,78 @@ mod tests {
         assert!(
             err.to_string().contains(MCP_RESULT_TOO_LARGE_MESSAGE),
             "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_transport_does_not_follow_redirects() {
+        // SEC-22: auth headers (custom API-key headers included) must not
+        // be replayed to wherever an MCP server redirects us.  Locally the
+        // shared redirect policy already refuses `localhost`, so this pins
+        // the behaviour rather than reproducing a public-host redirect.
+        use std::convert::Infallible;
+        use std::sync::atomic::AtomicUsize;
+
+        use http_body_util::Full;
+        use hyper::body::{Bytes, Incoming};
+        use hyper::service::service_fn;
+        use hyper::{Request, Response};
+        use hyper_util::rt::TokioIo;
+
+        let target_hits = Arc::new(AtomicUsize::new(0));
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_port = target.local_addr().unwrap().port();
+        let hits = Arc::clone(&target_hits);
+        let target_task = tokio::spawn(async move {
+            while let Ok((stream, _)) = target.accept().await {
+                let hits = Arc::clone(&hits);
+                let service = service_fn(move |_req: Request<Incoming>| {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(
+                            br#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+                        ))))
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            }
+        });
+
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let origin_task = tokio::spawn(async move {
+            while let Ok((stream, _)) = origin.accept().await {
+                let service = service_fn(move |_req: Request<Incoming>| async move {
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .status(307)
+                            // A hostname, so the private-IP redirect filter
+                            // does not catch it on its own.
+                            .header("location", format!("http://localhost:{target_port}/mcp"))
+                            .body(Full::new(Bytes::new()))
+                            .unwrap(),
+                    )
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            }
+        });
+
+        let transport = HttpTransport::new(
+            &format!("http://{origin_addr}/mcp"),
+            Box::new(crate::auth::DangerousNoAuth),
+        );
+        let result = transport.send_request("tools/list", None).await;
+        origin_task.abort();
+        target_task.abort();
+        assert!(result.is_err(), "redirect response should not succeed");
+        assert_eq!(
+            target_hits.load(Ordering::SeqCst),
+            0,
+            "redirect was followed"
         );
     }
 

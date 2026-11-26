@@ -19,6 +19,7 @@ This crate stores durable per-chat conversation history and the per-chat executi
 - `disk::CHATS_VERSION` (1) ([disk.rs:CHATS_VERSION]).
 
 ## Invariants
+- Every disk operation first checks the chat id with `validate_chat_id` (one ordinary path component: no `/`, `\`, NUL, `.` or `..`); invalid ids fail (or read as absent) instead of resolving outside `{dir}` ([lib.rs:validate_chat_id], [disk.rs:chat_root]).
 - On-disk layout under `{dir}/{chat_id}/` ([disk.rs]):
   - `transcript.json`
   - `title.txt`

@@ -16,7 +16,7 @@ Server side of the Model Context Protocol. When Dyson uses Claude Code as its LL
 - Binds `127.0.0.1:0` only (loopback, OS-assigned port) [mod.rs:McpHttpServer::start]
 - Every request must present `Authorization: Bearer <token>`; the token comes from `BearerTokenAuth::generate()` (32 CSPRNG bytes, 64 hex chars) [mod.rs:McpHttpServer::new]
 - At most `MAX_CONCURRENT_CONNECTIONS = 64` connections, enforced by a semaphore [mod.rs:MAX_CONCURRENT_CONNECTIONS]
-- `REQUEST_TIMEOUT = 30 s` [mod.rs:REQUEST_TIMEOUT]; request bodies capped at 10 MB (`MAX_REQUEST_BODY`) by `content-length` and by actual bytes [mod.rs:handle_request]
+- `REQUEST_TIMEOUT = 30 s` [mod.rs:REQUEST_TIMEOUT]; request bodies capped at 10 MB (`MAX_REQUEST_BODY`) by `content-length` and by a `Limited` body reader [mod.rs:handle_request]
 - Tool map is populated once at construction and never modified [mod.rs:McpHttpServer]
 - Completion results are truncated to `MAX_COMPLETION_VALUES = 100` [mod.rs:MAX_COMPLETION_VALUES]
 

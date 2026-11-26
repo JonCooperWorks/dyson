@@ -225,7 +225,9 @@ impl EventRing {
 
     pub(crate) fn new() -> Self {
         Self {
-            entries: std::collections::VecDeque::with_capacity(Self::CAP),
+            // Grow on demand: most chats never get near CAP, and an
+            // idle handle should not pin a full ring's worth of slots.
+            entries: std::collections::VecDeque::new(),
             next_id: 1,
         }
     }
@@ -246,11 +248,10 @@ impl EventRing {
     /// reconnect to replay only what the client missed.  Cloned
     /// because the caller holds the mutex briefly and then iterates.
     pub(crate) fn since(&self, since: u64) -> Vec<(u64, SseEvent)> {
-        self.entries
-            .iter()
-            .filter(|(id, _)| *id > since)
-            .cloned()
-            .collect()
+        // Ids are pushed in increasing order, so binary-search the cut
+        // instead of scanning every entry.
+        let start = self.entries.partition_point(|(id, _)| *id <= since);
+        self.entries.range(start..).cloned().collect()
     }
 
     /// Drop every entry but keep the monotonic counter.  Called at
@@ -270,6 +271,13 @@ impl EventRing {
 mod ring_tests {
     use super::SseEvent;
     use super::*;
+
+    #[test]
+    fn new_ring_does_not_preallocate() {
+        // MEM-01: every ChatHandle owns a ring; reserving all 4096 slots
+        // up front cost hundreds of KB per idle chat.
+        assert_eq!(EventRing::new().entries.capacity(), 0);
+    }
     // Stand-alone tests for the rolling buffer — no async, no
     // tokio.  Asserts the FIFO bound and the `since` cutoff that
     // the SSE replay path depends on.
@@ -942,6 +950,9 @@ pub struct HttpState {
     pub(crate) quiesced: std::sync::atomic::AtomicBool,
 }
 
+/// Live-ticket ceiling; the oldest are evicted past it.
+pub(crate) const MAX_SSE_TICKETS: usize = 1024;
+
 /// Stored per-ticket: the bound identity (so we can attach it on
 /// validation) and the wall-clock expiry.  TTL is 30s — long enough
 /// to round-trip a fetch + open an EventSource even on slow links,
@@ -1280,6 +1291,19 @@ impl HttpState {
         };
         // Lazy prune — drop everything that's already expired.
         guard.retain(|_, e| e.expires_at > now);
+        // Bound live tickets too: a client minting faster than the TTL
+        // would otherwise grow the map without limit.  Every ticket has
+        // the same TTL, so the soonest-expiring one is the oldest.
+        while guard.len() >= MAX_SSE_TICKETS {
+            let Some(oldest) = guard
+                .iter()
+                .min_by_key(|(_, e)| e.expires_at)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            guard.remove(&oldest);
+        }
         guard.insert(token.clone(), entry);
         token
     }
@@ -1696,6 +1720,23 @@ mod eviction_tests {
             None,
             Arc::new(crate::auth::DangerousNoAuth),
         )
+    }
+
+    #[tokio::test]
+    async fn sse_tickets_are_capped() {
+        // MEM-06: unexpired tickets were only pruned by age, so a client
+        // minting faster than the 30 s TTL grew the map without bound.
+        let state = build_test_state();
+        let first = state.mint_sse_ticket("bearer");
+        for _ in 0..(MAX_SSE_TICKETS + 100) {
+            state.mint_sse_ticket("bearer");
+        }
+        let len = state.sse_tickets.lock().unwrap().len();
+        assert!(len <= MAX_SSE_TICKETS, "{len} live tickets");
+        // The oldest ticket was the one evicted.
+        assert!(state.consume_sse_ticket(&first).is_none());
+        let fresh = state.mint_sse_ticket("bearer");
+        assert_eq!(state.consume_sse_ticket(&fresh).as_deref(), Some("bearer"));
     }
 
     // Regression: the per-chat Agent cache never evicted — every chat

@@ -15,7 +15,6 @@ Request dispatch for the Dyson HTTP controller. `mod.rs` normalises the path int
 - Providers/models: `GET /api/providers` [providers.rs:list], `GET /api/models` [models.rs:list], `POST /api/model` [model.rs:post], `/api/provider-auth/:provider[/complete]` [provider_auth.rs:status, provider_auth.rs:start, provider_auth.rs:forget, provider_auth.rs:complete]
 - Agent/workspace: `GET /api/agent` [agent.rs:get], `GET /api/commands` [commands.rs:get], `GET /api/mind`, `GET|POST /api/mind/file` [mind.rs:get, mind.rs:get_file, mind.rs:post_file]
 - Observability: `GET /api/activity` [activity.rs:get], `GET /api/audit` [audit.rs:get]
-- `debug_log.rs` (`tail`, `TAIL_BYTES`) is present on disk but is not declared as a module in `mod.rs`, so it is not compiled or routed [mod.rs:dispatch]
 - MCP: `GET /api/mcp/servers` [mcp.rs:list_servers], `GET /api/mcp/elicitations`, `POST /api/mcp/elicitations/:id` [elicitation.rs:list, elicitation.rs:respond]
 - Admin (`/api/admin/{configure,state/file,skills/install,skills/:skill,skills,idle,quiesce,unquiesce}`) [admin.rs:post] - handlers in [./admin/EGM.md](./admin/EGM.md)
 - Static SPA shell [static_assets.rs:serve]
@@ -27,6 +26,7 @@ Request dispatch for the Dyson HTTP controller. `mod.rs` normalises the path int
 - Only the listed configure-admin routes in `SwarmBearer` mode skip bearer auth and are instead validated by `authorize_configure`; no other `/api/admin` path is exempt [mod.rs:authorize_route]
 - State-changing methods (POST/DELETE/PUT/PATCH) on `/api/*` except `sse-ticket` require the `X-Dyson-CSRF` header [mod.rs:authorize_route]
 - SSE tickets are delivered as the `dyson_sse` cookie and consumed once [mod.rs:SSE_TICKET_COOKIE, mod.rs:consume_sse_ticket]
+- Every `/api/conversations/<id>/…` route 404s unless `<id>` passes `safe_store_id` [mod.rs:dispatch_conversations]
 - `/readyz` returns 503 while a readiness error (e.g. warmup placeholder config) is active [mod.rs:dispatch_inner]
 - Body caps: `MAX_TURN_BODY` checked against `content-length` [turns.rs:post], `MAX_CONFIGURE_BODY` 64 KiB [admin.rs:MAX_CONFIGURE_BODY], `MAX_ELICITATION_BODY` 64 KiB [elicitation.rs:MAX_ELICITATION_BODY], `MAX_COMPLETE_BODY` 16 KiB [provider_auth.rs:MAX_COMPLETE_BODY]
 - SSE idle timeout 300 s [sse.rs:IDLE_TIMEOUT]; MCP probe timeout 5 s [mcp.rs:PROBE_TIMEOUT]; model list cache TTL 30 min [models.rs:CACHE_TTL]

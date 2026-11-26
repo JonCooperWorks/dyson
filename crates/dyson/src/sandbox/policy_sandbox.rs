@@ -118,8 +118,63 @@ impl Sandbox for PolicySandbox {
             "web_search" => check_network_only(tool_name, &policy, input),
             "web_fetch" => check_web_fetch(input, &policy),
 
+            // ----- Path-taking analysis / edit tools -----
+            // These resolve their paths through `ctx.resolve_path` too;
+            // the explicit arms make an operator's file_read/file_write
+            // policy (including `deny`) apply to them instead of falling
+            // through to the network-only default below.
+            "bulk_edit" => check_named_paths(
+                tool_name,
+                input,
+                &policy,
+                &self.working_dir,
+                &["path"],
+                true,
+                true,
+            ),
+            "ast_describe" | "ast_query" | "attack_surface_analyzer" => check_named_paths(
+                tool_name,
+                input,
+                &policy,
+                &self.working_dir,
+                &["path"],
+                true,
+                false,
+            ),
+            "taint_trace" => check_named_paths(
+                tool_name,
+                input,
+                &policy,
+                &self.working_dir,
+                &["/source/file", "/sink/file"],
+                true,
+                false,
+            ),
+            // dependency_scan reads a manifest and queries OSV.
+            "dependency_scan" => {
+                if let decision @ SandboxDecision::Deny { .. } =
+                    check_network_only(tool_name, &policy, input)?
+                {
+                    return Ok(decision);
+                }
+                check_named_paths(
+                    tool_name,
+                    input,
+                    &policy,
+                    &self.working_dir,
+                    &["path"],
+                    true,
+                    false,
+                )
+            }
+            // image_generate calls the image provider and writes only to
+            // a Dyson-chosen temp file.
+            "image_generate" => check_network_only(tool_name, &policy, input),
+
             // ----- Internal tools — always allowed -----
-            "workspace" | "memory_search" => Ok(SandboxDecision::Allow {
+            // skill_create writes into the workspace's skills directory,
+            // the same internal store `workspace` edits.
+            "workspace" | "memory_search" | "skill_create" => Ok(SandboxDecision::Allow {
                 input: input.clone(),
             }),
 
@@ -347,6 +402,48 @@ fn check_file_access(
     })
 }
 
+/// Check every path-valued field a tool names against the read/write
+/// policy.  `keys` are JSON pointers (`/source/file`) or top-level keys
+/// (`path`); a missing optional field means "the working directory".
+fn check_named_paths(
+    tool_name: &str,
+    input: &serde_json::Value,
+    policy: &SandboxPolicy,
+    working_dir: &Path,
+    keys: &[&str],
+    check_read: bool,
+    check_write: bool,
+) -> Result<SandboxDecision> {
+    for key in keys {
+        let value = if key.starts_with('/') {
+            input.pointer(key)
+        } else {
+            input.get(*key)
+        };
+        let file_path = value.and_then(serde_json::Value::as_str).unwrap_or(".");
+        for (enabled, access, verb) in [
+            (check_read, &policy.file_read, "read"),
+            (check_write, &policy.file_write, "write"),
+        ] {
+            if enabled && !check_path_access(access, file_path, working_dir) {
+                tracing::warn!(
+                    tool = tool_name,
+                    path = file_path,
+                    "sandbox DENY: file {verb} blocked"
+                );
+                return Ok(SandboxDecision::Deny {
+                    reason: format!(
+                        "sandbox policy denies file {verb} for '{file_path}' by tool '{tool_name}'"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(SandboxDecision::Allow {
+        input: input.clone(),
+    })
+}
+
 /// Check web_fetch: validate network policy and block internal/private URLs.
 ///
 /// Same pattern as `check_file_access` but for URLs instead of paths.
@@ -500,37 +597,82 @@ fn check_path_access(access: &PathAccess, file_path: &str, working_dir: &Path) -
 
 /// Resolve a path to its canonical form, following symlinks.
 ///
-/// Strategy:
-/// 1. Normalize lexically first (resolve `.` and `..` without filesystem access).
-/// 2. Try `canonicalize()` on the normalized path (resolves symlinks).
-/// 3. If the path doesn't exist: walk up to the nearest existing ancestor,
-///    canonicalize that, then re-append the remaining components.
-/// 4. If no ancestor exists: return the lexically normalized path.
+/// Existing prefixes are canonicalized *before* any `..` that follows
+/// them is applied (as the kernel does), so `link/..` cannot be
+/// collapsed lexically to a directory the link does not point under.
+/// Only the nonexistent tail is normalized lexically.
 pub(crate) fn resolve_canonical(path: &Path) -> PathBuf {
-    // Always normalize first to resolve .. and . components.
-    let normalized = normalize_path(path);
+    resolve_canonical_depth(path, 0)
+}
 
-    // Fast path: the normalized path exists — canonicalize resolves symlinks.
-    if let Ok(canon) = std::fs::canonicalize(&normalized) {
+/// Symlink hops followed before giving up (matches Linux `MAXSYMLINKS`).
+const MAX_SYMLINK_HOPS: u32 = 40;
+
+/// Resolve `path` component by component, the way the kernel does:
+/// every existing prefix is canonicalized (following symlinks) *before*
+/// a following `..` is applied, so `link/..` means "the parent of the
+/// link's target", not "the directory containing the link".  Only the
+/// tail that does not exist yet is normalized lexically — nothing in it
+/// can be a symlink.
+fn resolve_canonical_depth(path: &Path, depth: u32) -> PathBuf {
+    use std::path::Component;
+
+    // Fast path: the whole path exists — canonicalize resolves it all.
+    if let Ok(canon) = std::fs::canonicalize(path) {
         return canon;
     }
+    if depth > MAX_SYMLINK_HOPS {
+        return normalize_path(path);
+    }
 
-    // Slow path: walk up to find an existing ancestor.
-    let mut ancestor = normalized.clone();
-    loop {
-        if !ancestor.pop() {
-            // Reached filesystem root without finding an existing dir.
-            return normalized;
-        }
-        if ancestor.exists() {
-            if let Ok(canon) = std::fs::canonicalize(&ancestor)
-                && let Ok(suffix) = normalized.strip_prefix(&ancestor)
-            {
-                return canon.join(suffix);
+    let mut cur = PathBuf::new();
+    // `cur` is fully canonical while `on_disk` holds; afterwards it is a
+    // canonical prefix plus a lexical, nonexistent tail.
+    let mut on_disk = true;
+    let mut components = path.components();
+    while let Some(component) = components.next() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => cur.push(component),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Safe to pop: `cur` contains no symlinks at this point.
+                cur.pop();
+                if !on_disk {
+                    on_disk = std::fs::symlink_metadata(&cur).is_ok();
+                }
             }
-            return normalized;
+            Component::Normal(name) => {
+                let next = cur.join(name);
+                match std::fs::symlink_metadata(&next) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        if let Ok(canon) = std::fs::canonicalize(&next) {
+                            cur = canon;
+                        } else if let Ok(target) = std::fs::read_link(&next) {
+                            // Dangling link: a write would create the target.
+                            let mut rest = if target.is_absolute() {
+                                target
+                            } else {
+                                cur.join(target)
+                            };
+                            rest.extend(components);
+                            return resolve_canonical_depth(&rest, depth + 1);
+                        } else {
+                            cur = next;
+                            on_disk = false;
+                        }
+                    }
+                    Ok(_) => {
+                        cur = std::fs::canonicalize(&next).unwrap_or(next);
+                    }
+                    Err(_) => {
+                        cur = next;
+                        on_disk = false;
+                    }
+                }
+            }
         }
     }
+    cur
 }
 
 /// Normalize a path by resolving `.` and `..` components without touching
@@ -562,6 +704,24 @@ mod tests {
 
     fn wd() -> PathBuf {
         PathBuf::from("/workspace/project")
+    }
+
+    #[test]
+    fn resolve_canonical_follows_symlink_before_parent_dir() {
+        // SEC-08: `wd/link/..` resolves to the *link target's* parent in
+        // the kernel; lexical normalisation first collapsed it to `wd`.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let wd = root.join("wd");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&wd).unwrap();
+        std::fs::create_dir_all(outside.join("sub")).unwrap();
+        std::os::unix::fs::symlink(outside.join("sub"), wd.join("link")).unwrap();
+        let resolved = resolve_canonical(&wd.join("link/../secret"));
+        assert_eq!(resolved, outside.join("secret"));
+        assert!(!resolved.starts_with(&wd));
+        // Nonexistent tails still normalise lexically.
+        assert_eq!(resolve_canonical(&wd.join("a/../b")), wd.join("b"));
     }
 
     fn ctx() -> ToolContext {
@@ -815,6 +975,107 @@ mod tests {
         let cmd = input["command"].as_str().unwrap();
         assert!(!cmd.contains("--unshare-net"), "{cmd}");
         assert!(!cmd.contains("--network none"), "{cmd}");
+    }
+
+    // -----------------------------------------------------------------------
+    // SEC-07: path-taking tools beyond the core file tools
+    // -----------------------------------------------------------------------
+
+    fn is_deny(d: &SandboxDecision) -> bool {
+        matches!(d, SandboxDecision::Deny { .. })
+    }
+
+    #[tokio::test]
+    async fn path_taking_tools_are_confined_to_cwd() {
+        let s = sandbox_default();
+        let ctx = ctx();
+        for (tool, input) in [
+            (
+                "bulk_edit",
+                serde_json::json!({"operation": "find_replace", "path": "/etc"}),
+            ),
+            ("dependency_scan", serde_json::json!({"path": "/etc"})),
+            ("ast_describe", serde_json::json!({"path": "/etc/passwd"})),
+            (
+                "ast_query",
+                serde_json::json!({"query": "(x)", "path": "/etc"}),
+            ),
+            (
+                "attack_surface_analyzer",
+                serde_json::json!({"path": "../../.."}),
+            ),
+            (
+                "taint_trace",
+                serde_json::json!({
+                    "source": {"file": "src/a.rs", "line": 1},
+                    "sink": {"file": "/etc/passwd", "line": 1}
+                }),
+            ),
+        ] {
+            let d = s.check(tool, &input, &ctx).await.unwrap();
+            assert!(is_deny(&d), "{tool} escaped cwd: {d:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn path_taking_tools_allow_in_cwd_paths() {
+        let s = sandbox_default();
+        let ctx = ctx();
+        for (tool, input) in [
+            (
+                "bulk_edit",
+                serde_json::json!({"operation": "find_replace", "path": "."}),
+            ),
+            ("dependency_scan", serde_json::json!({"path": "Cargo.toml"})),
+            (
+                "ast_describe",
+                serde_json::json!({"snippet": "fn x(){}", "language": "rust"}),
+            ),
+            ("ast_query", serde_json::json!({"query": "(x)"})),
+            (
+                "attack_surface_analyzer",
+                serde_json::json!({"path": "src"}),
+            ),
+            (
+                "taint_trace",
+                serde_json::json!({
+                    "source": {"file": "src/a.rs", "line": 1},
+                    "sink": {"file": "src/b.rs", "line": 2}
+                }),
+            ),
+            ("image_generate", serde_json::json!({"prompt": "a cat"})),
+            (
+                "skill_create",
+                serde_json::json!({"name": "x", "description": "y"}),
+            ),
+        ] {
+            let d = s.check(tool, &input, &ctx).await.unwrap();
+            assert!(!is_deny(&d), "{tool} wrongly denied: {d:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_edit_honours_file_write_deny() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "bulk_edit".into(),
+            ToolPolicyConfig {
+                file_write: Some(crate::sandbox::policy::ToolPolicyPathConfig::Simple(
+                    "deny".into(),
+                )),
+                ..Default::default()
+            },
+        );
+        let s = sandbox(overrides);
+        let d = s
+            .check(
+                "bulk_edit",
+                &serde_json::json!({"operation": "find_replace", "path": "."}),
+                &ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(is_deny(&d), "file_write deny ignored: {d:?}");
     }
 
     // -----------------------------------------------------------------------

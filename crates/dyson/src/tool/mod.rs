@@ -647,10 +647,12 @@ pub struct CheckpointEvent {
     pub progress: Option<f32>,
 }
 
-/// Validate a workspace file path to prevent path traversal.
+/// Lexically validate a workspace file path to prevent path traversal.
 ///
-/// Rejects absolute paths, parent-directory components (`..`), and
-/// paths containing symlink components that could escape the workspace.
+/// Rejects absolute paths and parent-directory components (`..`).  This
+/// is a pure string check: symlink checks need the workspace root and
+/// live in [`validate_workspace_path_in`].  (The previous version probed
+/// symlinks relative to the *process* cwd, which is not the workspace.)
 pub fn validate_workspace_path(path: &str) -> std::result::Result<(), String> {
     let p = std::path::Path::new(path);
     if p.is_absolute() {
@@ -661,15 +663,32 @@ pub fn validate_workspace_path(path: &str) -> std::result::Result<(), String> {
     {
         return Err(format!("path traversal is not allowed: '{path}'"));
     }
-    // Check each prefix for symlinks that could escape the workspace.
-    let mut accumulated = std::path::PathBuf::new();
-    for component in p.components() {
+    Ok(())
+}
+
+/// [`validate_workspace_path`] plus a symlink check on every prefix of
+/// `path` resolved under `root` (the workspace directory).
+pub fn validate_workspace_path_in(
+    root: &std::path::Path,
+    path: &str,
+) -> std::result::Result<(), String> {
+    validate_workspace_path(path)?;
+    // Check each prefix *under the workspace root* for symlinks that
+    // could escape it.  `symlink_metadata` does not follow the final
+    // component, so a symlinked directory or file is caught.
+    let mut accumulated = root.to_path_buf();
+    for component in std::path::Path::new(path).components() {
         accumulated.push(component);
-        if accumulated.is_symlink() {
-            return Err(format!(
-                "symlinks are not allowed in workspace paths: '{}' is a symlink",
-                accumulated.display()
-            ));
+        match std::fs::symlink_metadata(&accumulated) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "symlinks are not allowed in workspace paths: '{path}' crosses a symlink"
+                ));
+            }
+            Ok(_) => {}
+            // Nothing further down can be a symlink if this prefix is missing.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(format!("cannot inspect workspace path '{path}': {e}")),
         }
     }
     Ok(())
@@ -783,6 +802,19 @@ pub fn resolve_and_validate_path(
                         let suffix = candidate
                             .strip_prefix(&ancestor)
                             .map_err(|e| format!("path error: {e}"))?;
+                        // The suffix does not exist on disk, so the kernel
+                        // would resolve any `..` in it *after* creating the
+                        // missing directories.  `starts_with` is
+                        // component-wise, so `newdir/../../x` would pass the
+                        // bounds check below while escaping.  Refuse it.
+                        if suffix
+                            .components()
+                            .any(|c| matches!(c, std::path::Component::ParentDir))
+                        {
+                            return Err(format!(
+                                "path traversal through a nonexistent directory is not allowed: '{user_path}'"
+                            ));
+                        }
                         break canon.join(suffix);
                     }
                     Err(ref inner) if inner.kind() == std::io::ErrorKind::NotFound => {
@@ -1042,6 +1074,35 @@ mod tests {
         let ok = resolve_and_validate_path(tmp.path(), "~", Some(&guard)).unwrap();
         assert!(ok.is_absolute(), "got {ok:?}");
         assert!(!ok.to_string_lossy().contains('~'), "got {ok:?}");
+    }
+
+    #[test]
+    fn nonexistent_suffix_with_parent_dir_cannot_escape() {
+        // SEC-01: `newdir` does not exist, so the ancestor walk used to
+        // append `newdir/../../outside.txt` verbatim; `starts_with` is
+        // component-wise, so the escape passed the bounds check.
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir(&wd).unwrap();
+        let res = resolve_and_validate_path(&wd, "newdir/../../outside.txt", None);
+        assert!(
+            res.is_err(),
+            "escape via nonexistent parent accepted: {res:?}"
+        );
+        // A plain nested nonexistent path is still fine.
+        assert!(resolve_and_validate_path(&wd, "a/b/c.txt", None).is_ok());
+    }
+
+    #[test]
+    fn workspace_path_symlink_check_is_relative_to_root() {
+        // SEC-09: symlink checks must run against the workspace root,
+        // not the process cwd.
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("memory")).unwrap();
+        assert!(validate_workspace_path_in(tmp.path(), "memory/x.md").is_err());
+        assert!(validate_workspace_path_in(tmp.path(), "notes/x.md").is_ok());
+        assert!(validate_workspace_path_in(tmp.path(), "../x.md").is_err());
     }
 
     #[test]

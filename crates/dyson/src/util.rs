@@ -9,6 +9,23 @@
 /// for the conversation history and system prompt.
 pub const MAX_OUTPUT_BYTES: usize = 100 * 1024;
 
+/// Compiled-size budget for regexes built from user / model input.
+///
+/// The `regex` crate is linear-time, but its default 10 MiB program and
+/// 2 MiB lazy-DFA budgets let one pattern (e.g. a repeated Unicode
+/// class) allocate megabytes per call.  1 MiB comfortably fits every
+/// realistic search pattern.
+pub const USER_REGEX_SIZE_LIMIT: usize = 1024 * 1024;
+
+/// Build a regex from untrusted input under [`USER_REGEX_SIZE_LIMIT`].
+pub fn bounded_regex(pattern: &str, case_insensitive: bool) -> Result<regex::Regex, regex::Error> {
+    regex::RegexBuilder::new(pattern)
+        .case_insensitive(case_insensitive)
+        .size_limit(USER_REGEX_SIZE_LIMIT)
+        .dfa_size_limit(USER_REGEX_SIZE_LIMIT)
+        .build()
+}
+
 /// Truncate a string to at most `max_bytes`, snapping to a UTF-8 char boundary.
 ///
 /// Returns the longest prefix of `s` that is at most `max_bytes` and ends on

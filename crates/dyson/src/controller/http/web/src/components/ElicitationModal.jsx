@@ -204,40 +204,51 @@ export function ElicitationModal() {
   const [busy, setBusy] = useState(false);
   const formRef = useRef(null);
 
+  // Mirror of `prompt` for the poller: comparing against a ref lets the
+  // poll decide "new prompt?" synchronously and seed the form with plain
+  // setState calls, instead of side effects inside a setPrompt updater
+  // (updaters must be pure — StrictMode runs them twice).
+  const promptRef = useRef(null);
+
   const poll = useCallback(async () => {
     try {
       const res = await api.listElicitations();
       const pending = (res && res.pending) || [];
       const next = pending[0] || null;
       setQueueLength(pending.length);
-      setPrompt((cur) => {
+      const cur = promptRef.current;
+      if (next && (!cur || cur.id !== next.id)) {
         // Only (re)seed the form when the prompt identity changes —
-        // don't clobber the user mid-answer if poll fires concurrently.
-        if (next && (!cur || cur.id !== next.id)) {
-          setValues(initialValues(next.requestedSchema));
-          setTouched({});
-          return next;
-        }
-        // Same prompt still pending: keep the existing reference so a
-        // background re-poll doesn't churn the form. A null `next` (the prompt
-        // was resolved or timed out on the backend) falls through and dismisses
-        // the modal.
-        return next && cur && next.id === cur.id ? cur : next;
-      });
+        // don't clobber the user mid-answer on a background re-poll.
+        promptRef.current = next;
+        setValues(initialValues(next.requestedSchema));
+        setTouched({});
+        setPrompt(next);
+      } else if (!next && cur) {
+        // Resolved or timed out on the backend: dismiss the modal.
+        promptRef.current = null;
+        setPrompt(null);
+      }
+      // Same prompt still pending: keep the existing reference so the
+      // form does not churn.
     } catch {
       // Network blips are transient; the next tick retries.
     }
   }, [api]);
 
-  // Poll fast while idle so a prompt lands promptly; keep polling (slower)
-  // while one is shown so a prompt resolved or timed out on the backend clears
-  // itself instead of stranding a modal the user can't dismiss. The poll's
-  // setPrompt updater keeps the current prompt's reference stable, so this does
-  // not clobber a half-filled form.
+  // Poll while idle so a prompt lands promptly; keep polling (slower) while
+  // one is shown so a prompt resolved or timed out on the backend clears
+  // itself instead of stranding a modal the user can't dismiss.  A hidden
+  // tab does not poll at all; becoming visible again polls immediately.
   useEffect(() => {
-    poll();
-    const t = setInterval(poll, prompt ? STALE_POLL_MS : IDLE_POLL_MS);
-    return () => clearInterval(t);
+    const tick = () => { if (!document.hidden) poll(); };
+    tick();
+    const t = setInterval(tick, prompt ? STALE_POLL_MS : IDLE_POLL_MS);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', tick);
+    };
   }, [poll, prompt]);
 
   const props = useMemo(() => {
@@ -288,6 +299,7 @@ export function ElicitationModal() {
         result = { action };
       }
       await api.respondElicitation(prompt.id, result);
+      promptRef.current = null;
       setPrompt(null);
       setValues({});
       setTouched({});

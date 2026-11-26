@@ -19,6 +19,7 @@ import { ElicitationModal } from './components/ElicitationModal.jsx';
 import { DysonClient } from './api/client.js';
 import { boot } from './api/boot.js';
 import { bootstrapAuth } from './api/auth.js';
+import { renderBootError } from './api/boot-error.js';
 import { ApiProvider } from './hooks/useApi.js';
 import { createThemeController } from 'dyson-common-ui';
 
@@ -44,12 +45,5 @@ bootstrapAuth().then(session => {
   // actual error so an operator can grep for it; the frame just
   // tells the user something is up.
   console.error('[dyson] auth bootstrap failed', err);
-  const root = document.getElementById('root');
-  if (root) {
-    root.innerHTML = `<div style="padding:32px;font-family:system-ui;color:#eee;">
-      <h2>Sign-in failed</h2>
-      <p>${String(err.message || err)}</p>
-      <p>Check that your IdP issuer is reachable and the client_id is registered.</p>
-    </div>`;
-  }
+  renderBootError(document.getElementById('root'), err);
 });

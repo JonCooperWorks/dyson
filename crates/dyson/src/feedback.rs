@@ -49,15 +49,18 @@ impl FeedbackStore {
     /// Path to the feedback file for a given chat.
     ///
     /// Per-chat layout: `{dir}/{chat_id}/feedback.json`.
-    fn feedback_path(&self, chat_id: &str) -> PathBuf {
-        self.dir.join(chat_id).join("feedback.json")
+    /// Fails for ids that are not a single ordinary path component, so
+    /// the file can never land outside `dir`.
+    fn feedback_path(&self, chat_id: &str) -> Result<PathBuf> {
+        dyson_persistence::validate_chat_id(chat_id)?;
+        Ok(self.dir.join(chat_id).join("feedback.json"))
     }
 
     /// Load all feedback entries for a chat.
     ///
     /// Returns an empty Vec if no feedback file exists.
     pub fn load(&self, chat_id: &str) -> Result<Vec<FeedbackEntry>> {
-        let path = self.feedback_path(chat_id);
+        let path = self.feedback_path(chat_id)?;
         if !path.exists() {
             return Ok(Vec::new());
         }
@@ -68,7 +71,7 @@ impl FeedbackStore {
 
     /// Save feedback entries for a chat (replaces the file).
     fn save(&self, chat_id: &str, entries: &[FeedbackEntry]) -> Result<()> {
-        let path = self.feedback_path(chat_id);
+        let path = self.feedback_path(chat_id)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -126,6 +129,35 @@ mod tests {
         assert_eq!(FeedbackRating::Good.score(), 1);
         assert_eq!(FeedbackRating::VeryGood.score(), 2);
         assert_eq!(FeedbackRating::Excellent.score(), 3);
+    }
+
+    #[test]
+    fn unsafe_chat_ids_are_refused() {
+        // SEC-10: `{dir}/{chat_id}/feedback.json` must stay under `dir`.
+        let (dir, store) = temp_store("unsafe_ids");
+        let entry = FeedbackEntry {
+            turn_index: 0,
+            rating: FeedbackRating::Good,
+            score: 1,
+            timestamp: 0,
+        };
+        for id in ["..", "../x", "a/b", ""] {
+            assert!(
+                store.upsert(id, entry.clone()).is_err(),
+                "upsert accepted {id:?}"
+            );
+            assert!(store.load(id).is_err(), "load accepted {id:?}");
+        }
+        assert!(!dir.parent().unwrap().join("feedback.json").exists());
+        assert!(
+            !dir.parent()
+                .unwrap()
+                .join("x")
+                .join("feedback.json")
+                .exists()
+        );
+        store.upsert("c-0001", entry).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn temp_store(name: &str) -> (PathBuf, FeedbackStore) {

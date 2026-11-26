@@ -19,6 +19,7 @@ The agent's persistent state: identity (`SOUL.md`, `IDENTITY.md`), memory (`MEMO
 - `FilesystemWorkspace::load` stamps a missing `.workspace_version` with `WORKSPACE_VERSION` and refuses any other version [filesystem.rs:check_or_stamp_version]
 - `ChannelWorkspace` is a whitelist: writes to keys outside the writable set are silently dropped, including `_audit.jsonl` [channel.rs:ChannelWorkspace, channel.rs:AUDIT_LOG_KEY]
 - Channel journals older than `DEFAULT_MAX_JOURNAL_AGE_DAYS = 90` are pruned [channel.rs:DEFAULT_MAX_JOURNAL_AGE_DAYS]
+- `FilesystemWorkspace` refuses keys whose existing prefix under the root is a symlink, so `save()` cannot write outside the workspace [filesystem.rs:workspace_child_path]
 
 ## Side Effects
 - Reads and writes Markdown files under the workspace directory [filesystem.rs:FilesystemWorkspace]

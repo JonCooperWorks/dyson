@@ -469,7 +469,11 @@ impl ThinkTagParser {
                 } else {
                     // No closing tag yet.  Emit everything except the last
                     // few bytes which could be a partial "</think>" match.
-                    let safe = self.pending.len().saturating_sub(CLOSE.len() - 1);
+                    // Round down to a char boundary: slicing mid-codepoint
+                    // panics on multi-byte text.
+                    let safe = self
+                        .pending
+                        .floor_char_boundary(self.pending.len().saturating_sub(CLOSE.len() - 1));
                     if safe > 0 {
                         let emit = self.pending[..safe].to_string();
                         self.pending = self.pending[safe..].to_string();
@@ -714,6 +718,30 @@ mod tests {
             .collect();
         assert_eq!(thinking, "deep thought");
         assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn think_tag_multibyte_tail_does_not_panic() {
+        // SLOP-01: the partial-close holdback slice must land on a char
+        // boundary.
+        let mut p = ThinkTagParser::new();
+        let mut all = Vec::new();
+        all.extend(p.feed("<think>"));
+        all.extend(p.feed("日本語"));
+        all.extend(p.feed("🎉 ok</think>done"));
+        all.extend(p.flush());
+        let thinking: String = all
+            .iter()
+            .filter(|(t, _)| *t)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        let text: String = all
+            .iter()
+            .filter(|(t, _)| !*t)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        assert_eq!(thinking, "日本語🎉 ok");
+        assert_eq!(text, "done");
     }
 
     #[test]
