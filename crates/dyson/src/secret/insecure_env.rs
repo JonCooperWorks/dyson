@@ -93,7 +93,6 @@ use dyson_core::error::{DysonError, Result};
 ///    a hint on how to fix it.
 pub struct InsecureEnvironmentVariable;
 
-#[allow(clippy::needless_lifetimes)]
 impl SecretResolver for InsecureEnvironmentVariable {
     /// Look up a secret in the process environment.
     ///

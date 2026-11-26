@@ -169,14 +169,14 @@ pub enum ReloadOutcome {
 /// Preserves the user's provider/model selection across reloads.  Falls
 /// back to defaults only if the selected provider/model was removed from
 /// the new config.
-#[allow(clippy::too_many_arguments, clippy::ptr_arg)]
+#[allow(clippy::too_many_arguments)]
 pub async fn check_and_reload_agent(
     reloader: &mut crate::config::hot_reload::HotReloader,
     current_settings: &mut Settings,
     original_sandbox_bypass: Option<&crate::sandbox::SandboxBypassGuard>,
     agent: &mut crate::agent::Agent,
-    current_provider: &mut String,
-    current_model: &mut String,
+    current_provider: &str,
+    current_model: &str,
     controller_prompt: Option<&str>,
     registry: &ClientRegistry,
 ) -> ReloadOutcome {
@@ -213,7 +213,7 @@ pub async fn check_and_reload_agent(
             a.set_messages(messages);
             // Restore the user's provider/model selection if it differs
             // from the default.
-            if let Some(pc) = current_settings.providers.get(current_provider.as_str())
+            if let Some(pc) = current_settings.providers.get(current_provider)
                 && let Ok(handle) = registry.get(current_provider)
             {
                 a.swap_client(handle, current_model, &pc.provider_type);

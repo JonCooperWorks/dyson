@@ -4,7 +4,6 @@ import { render, fireEvent, createEvent, cleanup } from '@testing-library/react'
 import {
   Composer,
   clipboardImageFiles,
-  composerLockedViewportContent,
   pinComposerFocusGuard,
   prepareComposerFocus,
   slashCommandPreview,
@@ -142,7 +141,7 @@ describe('Composer image paste', () => {
     expect(textarea.style.getPropertyValue('touch-action')).toBe('manipulation');
   });
 
-  it('temporarily locks maximum scale while the composer is focused, then restores the page viewport', () => {
+  it('never locks the viewport zoom while the composer is focused', () => {
     vi.useFakeTimers();
     mockMobile(true);
     mockViewportScrollReset();
@@ -158,20 +157,12 @@ describe('Composer image paste', () => {
     const textarea = container.querySelector('textarea');
 
     fireEvent.touchStart(textarea);
-
-    expect(meta.getAttribute('content')).toBe('width=device-width, initial-scale=1, maximum-scale=1');
+    fireEvent.focus(textarea);
+    expect(meta.getAttribute('content')).toBe('width=device-width, initial-scale=1');
 
     fireEvent.blur(textarea);
-    vi.advanceTimersByTime(249);
-    expect(meta.getAttribute('content')).toContain('maximum-scale=1');
-
-    vi.advanceTimersByTime(1);
+    vi.advanceTimersByTime(500);
     expect(meta.getAttribute('content')).toBe('width=device-width, initial-scale=1');
-  });
-
-  it('normalizes the focus-time viewport lock without making zoom permanently inaccessible', () => {
-    expect(composerLockedViewportContent('width=device-width, initial-scale=1, maximum-scale=4, user-scalable=yes'))
-      .toBe('width=device-width, initial-scale=1, maximum-scale=1');
   });
 
   it('recenters the layout viewport after mobile composer focus settles', () => {

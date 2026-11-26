@@ -23,6 +23,8 @@ import * as icons from '../components/icons.jsx';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const src = (rel) => readFileSync(join(__dirname, '..', rel), 'utf8');
+// app.jsx is a facade over its routing and stream-reducer modules.
+const appModule = () => ['components/app.jsx', 'components/app-routing.js', 'components/app-stream.js'].map(src).join('\n');
 
 describe('module exports', () => {
   it('views.jsx exports the primary shell components', () => {
@@ -68,7 +70,7 @@ describe('module exports', () => {
 });
 
 describe('app.jsx — keyboard + session regressions', () => {
-  const app = src('components/app.jsx');
+  const app = appModule();
 
   it('keyboard handler does not outrun view ids', () => {
     // Regression for the "⌘4/⌘5 grey-screen" bug: the keyboard handler
@@ -131,7 +133,7 @@ describe('app.jsx — keyboard + session regressions', () => {
 });
 
 describe('architecture — no window globals + no bump counter', () => {
-  const app = src('components/app.jsx');
+  const app = appModule();
   const views = src('components/views.jsx');
   const viewsSec = src('components/views-secondary.jsx');
   const turns = src('components/turns.jsx');
@@ -200,10 +202,12 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
   // ArtefactsView / ArtefactReader moved out of views.jsx into
   // views-secondary.jsx when we code-split the non-initial tabs.  The
   // grep-based regressions below follow them.
-  const appSrc = src('components/app.jsx');
+  const appSrc = appModule();
   const primaryViews = src('components/views.jsx');
   const viewsSrc = src('components/views-secondary.jsx');
   const layoutCss = src('styles/layout.css');
+  // The effective drawer / reader rules live once, in swarm-theme.css; the
+  // base sheets no longer carry overridden duplicates.
   const swarmThemeCss = src('styles/swarm-theme.css');
 
   it('ArtefactsView drives .show-side from state, not hardcoded', () => {
@@ -249,7 +253,7 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
     // Screenshot/file artefacts can have machine-generated names long
     // enough to crowd the action buttons. The mobile header should give
     // the title the first line, then keep action labels visible below it.
-    const mobileBlock = layoutCss.split('@media (max-width: 760px)')[1] || '';
+    const mobileBlock = swarmThemeCss.split('@media (max-width: 760px)').slice(1).join('');
     expect(mobileBlock, 'mobile reader header should wrap into stable rows')
       .toMatch(/\.artefact-reader-head\s*\{[^}]*flex-wrap:\s*wrap\s*!important/);
     expect(mobileBlock, 'title must reserve useful measure before controls')
@@ -275,7 +279,7 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
     // low-contrast grey text on a dark drawer, the result read as an
     // unreachable black screen.  Anchor the drawer to .mind itself so
     // it stays inside the body grid cell.
-    const rule = layoutCss.match(/\.mind\s*\{([^}]*)\}/);
+    const rule = swarmThemeCss.match(/\.mind\s*\{([^}]*)\}/);
     expect(rule, '.mind rule must exist').toBeTruthy();
     expect(rule[1], '.mind must be a positioning context for .mind-side')
       .toMatch(/position:\s*relative/);
@@ -304,9 +308,9 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
     expect(viewsSrc, 'scrim must dismiss the drawer on click')
       .toMatch(/className="mind-scrim"\s+onClick=\{\(\)\s*=>\s*setShowSide\(false\)\}/);
     // Scrim must be hidden on desktop (display:none in the base rule).
-    expect(layoutCss).toMatch(/\.mind-scrim\s*\{[^}]*display:\s*none/);
+    expect(swarmThemeCss).toMatch(/\.mind-scrim\s*\{[^}]*display:\s*none/);
     // ...and shown only on mobile when .mind.show-side is set.
-    const mobileBlock = layoutCss.split('@media (max-width: 760px)')[1] || '';
+    const mobileBlock = swarmThemeCss.split('@media (max-width: 760px)').slice(1).join('');
     expect(mobileBlock, 'mobile media query must show .mind.show-side .mind-scrim')
       .toMatch(/\.mind\.show-side\s+\.mind-scrim\s*\{[^}]*display:\s*block/);
   });
@@ -335,8 +339,13 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
     // 20vw strip of empty .mind-pane painting var(--bg-1) next to it —
     // reading as a black void alongside the list.  Clamp removed on
     // mobile; the drawer now covers the full viewport when open.
-    const mobileBlock = layoutCss.split('@media (max-width: 760px)')[1] || '';
-    const sideRule = mobileBlock.match(/\.mind-side\s*\{([^}]*)\}/);
+    // The mobile .mind-side declarations are split between layout.css and
+    // swarm-theme.css (no property is set twice), so check their union.
+    const mobileBlock = [layoutCss, swarmThemeCss]
+      .map(css => css.split('@media (max-width: 760px)').slice(1).join(''))
+      .join('');
+    const sideBodies = [...mobileBlock.matchAll(/(?:^|\n)\s*\.mind-side\s*\{([^}]*)\}/g)].map(m => m[1]);
+    const sideRule = sideBodies.length ? [null, sideBodies.join('\n')] : null;
     expect(sideRule, 'mobile .mind-side rule must exist').toBeTruthy();
     expect(sideRule[1], 'drawer must be full-width on mobile')
       .toMatch(/width:\s*100%/);
@@ -356,7 +365,7 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
     // overriding the `.body.show-left .left { display:flex }` mobile
     // drawer rule and making the empty-state's "Tap ☰ to switch" hint
     // a lie.
-    const mobileBlock = layoutCss.split('@media (max-width: 760px)')[1] || '';
+    const mobileBlock = swarmThemeCss.split('@media (max-width: 760px)').slice(1).join('');
     expect(mobileBlock, 'mobile block must hide LeftRail in Mind view only')
       .toMatch(/\.body\.no-left\.no-right\s+\.left\s*\{[^}]*display:\s*none/);
     expect(mobileBlock, 'old over-broad .body.no-right .left rule must be gone')
@@ -445,7 +454,7 @@ describe('turns.jsx — markdown + composer regressions', () => {
     // Regression for "agent can't deliver files to the UI".  The SSE
     // dispatcher lives in api/stream.js now (a pure function) and the
     // file-event handler is in app.jsx's streamCallbacks().
-    const app = src('components/app.jsx');
+    const app = appModule();
     const stream = src('api/stream.js');
     expect(turnsSrc).toContain('function FileBlock');
     expect(turnsSrc).toContain("b.type === 'file'");
@@ -470,7 +479,7 @@ describe('turns.jsx — markdown + composer regressions', () => {
   });
 
   it('new empty conversations focus the composer and accept title SSE', () => {
-    const app = src('components/app.jsx');
+    const app = appModule();
     const stream = src('api/stream.js');
     expect(app).toContain('autoFocusKey={empty ? conv : null}');
     expect(turnsSrc).toContain('autoFocusKey');

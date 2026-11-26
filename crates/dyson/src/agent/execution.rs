@@ -86,6 +86,22 @@ impl Agent {
                 self.transition(super::continuation::Transition::Observed(call.id.clone()))?;
                 continue;
             }
+            // Definitions were withheld from the model, so any call it makes
+            // is unadvertised; refuse rather than run it.
+            if self.tool_registry.disabled {
+                tracing::warn!(tool = call.name, "tool call while tools are disabled");
+                self.conversation.messages.push(Message::tool_result(
+                    &call.id,
+                    &format!(
+                        "Tools are disabled for this model; '{}' was not run",
+                        call.name
+                    ),
+                    true,
+                ));
+                persisted_rate_limit_result = true;
+                self.transition(super::continuation::Transition::Observed(call.id.clone()))?;
+                continue;
+            }
             if let Err(e) = self.limiter.check(&call.name) {
                 tracing::warn!(tool = call.name, error = %e, "tool call rate-limited");
                 self.conversation.messages.push(Message::tool_result(
@@ -439,12 +455,16 @@ impl Agent {
         if let Some(activity) = &self.tool_context.activity {
             activity.touch();
         }
-        let scheduled_plan = self
-            .tool_registry
-            .get(&call.name)
-            .map_or_else(ToolExecutionPlan::exclusive, |tool| {
-                tool.execution_plan(&call.input, &self.tool_context)
-            });
+        // Fail closed: an unregistered name never reaches hooks or the
+        // sandbox, where a Redirect could route it to some other tool.
+        let Some(tool) = self.tool_registry.get(&call.name) else {
+            tracing::warn!(tool = call.name, "unknown tool");
+            return Ok((
+                ToolOutput::error(format!("Unknown tool '{}'", call.name)),
+                std::time::Duration::ZERO,
+            ));
+        };
+        let scheduled_plan = tool.execution_plan(&call.input, &self.tool_context);
         // -- Pre-tool hooks --
         let effective_call;
         let call = if !self.tool_hooks.is_empty() {

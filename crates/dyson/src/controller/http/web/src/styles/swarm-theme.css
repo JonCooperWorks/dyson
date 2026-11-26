@@ -313,10 +313,7 @@ textarea {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 12px;
   min-width: 0;
-  min-height: 0;
-  padding: 8px 16px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-1);
   -webkit-backdrop-filter: none;
@@ -328,11 +325,9 @@ textarea {
 .topbar .brand {
   display: flex;
   align-items: center;
-  gap: 8px;
   height: auto;
   margin: 0;
   padding: 0;
-  flex: 0 1 auto;
   min-width: 0;
 }
 .topbar .brand .brand-logo { display: block; flex: 0 0 auto; }
@@ -346,33 +341,20 @@ textarea {
   font-weight: 600;
   font-size: 16px;
   line-height: 1.5;
-  letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .topbar nav {
   display: flex;
   align-items: center;
-  gap: 6px;
   flex: 1 1 auto;
   min-width: 0;
 }
 .topbar nav button {
   display: inline-flex;
-  align-items: center;
-  gap: 0;
-  min-width: 0;
   min-height: 0;
   height: auto;
-  padding: 4px 8px;
-  border: 0;
-  border-radius: var(--radius);
   background: transparent;
-  color: var(--fg-muted);
-  box-shadow: none;
-  font: 500 13px/1.5 var(--sans);
-  cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
 }
 .topbar nav button svg,
 .topbar nav button .k,
@@ -382,8 +364,6 @@ textarea {
   background: var(--bg-2);
 }
 .topbar nav button.active {
-  color: var(--fg);
-  background: var(--bg-2);
   box-shadow: none;
 }
 .topbar .spacer { display: none; }
@@ -398,14 +378,12 @@ textarea {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  max-width: min(38vw, 360px);
   min-width: 0;
   min-height: 0;
   height: auto;
   padding: 4px 8px;
   border: 0;
   border-radius: var(--radius);
-  background: transparent;
   color: var(--fg-muted);
   font: 500 13px/1.5 var(--sans);
   transition: background 120ms ease, color 120ms ease;
@@ -425,8 +403,6 @@ textarea {
 }
 .topbar .meta .select .mono {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .topbar .menu-toggle,
@@ -526,7 +502,6 @@ textarea {
 /* Layout rails and detail surfaces. */
 .body {
   display: grid;
-  grid-template-columns: 280px 1fr;
   min-height: 0;
   overflow: hidden;
   background: var(--bg);
@@ -544,24 +519,19 @@ textarea {
 }
 .left::after { display: none; }
 .left .newc {
-  padding: 12px;
   border-bottom: 1px solid var(--border);
 }
 .left .newc .btn {
   width: 100%;
   justify-content: space-between;
-  min-height: var(--control-height);
   font-size: 13px;
 }
 .left .search {
-  padding: 10px 12px;
   border-bottom: 1px solid var(--border);
 }
 .left .search input {
   width: 100%;
   height: auto;
-  padding: 7px 10px;
-  background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--fg);
@@ -580,31 +550,22 @@ textarea {
   flex: 1 1 auto;
   min-height: 0;
 }
-.left .group { padding: 0; }
 .left .group h4 {
   display: flex;
   align-items: center;
   gap: 6px;
   margin: 0;
-  padding: 12px 12px 8px;
   border-bottom: 1px solid var(--border);
   color: var(--fg-muted);
-  font: 600 11px/1 var(--mono);
-  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 .left .group h4 .n,
 .left .group h4 .icon { color: var(--fg-muted); opacity: 1; }
 
 .conv {
-  display: flex;
   flex-direction: column;
   gap: 4px;
-  margin: 0;
-  padding: 10px 12px;
-  border: 0;
   border-bottom: 1px solid var(--border);
-  border-radius: 0;
   background: transparent;
   box-shadow: none;
   cursor: pointer;
@@ -616,9 +577,7 @@ textarea {
   transform: none;
 }
 .conv.active {
-  background: var(--bg-2);
   border-color: transparent;
-  box-shadow: inset 2px 0 0 var(--accent);
 }
 .conv.active::before { display: none; }
 .conv .row1 {
@@ -638,12 +597,9 @@ textarea {
   color: var(--fg);
 }
 .conv .row2 {
-  color: var(--fg-muted);
   font: 400 12px/1.35 var(--sans);
 }
 .conv.live .row1 .title::after {
-  background: var(--accent);
-  box-shadow: none;
   animation: pulse 1.4s ease-in-out infinite;
 }
 
@@ -668,17 +624,13 @@ textarea {
   align-items: center;
   gap: 10px;
   min-width: 0;
-  min-height: 46px;
-  padding: 10px 24px;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
-  -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
 .centre .context::after { display: none; }
 .centre .context .crumbs {
   flex: 1 1 auto;
-  min-width: 0;
   overflow: hidden;
   color: var(--fg-muted);
   font: 500 12px/1.35 var(--mono);
@@ -730,19 +682,14 @@ textarea {
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  padding: 28px 0 220px;
 }
 .transcript .inner {
   min-width: 0;
-  max-width: 840px;
   margin: 0 auto;
-  padding: 0 36px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
 }
 .composer-dock {
-  position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
@@ -750,9 +697,6 @@ textarea {
   z-index: 5;
   display: flex;
   justify-content: center;
-  padding: 80px 32px 24px;
-  pointer-events: none;
-  background: linear-gradient(to bottom, transparent, var(--bg) 70%);
 }
 .composer-dock > * { pointer-events: auto; }
 
@@ -760,10 +704,6 @@ textarea {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 14px;
-  max-width: 520px;
-  margin: 0 auto;
-  padding: 72px 0 0;
 }
 .empty-state .es-eyebrow {
   display: inline-flex;
@@ -776,9 +716,6 @@ textarea {
   background: transparent;
   color: var(--fg-muted);
   box-shadow: none;
-  font: 600 11px/1 var(--mono);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
 }
 .empty-state .es-eyebrow .es-dot {
   width: 6px;
@@ -793,13 +730,9 @@ textarea {
   color: var(--fg);
   text-shadow: none;
   font: 600 28px/1.2 var(--sans);
-  letter-spacing: 0;
 }
 .empty-state h1 em {
-  color: var(--fg);
   background: none;
-  filter: none;
-  animation: none;
   font-style: normal;
 }
 .empty-state p {
@@ -944,20 +877,14 @@ textarea {
 /* Conversation turns. */
 .turn {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr);
-  gap: 14px;
   position: relative;
 }
 .turn .avatar {
-  width: 28px;
-  height: 28px;
   margin-top: 2px;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
   background: var(--bg-2);
   color: var(--fg-muted);
   box-shadow: none;
-  font: 700 10px/1 var(--mono);
 }
 .turn .avatar.user {
   background: color-mix(in srgb, var(--accent) 14%, var(--bg-2));
@@ -965,8 +892,6 @@ textarea {
   box-shadow: none;
 }
 .turn .avatar.agent {
-  background: var(--bg-2);
-  color: var(--fg);
   box-shadow: none;
 }
 .turn .avatar.system {
@@ -977,7 +902,6 @@ textarea {
 .turn .col {
   display: flex;
   flex-direction: column;
-  gap: 10px;
   min-width: 0;
 }
 .turn .who {
@@ -986,16 +910,11 @@ textarea {
   gap: 10px;
   min-width: 0;
   color: var(--fg-muted);
-  font: 500 11px/1.35 var(--mono);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
 }
 .turn .who .name {
   min-width: 0;
   overflow: hidden;
   color: var(--fg);
-  font-weight: 600;
-  letter-spacing: 0.04em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1036,11 +955,7 @@ textarea {
 }
 .prose pre {
   margin: 10px 0 14px;
-  padding: 12px 14px;
-  overflow-x: auto;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-1);
   color: var(--fg);
   box-shadow: none;
   font: 400 12px/1.6 var(--mono);
@@ -1077,11 +992,9 @@ textarea {
 }
 .prose h1 { font-size: 22px; }
 .prose h2 {
-  padding-bottom: 6px;
   border-bottom: 1px solid var(--border);
-  font-size: 18px;
 }
-.prose h3 { color: var(--fg); font-size: 15px; }
+.prose h3 { color: var(--fg); }
 .prose h4,
 .prose h5,
 .prose h6 {
@@ -1109,7 +1022,6 @@ textarea {
   text-shadow: none;
 }
 .prose table {
-  display: block;
   width: 100%;
   margin: 12px 0 16px;
   overflow-x: auto;
@@ -1134,7 +1046,6 @@ textarea {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
-.prose table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--bg-2) 55%, transparent); }
 .prose .cursor {
   background: var(--accent);
   box-shadow: none;
@@ -1163,7 +1074,6 @@ textarea {
   color: var(--fg);
 }
 .turn .reactions {
-  bottom: -18px;
   left: 44px;
   gap: 2px;
   padding: 5px;
@@ -1174,7 +1084,6 @@ textarea {
 }
 .turn .reaction:hover {
   background: var(--bg-2);
-  transform: none;
 }
 .turn .reaction.on {
   border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
@@ -1499,14 +1408,10 @@ textarea {
   max-width: 840px;
   min-width: 0;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-1);
-  box-shadow: none;
   transition: border-color 120ms ease;
 }
 .composer::before { display: none; }
 .composer:focus-within {
-  border-color: var(--accent);
   box-shadow: none;
 }
 .composer textarea,
@@ -1524,21 +1429,17 @@ textarea {
   font-size: 16px !important;
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
-  touch-action: manipulation;
 }
 .composer textarea::placeholder { color: var(--fg-faint); }
 .composer .row {
   display: flex;
   align-items: center;
-  gap: 4px;
   min-width: 0;
-  padding: 8px 10px 10px;
   border-top: 1px solid var(--border);
 }
 .composer .row .sep { flex: 1; }
 .composer .row .btn {
   flex: 0 0 auto;
-  min-height: 30px;
   padding: 5px 10px;
   border-color: transparent;
   background: transparent;
@@ -1560,8 +1461,6 @@ textarea {
   color: var(--accent-fg);
   box-shadow: none;
   font-weight: 700;
-  letter-spacing: 0;
-  filter: none;
 }
 .composer .send::before { display: none; }
 .composer .send:hover {
@@ -1934,15 +1833,9 @@ textarea {
   flex: 0 0 auto;
 }
 .panel .p-head .actions button {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
   border: 0;
   border-radius: 4px;
-  background: transparent;
   color: var(--fg-muted);
-  font: 500 11px/1 var(--mono);
 }
 .panel .p-head .actions button:hover {
   background: var(--bg-1);
@@ -1953,9 +1846,6 @@ textarea {
   filter: none;
 }
 .panel.live .p-head .t::after {
-  width: 7px;
-  height: 7px;
-  margin-left: 10px;
   background: var(--accent);
   box-shadow: none;
 }
@@ -2237,7 +2127,6 @@ textarea {
   .body.show-left .left {
     display: flex;
     position: fixed;
-    top: 48px;
     left: 0;
     bottom: 0;
     width: min(86vw, 320px);
@@ -2246,41 +2135,24 @@ textarea {
   }
   .scrim {
     position: fixed;
-    inset: 48px 0 0 0;
     background: var(--scrim);
     z-index: 25;
   }
   .topbar {
-    padding: 6px 10px;
-    gap: 8px;
     min-width: 0;
   }
-  .topbar .menu-toggle,
-  .topbar .new-chat {
-    flex: 0 0 32px;
-  }
   .topbar .brand {
-    flex: 1 1 auto;
     min-width: 0;
   }
   .topbar .brand .name {
     max-width: 100%;
   }
-  .topbar nav {
-    flex: 0 0 auto;
-    gap: 2px;
-  }
   .topbar nav button {
     justify-content: center;
     flex: 0 0 auto;
-    width: 30px;
-    height: 30px;
-    padding: 4px;
-    font-size: 12px;
   }
   .topbar .meta .cmdk { display: none; }
   .topbar nav button .k { display: none; }
-  .topbar nav button span:not(.k) { display: none; }
   .topbar nav button svg { display: block; }
   .topbar .meta .select .label,
   .topbar .meta .select .mono { display: none; }
@@ -2290,13 +2162,11 @@ textarea {
   }
   .topbar .meta .select {
     justify-content: center;
-    width: 30px;
     padding: 4px;
   }
   .centre .context {
     gap: 8px;
     min-width: 0;
-    padding: 8px 12px;
   }
   .centre .context .crumbs {
     flex: 1 1 auto;
@@ -2314,24 +2184,16 @@ textarea {
   .mcp-summary-chip:nth-of-type(n+4) { display: none; }
   .mcp-summary-more { max-width: 52px; }
   .transcript {
-    padding: 18px 0 200px;
     overflow-x: hidden;
   }
   .transcript .inner {
     max-width: 100%;
     min-width: 0;
-    padding: 0 16px;
-    gap: 20px;
   }
   .composer-dock {
-    bottom: var(--kb-inset, 0px);
     max-width: 100vw;
     padding: 64px 10px max(12px, env(safe-area-inset-bottom));
   }
-  .empty-state {
-    padding: 44px 4px 0;
-  }
-  .empty-state h1 { font-size: 24px; }
   .mind { grid-template-columns: 1fr; }
   .mind-side {
     position: absolute;
@@ -2341,7 +2203,6 @@ textarea {
     width: 100%;
     max-width: none;
     z-index: 5;
-    transform: translateX(-100%);
     transition: transform 0.18s ease;
   }
   .mind.show-side .mind-side { transform: translateX(0); }
@@ -2395,8 +2256,6 @@ textarea {
   .body.no-left.no-right .left { display: none; }
   .kbd { display: none; }
   .turn {
-    grid-template-columns: 28px minmax(0, 1fr);
-    gap: 12px;
     min-width: 0;
   }
   .turn .reactions {
@@ -2463,7 +2322,6 @@ textarea {
   }
   .run-status {
     min-width: 0;
-    flex-wrap: wrap;
   }
   .run-status .sep { display: none; }
   .run-status .tname {
@@ -2474,10 +2332,8 @@ textarea {
     max-width: 100%;
   }
   .composer .row {
-    gap: 3px;
     flex-wrap: nowrap;
     min-width: 0;
-    padding: 7px 8px 9px;
   }
   .composer .row .btn {
     min-width: 30px;
@@ -2558,7 +2414,7 @@ button:disabled { cursor: not-allowed; }
 .left .search input { background: transparent; padding: 10px 10px 10px 34px; font-size: 12px; }
 .left .group { padding: 0 10px; }
 .left .group h4 { border: 0; padding: 10px 12px; font: 500 11px/1.4 var(--sans); letter-spacing: .06em; }
-.left .group h4 .n { margin-left: auto; font-size: 10px; }
+.left .group h4 .n { font-size: 10px; }
 .conv { position: relative; display: block; padding: 0; margin: 3px 0; border: 0; border-radius: 9px; }
 .conv.active { box-shadow: none; background: var(--bg-2); }
 .conv-open { display: flex; flex-direction: column; gap: 7px; width: 100%; padding: 13px 34px 13px 12px; text-align: left; border: 0; border-radius: inherit; background: transparent; color: var(--fg); cursor: pointer; }
@@ -2608,7 +2464,7 @@ button:disabled { cursor: not-allowed; }
 .composer .row .send { gap: 10px; padding: 0 12px; background: var(--accent); color: var(--accent-fg); border: 0; }
 .composer .row .send:disabled { background: var(--bg-2); color: var(--fg-faint); }
 .composer .model-label { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.composer .att .x { padding: 2px 4px; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.composer .att .x { padding: 2px 4px; border: 0; background: transparent; color: inherit; }
 .composer-hint { padding-top: 10px; text-align: center; font-size: 10px; color: var(--fg-faint); }
 .composer-hint span { padding: 0 7px; }
 .run-controls { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-1); }

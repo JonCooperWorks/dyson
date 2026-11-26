@@ -3181,3 +3181,167 @@ async fn tools_forwarded_to_cli_providers_are_sandbox_gated() {
     assert!(is_error, "denied call must surface as a tool error");
     assert!(content.contains("probe denied by policy"), "{content}");
 }
+
+// -----------------------------------------------------------------------
+// Unknown tools fail closed
+// -----------------------------------------------------------------------
+
+/// Counts runs so a test can prove a registered tool was never reached.
+struct CountingTool(Arc<AtomicUsize>);
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for CountingTool {
+    fn name(&self) -> &str {
+        "counted"
+    }
+    fn description(&self) -> &str {
+        "Counts invocations"
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    async fn run(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &crate::tool::ToolContext,
+    ) -> Result<ToolOutput> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput::success("ran"))
+    }
+}
+
+struct CountingSkill(Vec<Arc<dyn crate::tool::Tool>>);
+
+#[async_trait::async_trait]
+impl Skill for CountingSkill {
+    fn name(&self) -> &str {
+        "counting_skill"
+    }
+    fn tools(&self) -> &[Arc<dyn crate::tool::Tool>] {
+        &self.0
+    }
+}
+
+/// A sandbox that would happily route any call to a registered tool —
+/// the kind of fallback an unknown name must never reach.
+struct RedirectEverythingSandbox;
+
+#[async_trait::async_trait]
+impl Sandbox for RedirectEverythingSandbox {
+    async fn check(
+        &self,
+        _tool_name: &str,
+        input: &serde_json::Value,
+        _ctx: &crate::tool::ToolContext,
+    ) -> Result<crate::sandbox::SandboxDecision> {
+        Ok(crate::sandbox::SandboxDecision::Redirect {
+            tool_name: "counted".into(),
+            input: input.clone(),
+        })
+    }
+}
+
+fn tool_call_then_text(name: &str) -> MockLlm {
+    MockLlm::new(vec![
+        vec![
+            StreamEvent::ToolUseStart {
+                id: "call_u1".into(),
+                name: name.into(),
+            },
+            StreamEvent::ToolUseComplete {
+                id: "call_u1".into(),
+                name: name.into(),
+                input: serde_json::json!({}),
+            },
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::ToolUse,
+                output_tokens: None,
+            },
+        ],
+        text_response("done"),
+    ])
+}
+
+fn tool_result_for(agent: &Agent, id: &str) -> (String, bool) {
+    agent
+        .conversation
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .find_map(|b| match b {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } if tool_use_id == id => Some((content.clone(), *is_error)),
+            _ => None,
+        })
+        .expect("tool result recorded")
+}
+
+#[tokio::test]
+async fn unknown_tool_is_refused_before_sandbox_fallback() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(CountingSkill(vec![Arc::new(CountingTool(
+        Arc::clone(&runs),
+    ))]))];
+    let settings = AgentSettings {
+        api_key: "test".into(),
+        ..Default::default()
+    };
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(tool_call_then_text("ghost_tool"))),
+        Arc::new(RedirectEverythingSandbox),
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut output = RecordingOutput::new();
+    agent.run("go", &mut output).await.unwrap();
+
+    assert_eq!(runs.load(Ordering::SeqCst), 0, "fallback tool must not run");
+    let (content, is_error) = tool_result_for(&agent, "call_u1");
+    assert!(is_error);
+    assert!(content.contains("Unknown tool 'ghost_tool'"), "{content}");
+}
+
+#[tokio::test]
+async fn model_tool_calls_are_refused_while_tools_are_disabled() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(CountingSkill(vec![Arc::new(CountingTool(
+        Arc::clone(&runs),
+    ))]))];
+    let settings = AgentSettings {
+        api_key: "test".into(),
+        ..Default::default()
+    };
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(tool_call_then_text("counted"))),
+        Arc::new(DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        )),
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    agent.disable_tools();
+    let mut output = RecordingOutput::new();
+    agent.run("go", &mut output).await.unwrap();
+
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        0,
+        "unadvertised tool must not run"
+    );
+    let (_, is_error) = tool_result_for(&agent, "call_u1");
+    assert!(is_error);
+}

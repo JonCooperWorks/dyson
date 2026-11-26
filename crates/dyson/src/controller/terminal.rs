@@ -154,8 +154,8 @@ impl super::Controller for TerminalController {
                 &mut current_settings,
                 settings.sandbox_bypass.as_ref(),
                 &mut agent,
-                &mut current_provider,
-                &mut current_model,
+                &current_provider,
+                &current_model,
                 None,
                 registry,
             )

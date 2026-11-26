@@ -1,45 +1,13 @@
 /* Dyson — right-rail tool panels */
 
 .panel {
-  background:
-    linear-gradient(180deg,
-      oklch(0.190 0.014 262),
-      oklch(0.165 0.014 262));
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-  display: flex; flex-direction: column;
-  flex: 0 0 auto;
   position: relative;
-  box-shadow:
-    0 1px 0 oklch(1 0 0 / 0.03) inset,
-    0 6px 18px -10px oklch(0 0 0 / 0.55),
-    0 2px 4px -2px oklch(0 0 0 / 0.35);
   transition: box-shadow 200ms ease, border-color 160ms ease;
-}
-.panel:hover {
-  border-color: color-mix(in srgb, var(--border) 72%, var(--fg-muted));
-  box-shadow:
-    0 1px 0 oklch(1 0 0 / 0.04) inset,
-    0 12px 28px -10px oklch(0 0 0 / 0.6),
-    0 4px 8px -4px oklch(0 0 0 / 0.4);
 }
 .panel.live {
   border-color: color-mix(in srgb, var(--accent) 46%, transparent);
-  box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--accent) 46%, transparent) inset,
-    0 8px 22px -10px oklch(0 0 0 / 0.5),
-    0 0 28px -10px color-mix(in srgb, var(--accent) 34%, transparent);
 }
 .panel .p-head {
-  display: flex; align-items: center; gap: 9px;
-  padding: 10px 12px;
-  background:
-    linear-gradient(180deg,
-      oklch(0.235 0.015 262),
-      oklch(0.205 0.014 262));
-  border-bottom: 1px solid var(--border);
-  cursor: grab;
   position: relative;
 }
 .panel .p-head::after {
@@ -49,149 +17,43 @@
   height: 1px;
   background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--border) 72%, var(--fg-muted)), transparent);
 }
-.panel .p-head .ic {
-  width: 18px; height: 18px;
-  display: grid; place-items: center;
-  border-radius: 4px;
-  background: linear-gradient(180deg, oklch(0.80 0.105 195 / 0.18), oklch(0.80 0.105 195 / 0.06));
-  border: 1px solid oklch(0.80 0.105 195 / 0.30);
-  color: var(--accent);
-  font: 700 9.5px/1 var(--mono);
-  flex: 0 0 auto;
-  box-shadow: 0 0 10px -3px color-mix(in srgb, var(--accent) 8%, transparent);
-}
 .panel.live .p-head .ic {
-  color: var(--accent);
-  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 14%, transparent), oklch(0.89 0.22 130 / 0.06));
   border-color: color-mix(in srgb, var(--accent) 46%, transparent);
-  box-shadow: 0 0 12px -2px color-mix(in srgb, var(--accent) 34%, transparent);
 }
-.panel .p-head .t {
-  font: 600 12px/1 var(--mono);
-  color: var(--fg);
-  flex: 1 1 auto;
-  min-width: 0;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  letter-spacing: 0.02em;
-}
-.panel .p-head .t .fade { color: var(--fg-faint); font-weight: 400; }
-.panel .p-head .actions { display: flex; gap: 2px; flex: 0 0 auto; }
+.panel .p-head .t .fade { font-weight: 400; }
 .panel .p-head .actions button {
-  background: transparent; border: 0;
-  width: 24px; height: 24px;
-  color: var(--fg-faint);
-  border-radius: 4px;
   cursor: pointer;
-  display: grid; place-items: center;
-  font: 500 10.5px/1 var(--mono);
   transition: background 120ms ease, color 120ms ease;
-}
-.panel .p-head .actions button:hover { background: var(--bg-1); color: var(--fg); }
-.panel .p-head .actions button.on {
-  color: var(--accent);
-  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 34%, transparent));
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  font: 500 11px/1 var(--mono);
 }
 .panel.live .p-head .t::after {
   content: "";
   display: inline-block;
-  width: 7px; height: 7px;
-  margin-left: 10px;
   border-radius: 50%;
-  background: var(--accent);
   vertical-align: middle;
-  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 34%, transparent), 0 0 0 3px oklch(0.89 0.22 130 / 0.18);
   animation: pulse 1.2s ease-in-out infinite;
+  width: 7px;
+  height: 7px;
+  margin-left: 10px;
 }
-
-.panel .p-body {
-  padding: 12px;
-  min-height: 0;
-  /* 380px is comfortable on desktop but clips tool output on phones
-     where viewport height is already constrained by the URL bar and
-     keyboard.  Clamp to 50vh on small screens so long outputs don't
-     get cut off and still fit above the composer. */
-  max-height: min(420px, 52vh);
-  overflow: auto;
-}
-.panel .p-body.flush { padding: 0; }
 
 /* ---------- bash / terminal ---------- */
-/* Terminal block — true black background with a subtle vignette and a
-   top inset shadow so it reads as recessed below the panel head.  The
-   colours stay close to a classic dark-terminal palette so command
-   output is instantly recognisable. */
 .term {
-  font: 400 12px/1.6 var(--mono);
-  background:
-    radial-gradient(ellipse 100% 80% at 50% 0%, oklch(0.10 0.01 262), #050608) #050608;
-  color: #d9d9d9;
-  padding: 14px 16px;
-  min-height: 200px;
-  border-radius: 0;
   position: relative;
-  box-shadow: 0 4px 12px -8px oklch(0 0 0 / 0.8) inset;
-  /* Tabular command output (free -h, df -h, ps aux) used to wrap on
-     whitespace under `pre-wrap`, which mangled aligned columns into
-     unreadable zigzags on mobile.  Preserve newlines but keep each
-     line as a single horizontally-scrollable strip so the original
-     column alignment survives. */
-  overflow-x: auto;
 }
-.term .line { white-space: pre; }
-.term .p { color: var(--accent); text-shadow: 0 0 8px color-mix(in srgb, var(--accent) 8%, transparent); }
-.term .c { color: #fff; }
-.term .e { color: #ff8a8a; }
-.term .d { color: #888; }
-.term .w { color: #ffd66b; }
 .term .cursor {
   display: inline-block;
   width: 8px; height: 14px;
-  background: var(--accent);
   vertical-align: text-bottom;
-  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 34%, transparent);
   animation: blink 1s steps(1) infinite;
 }
-.term-foot {
-  display: flex; align-items: center; gap: 12px;
-  padding: 8px 14px;
-  background: linear-gradient(180deg, var(--bg-1), var(--bg-2));
-  border-top: 1px solid var(--border);
-  font: 500 11px/1 var(--mono);
-  color: var(--fg-muted);
-}
-.term-foot .exit.ok { color: var(--ok); text-shadow: 0 0 8px oklch(0.86 0.18 160 / 0.4); }
-.term-foot .exit.err { color: var(--danger); text-shadow: 0 0 8px oklch(0.70 0.215 25 / 0.4); }
 
 /* ---------- diff ---------- */
-.diff { font: 400 12px/1.65 var(--mono); }
-.diff .file {
-  padding: 8px 12px;
-  background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  color: var(--fg-muted);
-  font-size: 11.5px;
-  display: flex; align-items: center; gap: 12px;
-}
-.diff .file .path { flex: 1; color: var(--fg); }
-.diff .file .sz .a {
-  color: var(--ok);
-  text-shadow: 0 0 8px oklch(0.86 0.18 160 / 0.35);
-}
-.diff .file .sz .r {
-  color: var(--danger);
-  margin-left: 8px;
-  text-shadow: 0 0 8px oklch(0.70 0.215 25 / 0.35);
-}
-.diff .file:first-child { border-top: 0; }
-.diff .row {
-  display: flex;
-  white-space: pre;
-  position: relative;
-}
-.diff .row .ln { color: var(--fg-faint); padding: 0 10px; width: 36px; text-align: right; user-select: none; flex: 0 0 auto; }
-.diff .row .sn { color: var(--fg-faint); padding: 0 10px 0 0; width: 26px; text-align: center; flex: 0 0 auto; font-weight: 600; }
-.diff .row .l { flex: 1; padding-right: 12px; }
 .diff .row.add {
   background:
     linear-gradient(90deg,
@@ -199,7 +61,6 @@
       oklch(0.86 0.18 160 / 0.06));
   color: oklch(0.94 0.18 160);
 }
-.diff .row.add .sn { color: var(--ok); }
 .diff .row.rem {
   background:
     linear-gradient(90deg,
@@ -207,155 +68,42 @@
       oklch(0.70 0.215 25 / 0.04));
   color: oklch(0.88 0.215 25);
 }
-.diff .row.rem .sn { color: var(--danger); }
-.diff .row.ctx { color: var(--fg-muted); }
-.diff .hunk {
-  background: linear-gradient(180deg, var(--bg-1), var(--bg));
-  color: var(--fg-muted);
-  padding: 5px 12px;
-  font-size: 11px;
-  border-top: 1px solid var(--border);
-  letter-spacing: 0.04em;
-}
 
 /* ---------- sbom table ---------- */
-.sbom {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  width: 100%;
-  border-collapse: collapse;
-}
-.sbom th {
-  text-align: left;
-  padding: 8px 12px;
-  background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
-  color: var(--fg-faint);
-  font: 500 10.5px/1 var(--mono);
-  letter-spacing: 0.10em;
-  text-transform: uppercase;
-  border-bottom: 1px solid var(--border);
-  position: sticky; top: 0;
-}
-.sbom td {
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-  color: var(--fg-muted);
-}
-.sbom tr:hover td { background: oklch(0.20 0.014 262 / 0.7); }
-.sbom .pkg { color: var(--fg); font-weight: 500; }
 .sbom .ver { color: var(--fg-muted); }
-.sbom .sev { width: 64px; }
-.sbom .sev .b {
-  display: inline-block;
-  padding: 2px 7px;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-}
-.sbom .sev .b.crit { background: oklch(0.70 0.215 25 / 0.20); color: var(--danger); box-shadow: 0 0 10px -2px oklch(0.70 0.215 25 / 0.4); }
-.sbom .sev .b.high { background: oklch(0.83 0.155 45 / 0.18); color: oklch(0.86 0.155 45); }
-.sbom .sev .b.med  { background: oklch(0.83 0.155 85 / 0.18); color: var(--warn); }
-.sbom .sev .b.low  { background: oklch(0.80 0.105 195 / 0.18); color: var(--accent); }
-.sbom-foot {
-  padding: 8px 12px;
-  font: 500 10.5px/1 var(--mono);
-  color: var(--fg-faint);
-  background: linear-gradient(180deg, var(--bg-1), var(--bg-2));
-  display: flex; gap: 14px;
-}
-.sbom .reach {
-  display: inline-flex; align-items: center; gap: 4px;
-  font-size: 10.5px;
-  color: var(--warn);
-}
+.sbom .sev .b.crit { background: oklch(0.70 0.215 25 / 0.20); }
+.sbom .sev .b.high { background: oklch(0.83 0.155 45 / 0.18); }
+.sbom .sev .b.med  { background: oklch(0.83 0.155 85 / 0.18); }
+.sbom .sev .b.low  { background: oklch(0.80 0.105 195 / 0.18); }
 .sbom .reach.no { color: var(--fg-faint); }
 
 /* ---------- taint graph ---------- */
-.taint { padding: 6px 0; }
-.taint .flow {
-  display: flex; flex-direction: column;
-  gap: 0;
-  padding: 16px 10px 12px;
-  position: relative;
-}
 .taint .node {
-  display: flex; align-items: flex-start; gap: 12px;
-  padding: 10px 12px;
-  background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  font-family: var(--mono);
-  font-size: 11.5px;
   position: relative;
   z-index: 1;
   cursor: pointer;
   transition: border-color 0.12s, background 0.12s, box-shadow 0.16s;
-  box-shadow: none;
-}
-.taint .node:hover {
-  border-color: color-mix(in srgb, var(--border) 72%, var(--fg-muted));
-  box-shadow: none;
-}
-.taint .node .ic {
-  width: 24px; height: 24px;
-  border-radius: 5px;
-  display: grid; place-items: center;
-  font: 700 10px/1 var(--mono);
-  flex: 0 0 auto;
 }
 .taint .node.source .ic {
   background: oklch(0.70 0.215 25 / 0.20);
-  color: var(--danger);
-  box-shadow: 0 0 10px -3px oklch(0.70 0.215 25 / 0.4);
 }
-.taint .node.prop .ic { background: var(--bg-1); color: var(--fg-muted); }
 .taint .node.sink .ic {
   background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 82%, #000));
-  color: var(--accent-fg);
-  box-shadow: 0 0 14px -3px color-mix(in srgb, var(--accent) 34%, transparent);
 }
-.taint .node .loc { color: var(--fg); font-weight: 500; }
-.taint .node .sym { color: var(--fg-muted); font-size: 10.5px; margin-top: 2px; }
+.taint .node .sym { margin-top: 2px; }
 .taint .node .col { min-width: 0; flex: 1; }
 .taint .edge {
-  width: 2px;
-  height: 16px;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--border) 72%, var(--fg-muted)), var(--border));
-  margin-left: 21px;
   position: relative;
   z-index: 0;
 }
 
 /* ---------- fallback / web ---------- */
-.fallback-body {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--fg-muted);
-  padding: 12px 14px;
-  background: linear-gradient(180deg, var(--bg-1), var(--bg));
-  white-space: pre-wrap;
-  line-height: 1.6;
-}
 
 /* ---------- search / web results ---------- */
-.srch { display: flex; flex-direction: column; gap: 1px; }
 .srch .r {
-  padding: 11px 14px;
-  border-bottom: 1px solid var(--border);
   cursor: pointer;
   transition: background 120ms ease;
 }
-.srch .r:hover { background: oklch(0.20 0.014 262 / 0.7); }
-.srch .r:last-child { border-bottom: 0; }
-.srch .r .t {
-  color: var(--accent);
-  font: 500 12.5px/1.3 var(--sans);
-  margin-bottom: 3px;
-  text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 8%, transparent);
-}
-.srch .r .u { color: var(--fg-faint); font: 400 10.5px/1.3 var(--mono); margin-bottom: 5px; }
-.srch .r .s { color: var(--fg-muted); font: 400 12px/1.5 var(--sans); }
 
 /* MCP elicitation modal — a connected MCP server asking the user for input.
    Centered overlay; intentionally minimal, matches the app's dark chrome. */

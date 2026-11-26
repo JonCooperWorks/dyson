@@ -21,7 +21,9 @@ import { render, fireEvent, cleanup } from '@testing-library/react';
 import { RunStatusStrip, ToolBlock } from '../components/turns.jsx';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const turnsCss = () => readFileSync(join(__dirname, '..', 'styles', 'turns.css'), 'utf8');
+// swarm-theme.css owns the turn header rules (turns.css keeps only what it
+// does not override).
+const turnsCss = () => readFileSync(join(__dirname, '..', 'styles', 'swarm-theme.css'), 'utf8');
 
 afterEach(() => { cleanup(); });
 
@@ -32,7 +34,7 @@ describe('UX: copy-from-anywhere — sticky copy button', () => {
     // touch shouldn't redeclare position).  Match from the selector to
     // the next `}` so the assertion targets that block specifically.
     const block = css.match(/\.turn \.copy-turn \{[^}]*\}/);
-    expect(block, '.turn .copy-turn selector must exist in turns.css').toBeTruthy();
+    expect(block, '.turn .copy-turn selector must exist in swarm-theme.css').toBeTruthy();
     expect(block[0]).toMatch(/position:\s*sticky/);
     expect(block[0]).toMatch(/top:/);
     // Background keeps the sticky button readable over scrolling prose.
@@ -44,7 +46,7 @@ describe('UX: copy-from-anywhere — sticky copy button', () => {
     // dragged the whole header bar across the prose.  Lock that out.
     const css = turnsCss();
     const block = css.match(/\.turn \.who \{[^}]*\}/);
-    expect(block, '.turn .who selector must exist in turns.css').toBeTruthy();
+    expect(block, '.turn .who selector must exist in swarm-theme.css').toBeTruthy();
     expect(block[0]).not.toMatch(/position:\s*sticky/);
   });
 });

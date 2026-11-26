@@ -1,20 +1,9 @@
 /* Dyson — layout */
 
 /* ---------- app shell ---------- */
-/* 100dvh tracks the dynamic viewport so on iOS Safari the shell
-   shrinks when the URL bar slides in or the keyboard opens — this
-   keeps the composer-dock anchored to the visible bottom instead of
-   drifting under the URL bar.  100vh is a fallback for browsers
-   without dvh (Safari <15.4, old Chrome). */
+/* Shell sizing (100dvh with a 100vh fallback) lives in swarm-theme.css. */
 .app {
-  display: grid;
   grid-template-rows: 48px 1fr;
-  height: 100vh;
-  height: 100dvh;
-  position: relative;
-  background:
-    radial-gradient(120% 80% at 50% -20%, oklch(0.27 0.08 262 / 0.45), transparent 60%),
-    var(--bg);
 }
 
 /* Hairline grid wash on the bg — a 24px grid at 1.5% opacity, only
@@ -32,20 +21,9 @@
   mask-image: radial-gradient(ellipse 90% 70% at 50% 30%, #000 30%, transparent 100%);
   z-index: 0;
 }
-.app > * { position: relative; z-index: 1; }
 
 .topbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 0 14px;
-  background: linear-gradient(180deg,
-      oklch(0.165 0.014 262 / 0.85) 0%,
-      oklch(0.155 0.014 262 / 0.78) 100%);
   -webkit-backdrop-filter: saturate(140%) blur(12px);
-  backdrop-filter: saturate(140%) blur(12px);
-  z-index: 10;
-  min-width: 0;
   position: relative;
 }
 /* Hairline accent on the bottom edge — fades from transparent through
@@ -67,11 +45,8 @@
   pointer-events: none;
 }
 .topbar .brand {
-  display: flex; align-items: center; gap: 10px;
   padding-right: 12px;
   margin-right: 4px;
-  height: 100%;
-  flex: 0 0 auto;
   position: relative;
 }
 .topbar .brand::after {
@@ -116,37 +91,11 @@
   z-index: -1;
 }
 .topbar .brand .name {
-  font: 600 14px/1 var(--sans);
-  letter-spacing: -0.01em;
-  background: linear-gradient(180deg, var(--fg), var(--fg-muted));
   -webkit-background-clip: text;
   background-clip: text;
-  color: transparent;
-}
-.topbar nav {
-  display: flex; gap: 1px;
-  flex: 0 0 auto;
 }
 .topbar nav button {
-  background: transparent; border: 0;
-  color: var(--fg-muted);
-  padding: 0 11px; height: 30px;
-  font: 500 12.5px/1 var(--sans);
-  border-radius: var(--radius);
-  cursor: pointer;
-  display: inline-flex; align-items: center; gap: 7px;
   position: relative;
-  transition: color 120ms ease, background 120ms ease;
-}
-.topbar nav button:hover { color: var(--fg); background: var(--bg-1); }
-.topbar nav button.active {
-  color: var(--fg);
-  background: linear-gradient(180deg,
-      oklch(0.27 0.02 262 / 0.7),
-      oklch(0.21 0.02 262 / 0.7));
-  box-shadow:
-    0 0 0 1px var(--border) inset,
-    0 1px 0 oklch(1 0 0 / 0.04) inset;
 }
 .topbar nav button.active::after {
   content: "";
@@ -166,7 +115,7 @@
   border: 1px solid oklch(0.30 0.02 262 / 0.7);
   flex: 0 0 auto;
 }
-.topbar nav button { white-space: nowrap; }
+.topbar nav button { white-space: nowrap; align-items: center; gap: 0; min-width: 0; border: 0; color: var(--fg-muted); box-shadow: none; font: 500 13px/1.5 var(--sans); cursor: pointer; transition: background 120ms ease, color 120ms ease; }
 .topbar .meta > * { flex: 0 0 auto; }
 
 /* Responsive collapse */
@@ -193,21 +142,9 @@
   .topbar .brand .name { display: none; }
 }
 .topbar .spacer { flex: 1 1 auto; }
-.topbar .meta {
-  display: flex; align-items: center; gap: 8px;
-  flex: 0 0 auto;
-  min-width: 0;
-}
 .topbar .meta .select {
   appearance: none; -webkit-appearance: none;
-  display: inline-flex; align-items: center; gap: 7px;
-  height: 28px; padding: 0 10px;
-  border: 1px solid var(--border); border-radius: var(--radius);
-  font: 500 12px/1 var(--sans);
-  color: var(--fg-muted);
-  background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
   cursor: pointer;
-  transition: border-color 120ms ease, color 120ms ease;
 }
 .topbar .meta .select:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--accent) 46%, transparent);
@@ -215,12 +152,6 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 8%, transparent);
 }
 .topbar .meta .select:disabled { cursor: default; }
-.topbar .meta .select .label {
-  color: var(--fg-faint);
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.10em;
-}
 .backend-badge {
   display: inline-flex;
   align-items: center;
@@ -297,17 +228,6 @@
 .topbar .meta .cmdk .kbd { margin-left: auto; }
 
 /* ---------- main body ---------- */
-/* Two columns: conversation list + transcript.  Tool calls render
-   inline as expandable blocks in the transcript, so there is no
-   right-rail tool stack.  `.body.no-right` on the conv view exists for
-   a CSS-only no-op (and to keep the no-left.no-right combo working in
-   the Mind / Activity / Artefacts views which set their own classes). */
-.body {
-  display: grid;
-  grid-template-columns: 264px 1fr;
-  min-height: 0;
-  overflow: hidden;
-}
 .body.no-left { grid-template-columns: 1fr; }
 .body.no-left.no-right { grid-template-columns: 1fr; }
 
@@ -332,81 +252,19 @@
       var(--border) 88%,
       transparent 100%);
 }
-.left .newc {
-  padding: 12px;
-  border-bottom: 1px solid var(--border);
-}
-.left .newc .btn { width: 100%; justify-content: space-between; height: 36px; font-size: 13px; }
-.left .search {
-  padding: 10px 12px;
-}
+.left .newc .btn { height: 36px; }
 .left .search input {
-  height: 30px; padding: 0 10px 0 30px;
-  background: var(--bg-1);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--fg);
-  font: 400 12px/1 var(--sans);
-  width: 100%;
-  background-image: radial-gradient(circle at 11px 50%, var(--fg-faint) 1.5px, transparent 2px), linear-gradient(var(--fg-faint), var(--fg-faint));
   background-repeat: no-repeat;
   background-position: 11px 50%, 15px 50%;
   background-size: 3px 3px, 5px 1px;
-  transition: border-color 120ms ease, box-shadow 160ms ease;
-}
-.left .search input:focus {
-  outline: none;
-  border-color: color-mix(in srgb, var(--accent) 46%, transparent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 8%, transparent);
-}
-.left .group {
-  padding: 4px 0 10px;
-}
-.left .group h4 {
-  padding: 12px 14px 6px;
-  margin: 0;
-  font: 500 10px/1 var(--mono);
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--fg-faint);
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 .left .group h4 .n {
   color: var(--fg-faint);
   font-weight: 400;
   opacity: 0.6;
+  margin-left: auto;
 }
 .left .group h4 .icon { color: var(--fg-faint); opacity: 0.7; }
-
-.left .scroll { overflow: auto; flex: 1 1 auto; min-height: 0; }
-
-.conv {
-  display: flex; flex-direction: column; gap: 4px;
-  padding: 9px 12px 11px;
-  margin: 0 8px 2px;
-  border-radius: var(--radius);
-  cursor: pointer;
-  position: relative;
-  border: 1px solid transparent;
-  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
-}
-.conv:hover {
-  background: linear-gradient(180deg,
-      oklch(0.22 0.014 262 / 0.7),
-      oklch(0.19 0.014 262 / 0.7));
-  border-color: var(--border);
-}
-.conv.active {
-  background: linear-gradient(180deg,
-      oklch(0.24 0.018 262),
-      oklch(0.20 0.016 262));
-  border-color: color-mix(in srgb, var(--border) 72%, var(--fg-muted));
-  box-shadow:
-    0 1px 0 oklch(1 0 0 / 0.03) inset,
-    0 6px 16px -8px oklch(0 0 0 / 0.6);
-}
 .conv.active::before {
   content: ""; position: absolute;
   left: -2px; top: 12px; bottom: 12px; width: 3px;
@@ -414,25 +272,18 @@
   background: linear-gradient(180deg, var(--accent), var(--accent));
   box-shadow: 0 0 14px -1px color-mix(in srgb, var(--accent) 34%, transparent);
 }
-.conv .row1 {
-  display: flex; align-items: center; gap: 6px;
-  font: 500 13px/1.25 var(--sans);
-  color: var(--fg);
+.conv .row1 { align-items: center; gap: 6px;
 }
-.conv .row1 .title { flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.conv .row1 .when { font: 500 10.5px/1 var(--mono); color: var(--fg-faint); flex: 0 0 auto; }
+.conv .row1 .title { flex: 1 1 auto; }
+.conv .row1 .when { flex: 0 0 auto; }
 .conv .row1 .conv-del {
   flex: 0 0 auto;
   display: inline-flex; align-items: center; justify-content: center;
-  width: 18px; height: 18px;
-  padding: 0; border: none; background: transparent;
-  color: var(--fg-faint); cursor: pointer;
+  padding: 0; border: none; background: transparent; cursor: pointer;
   opacity: 0;
-  border-radius: 3px;
   transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
 }
-.conv:hover .row1 .conv-del { opacity: 0.7; }
-.conv .row1 .conv-del:hover { opacity: 1; background: var(--border); color: var(--fg); }
+.conv .row1 .conv-del:hover { opacity: 1; }
 /* Touch devices never fire :hover, so the delete control was invisible
    and unreachable on mobile.  Keep it visible and give it a finger-sized
    hit area there. */
@@ -441,8 +292,6 @@
 }
 .conv .row2 {
   display: flex; align-items: center; gap: 6px;
-  font: 400 11.5px/1.25 var(--sans);
-  color: var(--fg-muted);
   min-height: 14px;
 }
 .conv .row2 .last { flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -453,26 +302,12 @@
   width: 6px; height: 6px;
   margin-left: 7px;
   border-radius: 50%;
-  background: var(--accent);
   vertical-align: middle;
-  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 34%, transparent), 0 0 0 2px oklch(0.89 0.22 130 / 0.18);
-  animation: pulse 1.4s ease-in-out infinite;
+  background: var(--accent);
+  box-shadow: none;
 }
 
 /* ---------- centre ---------- */
-/* position: relative makes .centre the containing block for the
-   absolutely-positioned composer-dock, so `bottom: 0` resolves to the
-   visible bottom of the centre column.  Without this, the dock falls
-   back to the initial containing block (viewport) and on iOS Safari
-   the URL-bar area shifts it off visually. */
-.centre {
-  display: flex; flex-direction: column;
-  background: var(--bg-1);
-  min-width: 0;
-  min-height: 0;
-  position: relative;
-  overflow: hidden;
-}
 /* Aurora — behind everything in the centre column when the chat is empty.
    Active conversations get the plain --bg-1 fill so prose reads cleanly;
    the empty state gets to be a moment.  Three layers stack: a wide
@@ -526,21 +361,12 @@
   will-change: transform;
 }
 .centre.empty .aurora-sweep { opacity: 0.55; }
-.centre > * { position: relative; z-index: 1; }
 
 .centre .context {
-  display: flex; align-items: center; gap: 10px;
-  padding: 10px 22px;
-  border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg,
-      oklch(0.155 0.014 262 / 0.85) 0%,
-      oklch(0.150 0.014 262 / 0.55) 100%);
-  -webkit-backdrop-filter: blur(10px) saturate(130%);
-  backdrop-filter: blur(10px) saturate(130%);
-  min-height: 46px;
   flex: 0 0 auto;
   position: relative;
   z-index: 2;
+  -webkit-backdrop-filter: none;
 }
 .centre .context::after {
   content: "";
@@ -549,113 +375,27 @@
   height: 1px;
   background: linear-gradient(90deg, transparent, var(--border) 25%, var(--border) 75%, transparent);
 }
-.centre .context .crumbs {
-  display: flex; align-items: center; gap: 7px;
-  font: 500 12px/1 var(--mono);
-  color: var(--fg-muted);
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-}
 .centre .context .crumbs .c-sep { color: var(--fg-faint); opacity: 0.5; }
 .centre .context .crumbs .c-root { color: var(--fg-muted); }
-.centre .context .crumbs .c-leaf { color: var(--fg); }
 .centre .context .crumbs .c-sub { color: var(--warn); }
-.centre .context .right { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
-
-.transcript {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  padding: 36px 0 240px;
-  min-height: 0;
-  /* `scroll-behavior: smooth` made every programmatic scrollTop assign
-     animate — including the "open at the bottom" pin when switching
-     chats, which read as jank.  We want instant jumps there; the
-     streaming near-bottom follow is also fine without animation. */
-}
-.transcript .inner {
-  max-width: 840px;
-  margin: 0 auto;
-  padding: 0 36px;
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
-}
 
 /* ---------- composer dock ---------- */
-.composer-dock {
-  position: absolute;
-  left: 0; right: 0; bottom: 0;
-  padding: 100px 32px 26px;
-  display: flex; justify-content: center;
-  pointer-events: none;
-  background:
-    linear-gradient(to bottom,
-      transparent 0%,
-      oklch(0.135 0.014 262 / 0.55) 30%,
-      oklch(0.135 0.014 262 / 0.95) 75%,
-      var(--bg-1) 100%);
-  z-index: 5;
-}
-.composer-dock > * { pointer-events: auto; }
 
 /* ---------- mind view ---------- */
-/* position: relative anchors the mobile `.mind-side` drawer (which is
-   position: absolute) to this grid cell instead of the viewport.  Without
-   it the drawer escapes up to the initial containing block, covers the
-   44px topbar with an opaque dark panel, and renders the whole page as
-   a black screen with the nav tabs and hamburger unreachable.  On desktop
-   the drawer is a static grid column, so the rule is a no-op there. */
-.mind {
-  display: grid;
-  grid-template-columns: 288px 1fr;
-  flex: 1;
-  min-height: 0;
-  position: relative;
-}
 .mind-side {
   border-right: 1px solid var(--border);
   background: linear-gradient(180deg, oklch(0.155 0.014 262 / 0.6), oklch(0.135 0.014 262 / 0.6));
   display: flex; flex-direction: column;
   min-height: 0;
 }
-.mind-pane {
-  display: flex; flex-direction: column;
-  min-height: 0;
-  min-width: 0;
-  background: var(--bg-1);
-}
-.mind-editor {
-  flex: 1 1 auto;
-  width: 100%;
-  padding: 28px 40px;
-  background: transparent;
-  color: var(--fg);
-  border: 0;
-  resize: none;
-  outline: none;
-  font: 400 13.5px/1.7 var(--mono);
-  caret-color: var(--accent);
-}
-.mind-editor:focus { background: oklch(0.15 0.014 262 / 0.3); }
-.mind-editor:disabled { color: var(--fg-faint); }
-
-/* Tap-to-close target for the mobile drawers.  Sits inside .mind under
-   .mind-side, hidden on desktop where sidebars are permanent columns. */
-.mind-scrim { display: none; }
 
 /* ---------- artefact tree (mind-side) ---------- */
 .artefact-tree-head {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
 }
 .artefact-chat-row {
-  display: flex; align-items: center; gap: 6px;
-  padding: 9px 14px;
   cursor: pointer;
   user-select: none;
-  color: var(--fg);
   transition: background 120ms ease;
 }
 .artefact-chat-row:hover { background: oklch(0.18 0.014 262 / 0.7); }
@@ -668,44 +408,16 @@
   transition: transform 0.12s ease;
   flex: 0 0 auto;
 }
-.artefact-chat-row .title {
-  font-size: 13px;
-  flex: 1 1 auto;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 .artefact-chat-row .count {
   font-size: 10.5px;
   color: var(--fg-faint);
   flex: 0 0 auto;
 }
 .artefact-row {
-  display: flex; align-items: center; gap: 8px;
-  padding: 7px 16px 7px 36px;
   cursor: pointer;
-  border-left: 2px solid transparent;
-  font-size: 12.5px;
-  color: var(--fg-muted);
   transition: background 120ms ease, color 120ms ease;
 }
-.artefact-row:hover { background: oklch(0.18 0.014 262 / 0.7); color: var(--fg); }
-.artefact-row[data-selected="true"] {
-  background: linear-gradient(90deg, oklch(0.23 0.018 262), oklch(0.20 0.016 262));
-  color: var(--fg);
-  border-left-color: var(--accent);
-  box-shadow: -1px 0 12px -2px color-mix(in srgb, var(--accent) 34%, transparent);
-}
-.artefact-row .title {
-  flex: 1 1 0;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 .artefact-row .size {
-  font-size: 10px;
-  color: var(--fg-faint);
   flex: 0 0 auto;
 }
 
@@ -718,36 +430,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.artefact-meta-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px 18px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-1);
-  font-size: 11.5px;
-}
-
-.artefact-meta-row {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  min-width: 0;
-  max-width: 100%;
-}
-
-.artefact-meta-label {
-  flex: 0 0 auto;
-  color: var(--fg-faint);
-}
-
-.artefact-meta-value {
-  min-width: 0;
-  max-width: min(52ch, 100%);
-  overflow-wrap: anywhere;
-  color: var(--fg);
 }
 
 .artefact-text-reader {
@@ -781,21 +463,6 @@
 }
 
 /* ---------- model menu (top bar) ---------- */
-.modelmenu-scrim { position: fixed; inset: 0; z-index: 19; }
-.modelmenu {
-  position: absolute;
-  top: 48px;
-  right: 0;
-  background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
-  border: 1px solid color-mix(in srgb, var(--border) 72%, var(--fg-muted));
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-3);
-  width: min(460px, 92vw);
-  max-height: 70vh;
-  overflow-y: auto;
-  padding: 8px;
-  z-index: 20;
-}
 /* Searchable catalogue picker (replaces the provider-tree menu). */
 .modelmenu .mm-search {
   position: sticky;
@@ -838,15 +505,9 @@
   font: 500 10.5px/1 var(--mono);
   color: var(--fg-faint);
 }
-.modelmenu .group { border-radius: 8px; margin-bottom: 2px; }
 .modelmenu .group:last-child { margin-bottom: 0; }
 .modelmenu .g-head {
-  display: flex; align-items: center; gap: 8px;
-  padding: 11px 11px;
-  border-radius: 7px;
   cursor: pointer;
-  font: 500 13.5px/1 var(--sans);
-  color: var(--fg);
   user-select: none;
   transition: background 120ms ease;
 }
@@ -858,30 +519,12 @@
 }
 .modelmenu .g-head .name { flex: 0 0 auto; }
 .modelmenu .g-head .badge {
-  font: 600 9.5px/1 var(--mono);
   letter-spacing: 0.10em;
   text-transform: uppercase;
-  padding: 3px 7px;
-  border-radius: 999px;
   background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 82%, #000));
-  color: var(--accent-fg);
   border: none;
-  box-shadow: 0 0 12px -3px color-mix(in srgb, var(--accent) 34%, transparent);
-}
-.modelmenu .g-head .count {
-  margin-left: auto;
-  font: 500 11px/1 var(--mono);
-  color: var(--fg-faint);
-}
-.modelmenu .group.active .g-head .name { color: var(--accent); }
-.modelmenu .g-body {
-  padding: 2px 0 8px 28px;
-  display: flex; flex-direction: column; gap: 2px;
 }
 .modelmenu .item {
-  display: flex; align-items: center; gap: 9px;
-  padding: 8px 10px;
-  border-radius: 5px;
   cursor: pointer;
   transition: background 120ms ease;
 }
@@ -889,27 +532,15 @@
 .modelmenu .item .dot {
   width: 7px; height: 7px;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--border) 72%, var(--fg-muted));
   flex: 0 0 auto;
 }
-.modelmenu .item.on .dot {
-  background: var(--accent);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 34%, transparent), 0 0 0 3px oklch(0.89 0.22 130 / 0.15);
-}
 .modelmenu .item .model {
-  flex: 1 1 auto;
-  min-width: 0;
-  font: 500 12.5px/1.3 var(--mono);
-  color: var(--fg-muted);
   word-break: break-all;
 }
-.modelmenu .item.on .model { color: var(--fg); }
 .modelmenu .item.next .badge {
   margin-left: auto;
   color: var(--accent);
 }
-
-.topbar .menu-toggle.active { color: var(--accent); filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 34%, transparent)); }
 
 /* ---------- command palette ---------- */
 .cmdpal-scrim {
@@ -1007,125 +638,29 @@
      !important defeats the per-element font: shorthand declarations (e.g.
      `.composer textarea` at 14.5px) without us having to chase every selector. */
   input, textarea, select { font-size: 16px !important; }
-  /* The transcript is the only vertical scroller in chat.  Lock the
-     document root on mobile so iOS cannot create a second page scroll
-     from the static 100vh body fallback while .app uses 100dvh. */
-  html,
-  body {
-    width: 100%;
-    height: 100%;
-    min-height: 0;
-    max-width: 100vw;
-    overflow: hidden;
-    overscroll-behavior: none;
-  }
-  body {
-    position: fixed;
-    inset: 0;
-  }
-  #root,
-  .app {
-    width: 100%;
-    min-height: 0;
-    max-width: 100vw;
-    overflow: hidden;
-  }
-  .body { grid-template-columns: 1fr !important; }
-  .body .left { display: none; }
-  .body.show-left .left {
-    display: flex;
-    position: fixed;
-    top: 48px; left: 0; bottom: 0;
-    width: min(86vw, 320px);
-    z-index: 30;
-    box-shadow: 0 0 32px oklch(0 0 0 / 0.55);
-  }
   .scrim {
-    position: fixed; inset: 48px 0 0 0;
-    background: var(--scrim);
     backdrop-filter: blur(2px);
-    z-index: 25;
   }
-  .topbar { padding: 0 8px; gap: 6px; }
-  .topbar .meta .cmdk { display: none; }
-  .topbar nav button .k { display: none; }
-  .topbar nav button span:not(.k) { display: none; }
-  .topbar nav button { padding: 0 8px; }
   /* The model id (e.g. "claude-opus-4-7") is ~115px in mono — combined with
      the menu-toggle and nav, the topbar overshoots a 390px viewport.  Drop
      to a chevron-only affordance on mobile; the title=" Switch model" still
      identifies it, and tapping opens the full model menu. */
   .topbar .meta .select .mono { display: none; }
-  .topbar .meta .select { padding: 0 6px; }
-  .transcript { padding: 18px 0 200px; overflow-x: hidden; }
-  .transcript .inner { padding: 0 16px; max-width: 100%; min-width: 0; }
   .composer-dock {
     padding: 70px 14px 16px;
-    bottom: var(--kb-inset, 0px);
   }
-  .mind { grid-template-columns: 1fr; }
   .mind-side {
-    position: absolute;
-    top: 0; left: 0; bottom: 0;
-    width: 100%; max-width: none;
     background: linear-gradient(180deg, var(--bg-1), var(--bg));
-    z-index: 5;
     transform: translateX(-100%);
-    transition: transform 0.18s ease;
   }
-  .mind.show-side .mind-side { transform: translateX(0); }
   .mind.show-side .mind-scrim {
-    display: block;
-    position: absolute;
     top: 0; left: 0; right: 0; bottom: 0;
-    background: var(--scrim);
-    z-index: 4;
-  }
-  .mind-editor { padding: 16px 20px; }
-  .artefact-reader-head {
-    gap: 6px !important;
-    padding: 8px 12px !important;
-    flex-wrap: wrap !important;
-  }
-  .artefact-reader-head .artefact-reader-title {
-    flex: 1 1 180px !important;
-  }
-  .artefact-reader-head .chip {
-    flex: 0 0 auto;
-    max-width: 82px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .artefact-reader-head .artefact-reader-spacer {
-    display: block;
-    flex: 1 0 100% !important;
-    height: 0;
-  }
-  .artefact-reader-head .btn {
-    width: auto;
-    min-width: 0;
-    justify-content: center;
-    padding: 0 9px;
-  }
-  .artefact-reader-head .btn .btn-label {
-    display: inline !important;
-  }
-  .artefact-reader-head .share-menu {
-    flex: 0 0 auto;
-  }
-  .artefact-meta-strip {
-    gap: 6px;
-    padding: 8px 12px;
-    font-size: 11px;
   }
   .artefact-meta-row {
     max-width: 100%;
   }
   .artefact-text-reader { padding: 18px 20px 28px; }
   .artefact-text-preview { font-size: 12.5px; line-height: 1.6; }
-  .body.no-left.no-right .left { display: none; }
-  .kbd { display: none; }
 }
 
 /* mobile menu toggles in topbar */
@@ -1133,10 +668,8 @@
 .topbar .new-chat {
   display: none;
   background: transparent; border: 0;
-  color: var(--fg-muted);
-  width: 32px; height: 32px;
   align-items: center; justify-content: center;
-  cursor: pointer; border-radius: 5px;
+  cursor: pointer;
   transition: background 120ms ease, color 120ms ease;
 }
 .topbar .menu-toggle:hover,
@@ -1147,83 +680,20 @@
 }
 
 /* ---------- empty state ---------- */
-/* The "You're talking to Dyson" cold-open in the centre column.  This is
-   the first thing users see on a blank chat — it gets to be a moment.
-   The aurora behind it does most of the visual lifting; the type just
-   needs to land confidently on top. */
-.empty-state {
-  display: flex; flex-direction: column;
-  gap: 18px;
-  padding: 80px 32px 0;
-  max-width: 620px;
-  margin: 0 auto;
-}
-.empty-state .es-eyebrow {
-  display: inline-flex; align-items: center; gap: 8px;
-  width: max-content;
-  padding: 5px 11px 5px 9px;
-  border-radius: 999px;
-  background: oklch(0.20 0.014 262 / 0.6);
-  border: 1px solid color-mix(in srgb, var(--accent) 46%, transparent);
-  color: var(--accent);
-  font: 500 10.5px/1 var(--mono);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 8%, transparent), 0 0 18px -6px color-mix(in srgb, var(--accent) 34%, transparent);
-}
-.empty-state .es-eyebrow .es-dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 34%, transparent), 0 0 0 3px oklch(0.89 0.22 130 / 0.18);
-  animation: pulse 1.4s ease-in-out infinite;
-}
-.empty-state h1 {
-  font: 600 52px/1.04 var(--sans);
-  letter-spacing: -0.022em;
-  margin: 6px 0 0;
-  color: var(--fg);
-  text-shadow: 0 1px 0 oklch(0 0 0 / 0.35);
-}
 .empty-state h1 em {
-  font-style: normal;
-  background: linear-gradient(110deg,
-    var(--accent) 0%,
-    var(--accent) 32%,
-    var(--accent) 62%,
-    var(--fg-muted) 100%);
   background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
-  color: transparent;
-  filter: drop-shadow(0 0 36px color-mix(in srgb, var(--accent) 34%, transparent))
-          drop-shadow(0 0 12px color-mix(in srgb, var(--accent) 8%, transparent));
-  animation: gradient-shift 9s ease-in-out infinite;
+  filter: none;
+  animation: none;
 }
 @keyframes gradient-shift {
   0%, 100% { background-position: 0% 50%; }
   50%      { background-position: 100% 50%; }
 }
 .empty-state p {
-  font: 400 15.5px/1.6 var(--sans);
-  color: var(--fg-muted);
-  margin: 0;
   display: flex; flex-wrap: wrap; gap: 6px 4px;
   align-items: center;
-}
-.empty-state .es-pill {
-  display: inline-flex; align-items: center;
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: oklch(0.20 0.014 262 / 0.7);
-  border: 1px solid var(--border);
-  color: var(--fg);
-  font-size: 12px;
-}
-.empty-state .es-hint {
-  margin-top: 8px;
-  font: 400 13px/1 var(--sans);
-  color: var(--fg-faint);
-  display: inline-flex; align-items: center; gap: 8px;
 }
 .empty-state .es-hint::before {
   content: "";

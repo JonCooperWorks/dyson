@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const styles = [
-  ['layout.css', readFileSync(join(process.cwd(), 'src/styles/layout.css'), 'utf8')],
   ['swarm-theme.css', readFileSync(join(process.cwd(), 'src/styles/swarm-theme.css'), 'utf8')],
 ];
 

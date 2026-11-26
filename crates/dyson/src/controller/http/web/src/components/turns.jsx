@@ -140,42 +140,6 @@ function composerMobileViewport() {
     && window.matchMedia(COMPOSER_MOBILE_QUERY).matches;
 }
 
-function viewportMeta() {
-  if (typeof document === 'undefined') return null;
-  return document.querySelector('meta[name="viewport"]');
-}
-
-function composerLockedViewportContent(base) {
-  const cleaned = String(base || 'width=device-width, initial-scale=1')
-    .split(',')
-    .map(part => part.trim())
-    .filter(part => part && !/^maximum-scale\s*=/i.test(part) && !/^user-scalable\s*=/i.test(part));
-  cleaned.push('maximum-scale=1');
-  return cleaned.join(', ');
-}
-
-let composerViewportUnlockTimer = null;
-
-function setComposerViewportLocked(locked) {
-  const meta = viewportMeta();
-  if (!meta) return;
-  if (composerViewportUnlockTimer) {
-    clearTimeout(composerViewportUnlockTimer);
-    composerViewportUnlockTimer = null;
-  }
-  const original = meta.dataset.dysonComposerViewport || meta.getAttribute('content') || 'width=device-width, initial-scale=1';
-  meta.dataset.dysonComposerViewport = original;
-  if (locked) {
-    meta.setAttribute('content', composerLockedViewportContent(original));
-    return;
-  }
-  composerViewportUnlockTimer = setTimeout(() => {
-    meta.setAttribute('content', meta.dataset.dysonComposerViewport || original);
-    delete meta.dataset.dysonComposerViewport;
-    composerViewportUnlockTimer = null;
-  }, 250);
-}
-
 function recenterComposerRootScroll() {
   if (!composerMobileViewport() || typeof document === 'undefined') return;
   const schedule = typeof window.requestAnimationFrame === 'function'
@@ -194,12 +158,7 @@ function recenterComposerRootScroll() {
 
 function prepareComposerFocus(el) {
   pinComposerFocusGuard(el);
-  setComposerViewportLocked(true);
   recenterComposerRootScroll();
-}
-
-function releaseComposerFocus() {
-  setComposerViewportLocked(false);
 }
 
 function pinComposerFocusGuard(el) {
@@ -912,7 +871,6 @@ function Composer({
 
   useEffect(() => {
     pinComposerFocusGuard(taRef.current);
-    return () => releaseComposerFocus();
   }, []);
 
   useEffect(() => {
@@ -1057,7 +1015,6 @@ function Composer({
           onTouchStart={e => prepareComposerFocus(e.currentTarget)}
           onPointerDown={e => prepareComposerFocus(e.currentTarget)}
           onFocus={e => prepareComposerFocus(e.currentTarget)}
-          onBlur={releaseComposerFocus}
           onChange={e => {
             setDraft(e.target.value);
             setSlash(e.target.value.trimStart().startsWith('/'));
@@ -1177,4 +1134,4 @@ function fileToBase64(file) {
   });
 }
 
-export { Turn, ThinkingBlock, ToolChip, ToolBlock, FileBlock, ArtefactBlock, ErrorBlock, RunStatusStrip, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64, clipboardImageFiles, slashCommandPreview, composerFocusFontSize, composerLockedViewportContent, pinComposerFocusGuard, prepareComposerFocus, releaseComposerFocus };
+export { Turn, ThinkingBlock, ToolChip, ToolBlock, FileBlock, ArtefactBlock, ErrorBlock, RunStatusStrip, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64, clipboardImageFiles, slashCommandPreview, composerFocusFontSize, pinComposerFocusGuard, prepareComposerFocus };
