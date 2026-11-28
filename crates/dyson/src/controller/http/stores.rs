@@ -77,8 +77,40 @@ impl std::ops::DerefMut for FileStore {
     }
 }
 
+#[derive(Clone)]
+pub(crate) enum FileBody {
+    /// Small file buffered in RAM (`<= 25 MiB`).
+    Memory(Vec<u8>),
+    /// Large file kept on disk and streamed on demand (never slurped into RAM).
+    Disk { path: std::path::PathBuf, len: u64 },
+}
+
+impl FileBody {
+    pub(crate) fn len(&self) -> u64 {
+        match self {
+            Self::Memory(b) => b.len() as u64,
+            Self::Disk { len, .. } => *len,
+        }
+    }
+
+    pub(crate) fn in_memory_bytes(&self) -> usize {
+        match self {
+            Self::Memory(b) => b.len(),
+            Self::Disk { .. } => 0,
+        }
+    }
+
+    pub(crate) fn as_memory(&self) -> Option<&[u8]> {
+        match self {
+            Self::Memory(b) => Some(b.as_slice()),
+            Self::Disk { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct FileEntry {
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) body: FileBody,
     pub(crate) mime: String,
     pub(crate) name: String,
     pub(crate) chat_id: String,
@@ -86,43 +118,63 @@ pub(crate) struct FileEntry {
 
 impl FileStore {
     const MAX_FILES: usize = 64;
-    /// Aggregate byte budget for cached file bodies.
+    /// Aggregate byte budget for cached in-memory file bodies.
     pub(crate) const MAX_BYTES: usize = 128 * 1024 * 1024;
+    /// Threshold above which `load_from_disk` returns a streaming `FileBody::Disk`
+    /// reference rather than slurping the file into RAM.
+    const DISK_STREAM_THRESHOLD: u64 = 25 * 1024 * 1024;
 
     /// Cache an entry under both the count cap and [`Self::MAX_BYTES`],
     /// evicting oldest first.  Shadows `EvictingStore::put` (reached
     /// through `DerefMut`) so every caller gets the byte bound.  Bodies
-    /// are persisted to disk before they are cached, so an entry larger
-    /// than the whole budget is simply not cached.
+    /// are persisted to disk before they are cached, so an in-memory entry
+    /// larger than the whole budget is simply not cached.  Disk-backed
+    /// entries hold only a path + length (`in_memory_bytes() == 0`) and
+    /// stay bounded by `MAX_FILES`.
     pub(crate) fn put(&mut self, id: String, entry: FileEntry) {
-        let incoming = entry.bytes.len();
+        let incoming = entry.body.in_memory_bytes();
         if incoming > Self::MAX_BYTES {
             return;
         }
-        let mut total: usize = self.inner.items.values().map(|e| e.bytes.len()).sum();
+        let mut total: usize = self
+            .inner
+            .items
+            .values()
+            .map(|e| e.body.in_memory_bytes())
+            .sum();
         while total + incoming > Self::MAX_BYTES {
             let Some(old) = self.inner.order.pop_front() else {
                 break;
             };
             if let Some(evicted) = self.inner.items.remove(&old) {
-                total -= evicted.bytes.len();
+                total -= evicted.body.in_memory_bytes();
             }
         }
         self.inner.put(id, entry);
     }
 
-    /// Read a persisted file from disk.  Returns `None` if the entry
+    /// Load a persisted file from disk.  Returns `None` if the entry
     /// is missing or unreadable.  Called by `get_file` when the
-    /// in-memory cache has evicted the id.
+    /// in-memory cache has evicted the id.  Files larger than
+    /// `DISK_STREAM_THRESHOLD` are returned as `FileBody::Disk` so they
+    /// stream without buffering multi-gigabyte bodies in RAM.
     pub(crate) fn load_from_disk(data_dir: &std::path::Path, id: &str) -> Option<FileEntry> {
         let sub = data_dir.join("files");
         let meta_path = sub.join(format!("{id}.meta.json"));
         let bytes_path = sub.join(format!("{id}.bin"));
         let meta_txt = std::fs::read_to_string(&meta_path).ok()?;
         let meta: serde_json::Value = serde_json::from_str(&meta_txt).ok()?;
-        let bytes = std::fs::read(&bytes_path).ok()?;
+        let disk_len = std::fs::metadata(&bytes_path).ok()?.len();
+        let body = if disk_len > Self::DISK_STREAM_THRESHOLD {
+            FileBody::Disk {
+                path: bytes_path,
+                len: disk_len,
+            }
+        } else {
+            FileBody::Memory(std::fs::read(&bytes_path).ok()?)
+        };
         Some(FileEntry {
-            bytes,
+            body,
             mime: meta
                 .get("mime")
                 .and_then(|v| v.as_str())
@@ -137,21 +189,44 @@ impl FileStore {
         })
     }
 
-    /// Write an entry to disk so it survives controller restarts and
+    /// Persist an entry to disk so it survives controller restarts and
     /// is visible from every browser profile pointed at this instance.
-    /// Best-effort: disk errors are logged but don't fail the tool
-    /// call (the in-memory cache still serves the request).
-    pub(crate) fn persist_static(data_dir: &std::path::Path, id: &str, entry: &FileEntry) {
+    ///
+    /// For `FileBody::Memory`, writes `{id}.bin` + `{id}.meta.json`.
+    /// For `FileBody::Disk`, attempts an O(1) hard-link into `{id}.bin`
+    /// (zero extra disk blocks, survives deletion of the original path)
+    /// and returns `Some(bytes_path)` on success.  If hard-linking fails
+    /// (e.g. cross-device), avoids duplicating multi-gigabyte files and
+    /// returns `None` so the caller keeps streaming from the original path.
+    pub(crate) fn persist_static(
+        data_dir: &std::path::Path,
+        id: &str,
+        entry: &FileEntry,
+    ) -> Option<std::path::PathBuf> {
         let sub = data_dir.join("files");
         if let Err(e) = std::fs::create_dir_all(&sub) {
             tracing::warn!(error = %e, "failed to create files dir");
-            return;
+            return None;
         }
         let bytes_path = sub.join(format!("{id}.bin"));
         let meta_path = sub.join(format!("{id}.meta.json"));
-        if let Err(e) = std::fs::write(&bytes_path, &entry.bytes) {
-            tracing::warn!(error = %e, id, "failed to persist file bytes");
-            return;
+        match &entry.body {
+            FileBody::Memory(bytes) => {
+                if let Err(e) = std::fs::write(&bytes_path, bytes) {
+                    tracing::warn!(error = %e, id, "failed to persist file bytes");
+                    return None;
+                }
+            }
+            FileBody::Disk { path, .. } => {
+                if let Err(e) = std::fs::hard_link(path, &bytes_path) {
+                    tracing::debug!(
+                        error = %e,
+                        id,
+                        "could not hard-link large file into store; streaming from source path"
+                    );
+                    return None;
+                }
+            }
         }
         let meta = serde_json::json!({
             "mime": entry.mime,
@@ -161,6 +236,7 @@ impl FileStore {
         if let Err(e) = std::fs::write(&meta_path, meta.to_string()) {
             tracing::warn!(error = %e, id, "failed to persist file metadata");
         }
+        Some(bytes_path)
     }
 }
 
@@ -423,7 +499,7 @@ mod tests {
 
     fn entry(name: &str) -> FileEntry {
         FileEntry {
-            bytes: format!("body-{name}").into_bytes(),
+            body: FileBody::Memory(format!("body-{name}").into_bytes()),
             mime: "text/plain".to_string(),
             name: name.to_string(),
             chat_id: "c1".to_string(),
@@ -469,7 +545,7 @@ mod tests {
         let original = entry("hello.txt");
         FileStore::persist_static(dir.path(), id, &original);
         let loaded = FileStore::load_from_disk(dir.path(), id).expect("loaded");
-        assert_eq!(loaded.bytes, original.bytes);
+        assert_eq!(loaded.body.as_memory(), original.body.as_memory());
         assert_eq!(loaded.mime, original.mime);
         assert_eq!(loaded.name, original.name);
     }
@@ -647,7 +723,7 @@ mod tests {
 
     fn file_entry(len: usize) -> FileEntry {
         FileEntry {
-            bytes: vec![0u8; len],
+            body: FileBody::Memory(vec![0u8; len]),
             mime: "application/octet-stream".into(),
             name: "x.bin".into(),
             chat_id: "c-0001".into(),
@@ -662,7 +738,7 @@ mod tests {
         for n in 0..8 {
             store.put(format!("f{n}"), file_entry(chunk));
         }
-        let total: usize = store.items.values().map(|e| e.bytes.len()).sum();
+        let total: usize = store.items.values().map(|e| e.body.in_memory_bytes()).sum();
         assert!(total <= FileStore::MAX_BYTES, "cached {total} bytes");
         assert!(store.items.contains_key("f7"), "newest must stay cached");
         assert_eq!(store.order.len(), store.items.len());

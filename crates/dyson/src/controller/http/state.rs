@@ -55,7 +55,8 @@ use dyson_core::message::Message;
 use dyson_persistence::ChatHistory;
 
 use super::ClientRegistry;
-use super::stores::{ArtefactEntry, ArtefactStore, FileEntry, FileStore, max_file_id};
+use super::artifact_export::{MAX_EXPORT_FILE_BYTES, MAX_LEGACY_INGEST_BYTES};
+use super::stores::{ArtefactEntry, ArtefactStore, FileBody, FileEntry, FileStore, max_file_id};
 use super::wire::{AuthMode, SseEvent};
 
 /// One pending POST /turn that arrived while a turn was already running.
@@ -588,6 +589,11 @@ pub struct HttpState {
     /// One shared `Arc` so per-turn `SseOutput` can clone a handle
     /// without re-locking the chats map.
     pub(crate) ingest: Arc<std::sync::Mutex<Option<IngestConfig>>>,
+    /// Live Swarm artifact-export target (Swarm origin + `pt_` proxy bearer).
+    /// Populated by `/api/admin/configure` from `proxy_base` / `proxy_token`
+    /// (with origin fallback to `ingest_url`) and used by `send_artefact`
+    /// when a body exceeds the 256 KiB inline threshold.
+    pub(crate) export: Arc<std::sync::Mutex<Option<ExportConfig>>>,
     /// `true` when the HTTP listener terminates TLS itself.  Drives
     /// the `Secure` cookie attribute on the SSE ticket cookie so
     /// browsers refuse to send it over plain HTTP.  Loopback dev
@@ -622,10 +628,52 @@ pub(crate) struct SseTicket {
 /// Read by `SseOutput::send_artefact` on every emit; missing fields
 /// (URL or token empty) signal "ingest disabled" and the push is
 /// skipped.  None on a fresh boot before the first configure-push.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct IngestConfig {
     pub(crate) url: String,
     pub(crate) token: String,
+}
+
+impl std::fmt::Debug for IngestConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IngestConfig")
+            .field("url", &self.url)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Per-process Swarm brokered-export target (`pt_` proxy bearer + Swarm origin).
+///
+/// Populated by `/api/admin/configure` from the existing `proxy_base` and
+/// `proxy_token` fields (falling back to `ingest_url` for the origin when
+/// `proxy_base` is omitted). Read by `SseOutput::send_artefact` for bodies
+/// larger than the 256 KiB inline threshold.
+#[derive(Clone)]
+pub(crate) struct ExportConfig {
+    /// Scheme + host (+ optional non-default port), e.g. `https://swarm.example`.
+    pub(crate) origin: String,
+    /// Per-instance `pt_<32hex>` proxy bearer.
+    pub(crate) token: String,
+}
+
+impl std::fmt::Debug for ExportConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportConfig")
+            .field("origin", &self.origin)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Extract the `scheme://host[:port]` origin from an HTTP(S) URL.
+pub(crate) fn origin_from_url(raw: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(raw.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host().is_none() {
+        return None;
+    }
+    let origin = parsed.origin().ascii_serialization();
+    (origin != "null").then_some(origin)
 }
 
 mod ids;
@@ -750,6 +798,9 @@ impl HttpState {
             // Unset until /api/admin/configure installs Swarm's ingest
             // URL and token; a non-Swarm Dyson never gets one.
             ingest: Arc::new(std::sync::Mutex::new(None)),
+            // Unset until /api/admin/configure installs Swarm's proxy_base
+            // and proxy_token.
+            export: Arc::new(std::sync::Mutex::new(None)),
             quiesced: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -999,18 +1050,22 @@ impl HttpState {
     /// restarts.
     #[doc(hidden)]
     pub fn file_bytes_for_test(&self, id: &str) -> Option<Vec<u8>> {
-        let s = match self.files.lock() {
-            Ok(s) => s,
-            Err(p) => p.into_inner(),
-        };
-        if let Some(entry) = s.items.get(id) {
-            return Some(entry.bytes.clone());
+        let entry = {
+            let s = match self.files.lock() {
+                Ok(s) => s,
+                Err(p) => p.into_inner(),
+            };
+            s.items.get(id).cloned()
         }
-        drop(s);
-        self.data_dir
-            .as_ref()
-            .and_then(|d| FileStore::load_from_disk(d, id))
-            .map(|e| e.bytes)
+        .or_else(|| {
+            self.data_dir
+                .as_ref()
+                .and_then(|d| FileStore::load_from_disk(d, id))
+        })?;
+        match entry.body {
+            FileBody::Memory(b) => Some(b),
+            FileBody::Disk { path, .. } => std::fs::read(path).ok(),
+        }
     }
 
     /// Test hook — returns the `tool_use_id` stamped on an artefact
@@ -1084,12 +1139,22 @@ impl HttpState {
         chat_id: &str,
         path: &std::path::Path,
     ) -> Option<(String, String)> {
-        // Match the 25 MB cap used by `SseOutput::send_file` — keeps a
-        // runaway tool from blowing memory regardless of which controller
-        // is the source of the file.
-        const MAX_FILE_BYTES: u64 = 25 * 1024 * 1024;
-        match std::fs::metadata(path) {
-            Ok(m) if m.len() > MAX_FILE_BYTES => {
+        // Files <= 25 MiB stay buffered in memory (preserving existing behavior).
+        // Larger files stream directly from disk (up to MAX_EXPORT_FILE_BYTES when
+        // Swarm export is configured; otherwise capped at 25 MiB to avoid serving
+        // unbounded local files unexpectedly).
+        let export_enabled = self
+            .export
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        let effective_cap = if export_enabled {
+            MAX_EXPORT_FILE_BYTES
+        } else {
+            MAX_LEGACY_INGEST_BYTES
+        };
+        let file_len = match std::fs::metadata(path) {
+            Ok(m) if m.len() > effective_cap => {
                 tracing::warn!(
                     path = %path.display(),
                     bytes = m.len(),
@@ -1097,7 +1162,7 @@ impl HttpState {
                 );
                 return None;
             }
-            Ok(_) => {}
+            Ok(m) => m.len(),
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -1106,16 +1171,24 @@ impl HttpState {
                 );
                 return None;
             }
-        }
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    path = %path.display(),
-                    "read failed — cannot publish browser artefact",
-                );
-                return None;
+        };
+        let body = if file_len <= MAX_LEGACY_INGEST_BYTES {
+            let bytes = match std::fs::read(path) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "read failed — cannot publish browser artefact",
+                    );
+                    return None;
+                }
+            };
+            FileBody::Memory(bytes)
+        } else {
+            FileBody::Disk {
+                path: path.to_path_buf(),
+                len: file_len,
             }
         };
 
@@ -1126,7 +1199,7 @@ impl HttpState {
             .to_string();
         let mime = super::responses::mime_for_extension(path);
         let inline_image = mime.starts_with("image/");
-        let bytes_len = bytes.len();
+        let bytes_len = body.len();
 
         let file_id = format!(
             "f{}",
@@ -1134,14 +1207,20 @@ impl HttpState {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         let file_url = format!("/api/conversations/{chat_id}/files/{file_id}");
-        let file_entry = FileEntry {
-            bytes,
+        let mut file_entry = FileEntry {
+            body,
             mime: mime.clone(),
             name: name.clone(),
             chat_id: chat_id.to_string(),
         };
-        if let Some(dir) = self.data_dir.as_ref() {
-            FileStore::persist_static(dir, &file_id, &file_entry);
+        if let Some(dir) = self.data_dir.as_ref()
+            && let Some(persisted) = FileStore::persist_static(dir, &file_id, &file_entry)
+            && matches!(file_entry.body, FileBody::Disk { .. })
+        {
+            file_entry.body = FileBody::Disk {
+                path: persisted,
+                len: bytes_len,
+            };
         }
         // Recover from poisoning so a previous panicked holder doesn't
         // permanently stop the cache from accepting new entries (the
@@ -1231,7 +1310,7 @@ impl HttpState {
                 kind,
                 title: name,
                 url: artefact_url,
-                bytes: bytes_len,
+                bytes: usize::try_from(bytes_len).unwrap_or(usize::MAX),
                 metadata: Some(metadata),
                 parent_tool_id: None,
             });

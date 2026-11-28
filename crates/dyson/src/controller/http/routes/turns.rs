@@ -492,6 +492,7 @@ async fn dispatch(
         data_dir.clone(),
     );
     let ingest = Arc::clone(&state.ingest);
+    let export = Arc::clone(&state.export);
 
     if should_title {
         let title_client = client.clone().with_priority(Priority::Background);
@@ -519,6 +520,7 @@ async fn dispatch(
             pending: Some(Arc::clone(&chat_handle)),
             current_tool_use_id: None,
             ingest,
+            export,
         };
 
         // Lazily build the agent on first use.  If a transcript exists
@@ -866,6 +868,7 @@ fn spawn_direct_slash_turn(
     let artefact_id = Arc::clone(&state.artefact_id);
     let data_dir = state.data_dir.clone();
     let ingest = Arc::clone(&state.ingest);
+    let export = Arc::clone(&state.export);
 
     tokio::spawn(async move {
         let mut output = SseOutput {
@@ -880,6 +883,7 @@ fn spawn_direct_slash_turn(
             pending: Some(Arc::clone(&handle)),
             current_tool_use_id: None,
             ingest,
+            export,
         };
 
         let initial_messages = history

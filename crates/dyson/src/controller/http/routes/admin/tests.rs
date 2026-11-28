@@ -713,3 +713,82 @@ fn patch_mcp_servers_in_config(
     )
     .map(|applied| applied.mcp_changed)
 }
+
+#[test]
+fn update_export_config_derives_origin_rotates_token_and_clears() {
+    use super::super::super::state::{ExportConfig, IngestConfig, origin_from_url};
+    use super::super::super::test_helpers::build_state;
+    use crate::auth::DangerousNoAuth;
+    use crate::config::Settings;
+    use crate::controller::ClientRegistry;
+    use std::sync::Arc;
+
+    let settings = Settings::default();
+    let registry = Arc::new(ClientRegistry::new(&settings, None));
+    let state = build_state(settings, registry, None, None, Arc::new(DangerousNoAuth));
+
+    assert_eq!(
+        origin_from_url("https://swarm.test:8443/llm/openrouter").as_deref(),
+        Some("https://swarm.test:8443")
+    );
+    assert_eq!(
+        origin_from_url("https://swarm.test/v1/internal/ingest/artefact").as_deref(),
+        Some("https://swarm.test")
+    );
+
+    // Full configure: proxy_base + proxy_token sets export config.
+    update_export_config(
+        &state,
+        Some("https://swarm.test/llm/openrouter"),
+        Some("pt_11111111111111111111111111111111"),
+        None,
+    );
+    {
+        let cfg = state.export.lock().unwrap().clone().expect("export set");
+        assert_eq!(cfg.origin, "https://swarm.test");
+        assert_eq!(cfg.token, "pt_11111111111111111111111111111111");
+        assert!(!format!("{cfg:?}").contains("pt_1111"));
+    }
+
+    // Token rotation without proxy_base keeps existing origin.
+    update_export_config(
+        &state,
+        None,
+        Some("pt_22222222222222222222222222222222"),
+        None,
+    );
+    {
+        let cfg = state.export.lock().unwrap().clone().expect("export set");
+        assert_eq!(cfg.origin, "https://swarm.test");
+        assert_eq!(cfg.token, "pt_22222222222222222222222222222222");
+    }
+
+    // Explicit clear wipes export config.
+    update_export_config(&state, Some(""), Some(""), None);
+    assert!(state.export.lock().unwrap().is_none());
+
+    // Origin falls back to ingest_url when proxy_base is absent.
+    update_export_config(
+        &state,
+        None,
+        Some("pt_33333333333333333333333333333333"),
+        Some("https://alt-swarm.test/v1/internal/ingest/artefact"),
+    );
+    {
+        let cfg = state.export.lock().unwrap().clone().expect("export set");
+        assert_eq!(cfg.origin, "https://alt-swarm.test");
+        assert_eq!(cfg.token, "pt_33333333333333333333333333333333");
+    }
+
+    // Redaction check on both config structs.
+    let ingest = IngestConfig {
+        url: "https://swarm.test/ingest".into(),
+        token: "it_secret_value".into(),
+    };
+    let export = ExportConfig {
+        origin: "https://swarm.test".into(),
+        token: "pt_secret_value".into(),
+    };
+    assert!(!format!("{ingest:?}").contains("it_secret_value"));
+    assert!(!format!("{export:?}").contains("pt_secret_value"));
+}

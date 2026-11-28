@@ -515,6 +515,18 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         }
         _ => false,
     };
+    // Update the runtime artifact-export target from the existing
+    // `proxy_base` / `proxy_token` fields (falling back to `ingest_url` for
+    // the Swarm origin when `proxy_base` is omitted).  No new configure wire
+    // fields are needed.
+    update_export_config(
+        state,
+        body.proxy_base.as_deref(),
+        body.proxy_token
+            .as_ref()
+            .map(dyson_common::tokens::ProxyToken::as_str),
+        body.ingest_url.as_deref(),
+    );
     let state_sync_patch = runtime_patch(
         body.state_sync_url.as_deref(),
         body.state_sync_token
@@ -618,6 +630,54 @@ fn swarm_runtime_patch<'a>(
         }
         (Some(""), Some(""), Some("")) => Some(SwarmRuntimePatch::Clear),
         _ => None,
+    }
+}
+
+fn update_export_config(
+    state: &HttpState,
+    proxy_base: Option<&str>,
+    proxy_token: Option<&str>,
+    ingest_url: Option<&str>,
+) {
+    use super::super::state::{ExportConfig, origin_from_url};
+
+    if matches!((proxy_base, proxy_token), (Some(""), Some(""))) {
+        let mut slot = state
+            .export
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = None;
+        return;
+    }
+
+    let proxy_origin = proxy_base.and_then(origin_from_url);
+    let ingest_origin = ingest_url.and_then(origin_from_url).or_else(|| {
+        state
+            .ingest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|cfg| origin_from_url(&cfg.url))
+    });
+
+    let mut slot = state
+        .export
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(tok) = proxy_token.filter(|t| !t.is_empty()) {
+        let origin = proxy_origin
+            .or_else(|| slot.as_ref().map(|cfg| cfg.origin.clone()))
+            .or(ingest_origin);
+        if let Some(origin) = origin {
+            *slot = Some(ExportConfig {
+                origin,
+                token: tok.to_string(),
+            });
+        }
+    } else if let Some(origin) = proxy_origin
+        && let Some(existing) = slot.as_mut()
+    {
+        existing.origin = origin;
     }
 }
 

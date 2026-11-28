@@ -550,6 +550,11 @@ pub(crate) fn mime_for_extension(path: &std::path::Path) -> String {
         "wav" => "audio/wav",
         "ogg" | "oga" | "opus" => "audio/ogg",
         "m4a" => "audio/mp4",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "avi" => "video/x-msvideo",
         _ => "application/octet-stream",
     }
     .to_string()

@@ -165,6 +165,7 @@ pub async fn emit_agent_file_for_tool(
         pending: None,
         current_tool_use_id: tool_use_id.map(|s| s.to_string()),
         ingest: Arc::clone(&state.ingest),
+        export: Arc::clone(&state.export),
     };
     out.send_file(path)
 }
@@ -212,6 +213,7 @@ pub async fn emit_agent_artefact(
         pending: None,
         current_tool_use_id: None,
         ingest: Arc::clone(&state.ingest),
+        export: Arc::clone(&state.export),
     };
     out.send_artefact(&artefact)
 }

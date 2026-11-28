@@ -20,9 +20,13 @@ use dyson_core::error::DysonError;
 use dyson_core::message::{ContentBlock, Message};
 
 use super::Output;
+use super::artifact_export::{
+    self, ExportMetadata, ExportRetryPolicy, ExportSource, MAX_EXPORT_FILE_BYTES,
+    MAX_LEGACY_INGEST_BYTES,
+};
 use super::responses::mime_for_extension;
-use super::state::{ChatHandle, IngestConfig};
-use super::stores::{ArtefactEntry, ArtefactStore, FileEntry, FileStore};
+use super::state::{ChatHandle, ExportConfig, IngestConfig};
+use super::stores::{ArtefactEntry, ArtefactStore, FileBody, FileEntry, FileStore};
 use super::wire::{BlockDto, SseEvent};
 
 pub(crate) struct SseOutput {
@@ -72,6 +76,11 @@ pub(crate) struct SseOutput {
     /// singleton — no per-output client allocation; cloned at the
     /// spawn point so the spawned task owns its own handle.
     pub(crate) ingest: Arc<std::sync::Mutex<Option<IngestConfig>>>,
+    /// Live Swarm brokered-export target (`origin` + `pt_` bearer) shared
+    /// with `HttpState`.  Used by `send_artefact` for bodies strictly above
+    /// `INLINE_THRESHOLD_BYTES` (256 KiB) and raises `send_file`'s file cap
+    /// with disk-backed streaming.
+    pub(crate) export: Arc<std::sync::Mutex<Option<ExportConfig>>>,
 }
 
 impl SseOutput {
@@ -188,12 +197,21 @@ impl Output for SseOutput {
     }
 
     fn send_file(&mut self, path: &std::path::Path) -> std::result::Result<(), DysonError> {
-        // Slurp the file (size-capped to keep a runaway tool from
-        // blowing memory), park it in the shared FileStore, emit an
-        // SSE `file` event with the URL the UI fetches.
-        const MAX_FILE_BYTES: u64 = 25 * 1024 * 1024;
-        match std::fs::metadata(path) {
-            Ok(m) if m.len() > MAX_FILE_BYTES => {
+        // Files <= 25 MiB stay buffered in memory (existing behavior).
+        // Larger files stream directly from disk (never slurped into RAM)
+        // when Swarm artifact export is configured, up to MAX_EXPORT_FILE_BYTES
+        // so Swarm enforces the owner's actual per-object limit and quota.
+        let export_enabled = match self.export.lock() {
+            Ok(g) => g.is_some(),
+            Err(p) => p.into_inner().is_some(),
+        };
+        let effective_cap = if export_enabled {
+            MAX_EXPORT_FILE_BYTES
+        } else {
+            MAX_LEGACY_INGEST_BYTES
+        };
+        let file_len = match std::fs::metadata(path) {
+            Ok(m) if m.len() > effective_cap => {
                 self.send(SseEvent::Text {
                     delta: format!(
                         "\n[file: {} too large ({} MB) — not delivered]\n",
@@ -203,21 +221,29 @@ impl Output for SseOutput {
                 });
                 return Ok(());
             }
-            Ok(_) => {}
+            Ok(m) => m.len(),
             Err(e) => {
                 self.send(SseEvent::Text {
                     delta: format!("\n[file: {} — stat failed: {e}]\n", path.display()),
                 });
                 return Ok(());
             }
-        }
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
-                self.send(SseEvent::Text {
-                    delta: format!("\n[file: {} — read failed: {e}]\n", path.display()),
-                });
-                return Ok(());
+        };
+        let body = if file_len <= MAX_LEGACY_INGEST_BYTES {
+            let bytes = match std::fs::read(path) {
+                Ok(b) => b,
+                Err(e) => {
+                    self.send(SseEvent::Text {
+                        delta: format!("\n[file: {} — read failed: {e}]\n", path.display()),
+                    });
+                    return Ok(());
+                }
+            };
+            FileBody::Memory(bytes)
+        } else {
+            FileBody::Disk {
+                path: path.to_path_buf(),
+                len: file_len,
             }
         };
         let name = path
@@ -233,18 +259,26 @@ impl Output for SseOutput {
         );
         let inline_image = mime.starts_with("image/");
         let url = format!("/api/conversations/{}/files/{id}", self.chat_id);
-        let bytes_len = bytes.len();
-        let entry = FileEntry {
-            bytes,
+        let bytes_len = body.len();
+        let mut entry = FileEntry {
+            body,
             mime: mime.clone(),
             name: name.clone(),
             chat_id: self.chat_id.clone(),
         };
         // Write-through to disk first so a controller crash between
         // the memory put and the disk write doesn't leak a dangling
-        // in-memory reference that can't be rehydrated.
-        if let Some(dir) = self.data_dir.as_ref() {
-            FileStore::persist_static(dir, &id, &entry);
+        // in-memory reference that can't be rehydrated.  For disk-backed
+        // large files, persist_static hard-links into `{id}.bin` when
+        // possible so deleting the source path won't break streaming.
+        if let Some(dir) = self.data_dir.as_ref()
+            && let Some(persisted) = FileStore::persist_static(dir, &id, &entry)
+            && matches!(entry.body, FileBody::Disk { .. })
+        {
+            entry.body = FileBody::Disk {
+                path: persisted,
+                len: bytes_len,
+            };
         }
         // std::sync::Mutex — blocking but the critical section is a
         // HashMap insert + a Vec push.  Negligible contention.
@@ -269,10 +303,11 @@ impl Output for SseOutput {
         // markdown reports, scripts, JSON dumps, …) discoverable after
         // the chat scroll has paged the original `file` block away.
         //   * Images: kind=Image, body=URL — reader renders <img>.
-        //   * Markdown: kind=Other, body=UTF-8 text — reader feeds it
-        //     straight into the existing markdown() render path, same
-        //     as a SecurityReview artefact.  We re-read the FileEntry
-        //     from the cache so we don't have to clone `bytes` twice.
+        //   * Markdown (when buffered in memory): kind=Other, body=UTF-8
+        //     text — reader feeds it straight into the existing markdown()
+        //     render path, same as a SecurityReview artefact.  Large
+        //     disk-backed markdown files stay as a URL body to avoid
+        //     reading multi-megabyte files into RAM.
         //   * Everything else: kind=Other, body=URL — reader shows a
         //     download card with name / mime / size.
         let is_markdown = mime == "text/markdown"
@@ -286,14 +321,15 @@ impl Output for SseOutput {
         } else {
             dyson_core::message::ArtefactKind::Other
         };
-        let content = if is_markdown {
+        let content = if is_markdown && bytes_len <= MAX_LEGACY_INGEST_BYTES {
             let s = match self.files.lock() {
                 Ok(s) => s,
                 Err(p) => p.into_inner(),
             };
             s.items
                 .get(&id)
-                .and_then(|e| std::str::from_utf8(&e.bytes).ok().map(|s| s.to_string()))
+                .and_then(|e| e.body.as_memory())
+                .and_then(|b| std::str::from_utf8(b).ok().map(|s| s.to_string()))
                 .unwrap_or_else(|| url.clone())
         } else {
             url.clone()
@@ -382,47 +418,67 @@ impl Output for SseOutput {
             parent_tool_id: None,
         });
 
-        // Phase 3: fire-and-forget push to swarm so artefact bytes
-        // outlive the sandbox and feed the swarm UI's artefact list.
+        // Phase 3 + brokered export: fire-and-forget push to swarm so
+        // artefact bytes outlive the sandbox and feed the swarm UI's
+        // artefact list.  Bodies <= 256 KiB use the existing base64
+        // ingest POST (`it_` bearer); bodies > 256 KiB use Swarm's
+        // brokered export protocol (`pt_` bearer + workload identity),
+        // streaming directly from disk when backed by `FileBody::Disk`.
         // Invariants:
         //   - never blocks the agent's output stream (spawn + return)
         //   - never propagates errors (logged on failure)
-        //   - skips entirely when no ingest config is set (terminal /
-        //     telegram / non-swarm dyson)
-        let cfg_snapshot = match self.ingest.lock() {
+        //   - skips entirely when neither ingest nor export config is set
+        let ingest_snapshot = match self.ingest.lock() {
             Ok(g) => g.clone(),
             Err(p) => p.into_inner().clone(),
         };
-        if let Some(cfg) = cfg_snapshot {
-            // Resolve the body bytes the push should carry.  Three
-            // cases mirror the reader-side branches the SPA already
-            // understands (see send_file at L218):
+        let export_snapshot = match self.export.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        if ingest_snapshot.is_some() || export_snapshot.is_some() {
+            // Resolve the body source the push should carry:
             //   * Image / Other-with-URL-body: `content` is a controller
-            //     file URL — look up the FileEntry's bytes from the
-            //     FileStore so swarm gets the actual binary, not the URL
-            //     string.
+            //     file URL — look up the FileEntry (memory or disk) so
+            //     swarm gets the actual binary (streamed from disk for
+            //     large files), not the URL string.
             //   * Markdown / SecurityReview / other text: `content`
             //     is the inline body — use it directly.
-            //   * Lookup failure: fall back to the content bytes
-            //     (best-effort; the swarm side just sees the URL).
-            let push_bytes: Vec<u8> =
-                if let Some(file_id) = file_id_from_controller_url(&artefact.content) {
-                    let from_store = match self.files.lock() {
-                        Ok(g) => g.items.get(&file_id).map(|e| e.bytes.clone()),
-                        Err(p) => p.into_inner().items.get(&file_id).map(|e| e.bytes.clone()),
+            //   * Lookup failure: fall back to the content bytes.
+            let mut file_entry_name: Option<String> = None;
+            let source: ExportSource = if let Some(file_id) =
+                file_id_from_controller_url(&artefact.content)
+            {
+                let entry = {
+                    let store = match self.files.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
                     };
-                    from_store.unwrap_or_else(|| artefact.content.as_bytes().to_vec())
-                } else {
-                    artefact.content.as_bytes().to_vec()
-                };
+                    store.items.get(&file_id).cloned()
+                }
+                .or_else(|| {
+                    self.data_dir
+                        .as_ref()
+                        .and_then(|dir| FileStore::load_from_disk(dir, &file_id))
+                });
+                match entry {
+                    Some(entry) => {
+                        file_entry_name = Some(entry.name);
+                        match entry.body {
+                            FileBody::Memory(b) => ExportSource::Bytes(hyper::body::Bytes::from(b)),
+                            FileBody::Disk { path, len } => ExportSource::DiskFile { path, len },
+                        }
+                    }
+                    None => ExportSource::Bytes(hyper::body::Bytes::from(
+                        artefact.content.as_bytes().to_vec(),
+                    )),
+                }
+            } else {
+                ExportSource::Bytes(hyper::body::Bytes::from(
+                    artefact.content.as_bytes().to_vec(),
+                ))
+            };
 
-            let chat_id = self.chat_id.clone();
-            let artefact_id = id.clone();
-            // Match the wire string swarm's `IngestRequest.kind`
-            // expects.  `ArtefactKind` has #[serde(rename_all =
-            // "snake_case")] so a serde detour would yield the same,
-            // but the explicit match keeps the wire shape obvious
-            // at the call site.
             let kind = match artefact.kind {
                 dyson_core::message::ArtefactKind::SecurityReview => "security_review",
                 dyson_core::message::ArtefactKind::EvalReport => "eval_report",
@@ -430,52 +486,36 @@ impl Output for SseOutput {
                 dyson_core::message::ArtefactKind::Other => "other",
             }
             .to_owned();
-            let title = artefact.title.clone();
-            let mime = artefact.mime_type.clone();
-            let metadata = artefact.metadata.clone();
+            let filename = artefact
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("file_name"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .or(file_entry_name)
+                .unwrap_or_else(|| artefact.title.clone());
+            let meta = ExportMetadata {
+                chat_id: self.chat_id.clone(),
+                artefact_id: id.clone(),
+                kind,
+                title: artefact.title.clone(),
+                mime: artefact.mime_type.clone(),
+                filename,
+                metadata: artefact.metadata.clone(),
+                created_at,
+            };
+            let notice_tx = Some(self.tx.clone());
             tokio::spawn(async move {
-                use base64::Engine as _;
-                use base64::engine::general_purpose::STANDARD as B64;
-                let payload = serde_json::json!({
-                    "chat_id": chat_id,
-                    "artefact_id": artefact_id,
-                    "kind": kind,
-                    "title": title,
-                    "mime": mime,
-                    "metadata": metadata,
-                    "created_at": created_at as i64,
-                    "body_b64": B64.encode(&push_bytes),
-                });
-                let r = crate::http::client()
-                    .post(&cfg.url)
-                    .bearer_auth(&cfg.token)
-                    .timeout(std::time::Duration::from_secs(10))
-                    .json(&payload)
-                    .send()
-                    .await;
-                match r {
-                    Ok(resp) if resp.status().is_success() => {
-                        tracing::debug!(
-                            artefact = %artefact_id,
-                            chat = %chat_id,
-                            "ingest: pushed",
-                        );
-                    }
-                    Ok(resp) => {
-                        tracing::warn!(
-                            artefact = %artefact_id,
-                            status = %resp.status(),
-                            "ingest: swarm rejected artefact push",
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            artefact = %artefact_id,
-                            error = %e,
-                            "ingest: swarm push failed (network/timeout)",
-                        );
-                    }
-                }
+                artifact_export::push_artefact(
+                    ingest_snapshot,
+                    export_snapshot,
+                    source,
+                    meta,
+                    ExportRetryPolicy::default(),
+                    notice_tx,
+                )
+                .await;
             });
         }
         Ok(())
@@ -564,6 +604,14 @@ mod tests {
         data_dir: Option<PathBuf>,
         ingest: Option<IngestConfig>,
     ) -> (SseOutput, broadcast::Receiver<SseEvent>) {
+        fixture_with_configs(data_dir, ingest, None)
+    }
+
+    fn fixture_with_configs(
+        data_dir: Option<PathBuf>,
+        ingest: Option<IngestConfig>,
+        export: Option<ExportConfig>,
+    ) -> (SseOutput, broadcast::Receiver<SseEvent>) {
         let (tx, rx) = broadcast::channel(64);
         let out = SseOutput {
             chat_id: "c-0001".to_string(),
@@ -577,6 +625,7 @@ mod tests {
             pending: None,
             current_tool_use_id: None,
             ingest: Arc::new(std::sync::Mutex::new(ingest)),
+            export: Arc::new(std::sync::Mutex::new(export)),
         };
         (out, rx)
     }
@@ -968,7 +1017,7 @@ mod tests {
         out.files.lock().unwrap().put(
             "f1".into(),
             FileEntry {
-                bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
+                body: FileBody::Memory(vec![0xDE, 0xAD, 0xBE, 0xEF]),
                 mime: "application/octet-stream".into(),
                 name: "blob.bin".into(),
                 chat_id: "c1".into(),
@@ -1051,5 +1100,176 @@ mod tests {
         // to check here besides "we didn't crash".  Logs land in
         // captured tracing but tests don't gate on them.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    #[test]
+    fn send_file_over_25mib_rejected_when_export_unconfigured() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.mp4");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(MAX_LEGACY_INGEST_BYTES + 1).unwrap();
+        drop(f);
+
+        let (mut out, mut rx) = fixture(Some(dir.path().to_path_buf()));
+        out.send_file(&big).unwrap();
+        match rx.try_recv().unwrap() {
+            SseEvent::Text { delta } => {
+                assert!(delta.contains("too large"), "got: {delta}");
+                assert!(delta.contains("not delivered"), "got: {delta}");
+            }
+            _ => panic!("expected over-cap text event"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_file_over_25mib_streams_from_disk_through_export_protocol() {
+        use http_body_util::{BodyExt, Full};
+        use hyper::body::{Bytes, Incoming};
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+
+        let events: Arc<std::sync::Mutex<Vec<(String, String, usize)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let origin = format!("http://{addr}");
+        let events_for_srv = Arc::clone(&events);
+        let origin_for_srv = origin.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let ev = Arc::clone(&events_for_srv);
+                let orig = origin_for_srv.clone();
+                let svc = hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
+                    let ev = Arc::clone(&ev);
+                    let orig = orig.clone();
+                    async move {
+                        let method = req.method().as_str().to_string();
+                        let path = req.uri().path().to_string();
+                        let bytes = req
+                            .into_body()
+                            .collect()
+                            .await
+                            .map(|c| c.to_bytes())
+                            .unwrap_or_default();
+                        ev.lock().unwrap().push((method, path.clone(), bytes.len()));
+
+                        let resp = if path == "/v1/internal/artifacts/uploads" {
+                            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                            let art_id = parsed["artifact_id"].as_str().unwrap();
+                            let body = serde_json::json!({
+                                "artifact_id": art_id,
+                                "chat_id": "c-0001",
+                                "multipart": false,
+                                "part_size": 128 * 1024 * 1024u64,
+                                "urls": [format!("{orig}/store/part-1")],
+                                "expires_at": 4_102_444_800i64,
+                                "url": format!("{orig}/v1/instances/i1/artifacts/{art_id}/content"),
+                            });
+                            hyper::Response::builder()
+                                .status(201)
+                                .header("content-type", "application/json")
+                                .body(Full::new(Bytes::from(body.to_string())))
+                                .unwrap()
+                        } else if path == "/store/part-1" {
+                            hyper::Response::builder()
+                                .status(200)
+                                .body(Full::new(Bytes::new()))
+                                .unwrap()
+                        } else if path.ends_with("/complete") {
+                            let body = serde_json::json!({
+                                "artifact_id": "a1",
+                                "state": "ready",
+                                "bytes": 1,
+                                "url": format!("{orig}/v1/instances/i1/artifacts/a1/content"),
+                            });
+                            hyper::Response::builder()
+                                .status(200)
+                                .header("content-type", "application/json")
+                                .body(Full::new(Bytes::from(body.to_string())))
+                                .unwrap()
+                        } else {
+                            hyper::Response::builder()
+                                .status(404)
+                                .body(Full::new(Bytes::new()))
+                                .unwrap()
+                        };
+                        Ok::<_, std::convert::Infallible>(resp)
+                    }
+                });
+                tokio::spawn(async move {
+                    let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(stream), svc)
+                        .await;
+                });
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("recording.mp4");
+        let file_len = MAX_LEGACY_INGEST_BYTES + 1024; // 25 MiB + 1 KiB
+        let f = std::fs::File::create(&video).unwrap();
+        f.set_len(file_len).unwrap();
+        drop(f);
+
+        let (mut out, mut rx) = fixture_with_configs(
+            Some(dir.path().to_path_buf()),
+            Some(IngestConfig {
+                url: format!("{origin}/v1/internal/ingest/artefact"),
+                token: "it_test".into(),
+            }),
+            Some(ExportConfig {
+                origin,
+                token: "pt_12345678901234567890123456789012".into(),
+            }),
+        );
+
+        out.send_file(&video).unwrap();
+
+        // File event carries video/mp4 MIME type and FileStore keeps 0 RAM bytes.
+        match rx.try_recv().unwrap() {
+            SseEvent::File {
+                name, mime_type, ..
+            } => {
+                assert_eq!(name, "recording.mp4");
+                assert_eq!(mime_type, "video/mp4");
+            }
+            _ => panic!("expected file event"),
+        }
+        {
+            let store = out.files.lock().unwrap();
+            let entry = store.items.get("f1").expect("disk-backed entry present");
+            assert_eq!(
+                entry.body.in_memory_bytes(),
+                0,
+                "large file must NOT be buffered in RAM"
+            );
+            assert_eq!(entry.body.len(), file_len);
+        }
+
+        // Wait up to 5s for reserve + PUT + complete to finish.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if events.lock().unwrap().len() >= 3 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "export did not complete in 5s; saw {:?}",
+                    events.lock().unwrap()
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let log = events.lock().unwrap().clone();
+        assert_eq!(log[0].0, "POST");
+        assert_eq!(log[0].1, "/v1/internal/artifacts/uploads");
+        assert_eq!(log[1].0, "PUT");
+        assert_eq!(log[1].1, "/store/part-1");
+        assert_eq!(log[1].2 as u64, file_len);
+        assert_eq!(log[2].0, "POST");
+        assert_eq!(log[2].1, "/v1/internal/artifacts/uploads/a1/complete");
     }
 }

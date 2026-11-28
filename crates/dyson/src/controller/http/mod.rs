@@ -46,6 +46,7 @@ use dyson_persistence::ChatHistory;
 use super::{AgentMode, ClientRegistry, Controller, Output, build_agent};
 
 mod artefact_access;
+mod artifact_export;
 mod assets;
 mod config;
 mod output;
